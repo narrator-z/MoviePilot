@@ -83,3 +83,6 @@ docker-compose*
 # Other
 app.ico
 frozen.spec
+
+# Local work memory directory (do not ship into image)
+.workbuddy/

@@ -1756,38 +1756,23 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
     def __set_and_check_auth_level(plugin: Union[schemas.Plugin, Type[Any]],
                                    source: Optional[Union[dict, Type[Any]]] = None) -> bool:
         """
-        设置并检查插件的认证级别
-        :param plugin: 插件对象或包含 auth_level 属性的对象
-        :param source: 可选的字典对象或类对象，可能包含 "level" 或 "auth_level" 键
-        :return: 如果插件的认证级别有效且当前环境的认证级别满足要求，返回 True，否则返回 False
+        设置并校验插件的认证级别。
+
+        为何恒返回 True：按用户决策「插件认证闸门全开」，站点认证状态不再作为插件
+        是否加载的门槛（含 auth_level==99 的特殊密钥校验也已一并放开），故无论当前
+        auth_level 高低，所有插件均可正常加载，本方法恒返回 True。
+
+        保留对 plugin.auth_level 元数据的赋值，以维持插件列表展示所需的级别信息；
+        若未来需恢复按认证级别过滤插件，可在此重新启用「auth_level < plugin.auth_level」
+        的阈值判断（以及 auth_level==99 的 RSA 特殊密钥校验分支）。
         """
-        # 检查并赋值 source 中的 level 或 auth_level
+        # 维持插件元数据中 auth_level 字段（仅用于展示，不再作为加载门槛）
         if source:
             if isinstance(source, dict) and "level" in source:
                 plugin.auth_level = source.get("level")
             elif hasattr(source, "auth_level"):
                 plugin.auth_level = source.auth_level
-        # 如果 source 为空且 plugin 本身没有 auth_level，直接返回 True
-        elif not hasattr(plugin, "auth_level"):
-            return True
-
-        # auth_level 级别说明
-        # 1 - 所有用户可见
-        # 2 - 站点认证用户可见
-        # 3 - 站点&密钥认证可见
-        # 99 - 站点&特殊密钥认证可见
-        # 如果当前站点认证级别大于 1 且插件级别为 99，并存在插件公钥，说明为特殊密钥认证，通过密钥匹配进行认证
-        siteshelper = SitesHelper()
-        if siteshelper.auth_level > 1 and plugin.auth_level == 99 and hasattr(plugin, "plugin_public_key"):
-            plugin_id = plugin.id if isinstance(plugin, schemas.Plugin) else plugin.__name__
-            public_key = plugin.plugin_public_key
-            if public_key:
-                private_key = PluginManager.__get_plugin_private_key(plugin_id)
-                verify = RSAUtils.verify_rsa_keys(public_key=public_key, private_key=private_key)
-                return verify
-        # 如果当前站点认证级别小于插件级别，则返回 False
-        if siteshelper.auth_level < plugin.auth_level:
-            return False
+        # 「插件认证闸门全开」：认证状态不再决定插件是否加载，恒返回 True
         return True
 
     @staticmethod

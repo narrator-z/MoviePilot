@@ -110,19 +110,13 @@ def user_auth():
 
 def check_auth():
     """
-    检查认证状态
+    启动认证检查。
+
+    因站点功能已开放（用户已决定放开站点认证闸门），认证状态不再限制任何功能，
+    故不再推送「功能受限」类告警，本方法保持为无害的空操作以兼容既有调用方。
     """
-    if SitesHelper().auth_level < 2:
-        err_msg = "用户认证失败，站点相关功能将无法使用！"
-        MessageHelper().put(f"注意：{err_msg}", title="用户认证", role="system")
-        CommandChain().post_message(
-            Notification(
-                mtype=NotificationType.Manual,
-                title="MoviePilot用户认证",
-                text=err_msg,
-                link=settings.MP_DOMAIN('#/site')
-            )
-        )
+    # 站点功能已全开，认证状态不再限制功能，故不再推送受限告警
+    return
 
 
 async def stop_modules():

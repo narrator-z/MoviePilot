@@ -109,6 +109,16 @@ RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/
     && if [ "$ARCH" = "aarch64" ]; then SUFFIX="aarch64-linux-gnu"; else SUFFIX="x86_64-linux-gnu"; fi \
     && curl -sL "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/sites.${python_ver}-${SUFFIX}.so" -o "/app/app/helper/sites.${python_ver}-${SUFFIX}.so"
 
+# 注入本地自定义插件（覆盖官方同名插件），例如 jackettextend。
+# 必须放在官方插件拉取（上方 mv -f .../plugins.v2/* /app/app/plugins/）之后执行，
+# 否则本地的 jackettextend 会被官方仓库的同名插件覆盖掉，自定义改动无法生效。
+RUN if [ -d /app/app/custom_plugins ]; then \
+      for d in /app/app/custom_plugins/*/; do \
+        name=$(basename "$d"); \
+        cp -rf "$d" "/app/app/plugins/$name"; \
+      done; \
+    fi
+
 # final 阶段: 安装运行时依赖和配置最终镜像
 FROM prepare_package AS final
 

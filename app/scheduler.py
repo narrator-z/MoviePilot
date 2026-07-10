@@ -1282,7 +1282,11 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
 
     def user_auth(self):
         """
-        用户认证检查
+        定时用户认证检查（每 10 分钟一次）。认证失败是可预期的常态
+        （用户尚未配置或未通过 PT 站点认证），且仅影响少数需要 auth_level>=2 的
+        PT 站点相关功能，其余 MoviePilot 功能不受影响。故单次失败仅以 info 级别记录，
+        避免每 10 分钟刷 error 日志造成告警刷屏、影响观感；仅当累计失败达到最大重试
+        次数后才升级为 error 并停止尝试（优雅降级）。
         """
         if SitesHelper().auth_level >= 2:
             return
@@ -1320,6 +1324,6 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
 
         else:
             self._auth_count += 1
-            logger.error(f"用户认证失败，{msg}，共失败 {self._auth_count} 次")
+            logger.info(f"用户认证失败，{msg}，共失败 {self._auth_count} 次")
             if self._auth_count >= __max_try__:
                 logger.error("用户认证失败次数过多，将不再尝试认证！")

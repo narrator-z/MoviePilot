@@ -10,6 +10,9 @@ on:
 jobs:
   Docker-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
     name: Build Docker Image
     steps:
       - name: Checkout

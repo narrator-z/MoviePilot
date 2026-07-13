@@ -1,5 +1,4 @@
 import sys
-import inspect
 
 from app.helper.redis import RedisHelper, AsyncRedisHelper
 
@@ -24,10 +23,8 @@ from app.helper.resource import ResourceHelper
 from app.helper.message import MessageHelper, stop_message
 from app.helper.server import MoviePilotServerHelper
 from app.db import close_database
-from app.db.systemconfig_oper import SystemConfigOper
 from app.command import CommandChain
 from app.schemas import Notification, NotificationType
-from app.schemas.types import SystemConfigKey
 from app.startup.agent_initializer import init_agent, stop_agent
 
 
@@ -96,29 +93,11 @@ def clear_package_tool_cache():
 
 def user_auth():
     """
-    用户认证检查
+    用户认证检查。
+    站点认证闸门已按用户要求放开（启动期已将 SitesHelper.auth_level 强制为已认证），
+    认证状态不再限制任何功能，故不再尝试真实认证、不再产生相关日志。
     """
-    sites_helper = SitesHelper()
-    if sites_helper.auth_level >= 2:
-        return
-    auth_conf = SystemConfigOper().get(SystemConfigKey.UserSiteAuthParams)
-    if auth_conf:
-        # 仅保留 check_user 声明的参数，过滤插件（如 jackettextend）注入的多余 key（jackett_host 等），
-        # 避免 TypeError: check_user() got an unexpected keyword argument
-        try:
-            _sig = inspect.signature(sites_helper.check_user)
-            _valid = {name for name, p in _sig.parameters.items()
-                      if name != "self" and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
-            auth_conf = {k: v for k, v in auth_conf.items() if k in _valid}
-        except (ValueError, TypeError):
-            pass
-        status, msg = sites_helper.check_user(**auth_conf)
-    else:
-        status, msg = sites_helper.check_user()
-    if status:
-        logger.info(f"{msg} 用户认证成功")
-    else:
-        logger.info(f"用户认证失败，{msg}")
+    return
 
 
 def check_auth():

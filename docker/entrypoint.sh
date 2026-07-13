@@ -3,6 +3,11 @@
 # shellcheck disable=SC2016
 # shellcheck disable=SC2155
 
+# CloakBrowser 浏览器内核缓存目录：优先命中镜像预烘焙路径（/app/.cloakbrowser），
+# 避免每次容器启动都从网络重新下载；如需自定义缓存位置（如挂载持久卷），
+# 可通过环境变量 CLOAKBROWSER_CACHE_DIR 覆盖。
+export CLOAKBROWSER_CACHE_DIR="${CLOAKBROWSER_CACHE_DIR:-/app/.cloakbrowser}"
+
 Green="\033[32m"
 Red="\033[31m"
 Yellow='\033[33m'

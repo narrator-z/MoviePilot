@@ -165,6 +165,11 @@ RUN cp -f /app/docker/nginx.common.conf /etc/nginx/common.conf \
     && echo "zh_CN.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen zh_CN.UTF-8
 
+# 预下载 CloakBrowser 浏览器内核到镜像内（/app/.cloakbrowser），
+# 避免每次容器启动都从网络重新下载；运行时由 entrypoint 设置相同的 CLOAKBROWSER_CACHE_DIR 命中缓存。
+RUN CLOAKBROWSER_CACHE_DIR=/app/.cloakbrowser ${VENV_PATH}/bin/python -m cloakbrowser install \
+    && chown -R moviepilot:moviepilot /app/.cloakbrowser
+
 EXPOSE 3000
 VOLUME [ "${CONFIG_DIR}" ]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD curl -fsS "http://127.0.0.1:${PORT:-3001}/api/v1/system/global?token=moviepilot" >/dev/null || exit 1

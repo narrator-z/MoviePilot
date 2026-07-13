@@ -1,4 +1,5 @@
 import sys
+import inspect
 
 from app.helper.redis import RedisHelper, AsyncRedisHelper
 
@@ -101,7 +102,19 @@ def user_auth():
     if sites_helper.auth_level >= 2:
         return
     auth_conf = SystemConfigOper().get(SystemConfigKey.UserSiteAuthParams)
-    status, msg = sites_helper.check_user(**auth_conf) if auth_conf else sites_helper.check_user()
+    if auth_conf:
+        # 仅保留 check_user 声明的参数，过滤插件（如 jackettextend）注入的多余 key（jackett_host 等），
+        # 避免 TypeError: check_user() got an unexpected keyword argument
+        try:
+            _sig = inspect.signature(sites_helper.check_user)
+            _valid = {name for name, p in _sig.parameters.items()
+                      if name != "self" and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+            auth_conf = {k: v for k, v in auth_conf.items() if k in _valid}
+        except (ValueError, TypeError):
+            pass
+        status, msg = sites_helper.check_user(**auth_conf)
+    else:
+        status, msg = sites_helper.check_user()
     if status:
         logger.info(f"{msg} 用户认证成功")
     else:

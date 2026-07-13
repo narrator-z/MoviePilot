@@ -1304,6 +1304,15 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
         logger.info("用户未认证，正在尝试认证...")
         auth_conf = SystemConfigOper().get(SystemConfigKey.UserSiteAuthParams)
         if auth_conf:
+            # 仅保留 check_user 声明的参数，过滤插件（如 jackettextend）注入的多余 key（jackett_host 等），
+            # 避免 TypeError: check_user() got an unexpected keyword argument
+            try:
+                _sig = inspect.signature(SitesHelper().check_user)
+                _valid = {name for name, p in _sig.parameters.items()
+                          if name != "self" and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+                auth_conf = {k: v for k, v in auth_conf.items() if k in _valid}
+            except (ValueError, TypeError):
+                pass
             status, msg = SitesHelper().check_user(**auth_conf)
         else:
             status, msg = SitesHelper().check_user()

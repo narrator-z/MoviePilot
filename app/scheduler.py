@@ -1288,8 +1288,10 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
         避免每 10 分钟刷 error 日志造成告警刷屏、影响观感；仅当累计失败达到最大重试
         次数后才升级为 error 并停止尝试（优雅降级）。
         """
-        # 站点认证闸门已按用户要求放开，认证状态不再限制功能，定时检查直接跳过
-        return
+        # 站点已认证(auth_level>=2)时无需重复认证、也不产生任何日志，直接跳过；
+        # 生产环境经 modules_initializer.init_modules 将 auth_level 强制为 2，走此分支避免刷屏。
+        if SitesHelper().auth_level >= 2:
+            return
         # 最大重试次数
         __max_try__ = 30
         if self._auth_count > __max_try__:

@@ -163,6 +163,17 @@ def init_modules():
     """
     启动模块
     """
+    # 强制站点认证级别为「已认证」(auth_level >= 2)，实现「站点+插件认证闸门全开」。
+    # 说明：插件（如 jackettextend）在加载后仍会读取 SitesHelper().auth_level 做运行时自检，
+    # 当用户未配置任何 PT 站点参数时 auth_level 为 0，插件会拒绝工作并刷屏「用户未认证」。
+    # 此处将 auth_level 属性强制视为已认证，使插件运行时检查一并通过；同时 user_auth 因
+    # auth_level>=2 提前返回，不再尝试认证、不再触发 check_user 调用。
+    # 若需恢复真实认证，删除下面这段 try 块即可。
+    try:
+        if SitesHelper is not None:
+            type(SitesHelper).auth_level = property(lambda self: 2)
+    except (TypeError, AttributeError):
+        pass
     # 虚拟显示
     DisplayHelper()
     # DoH

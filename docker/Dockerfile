@@ -152,6 +152,19 @@ WORKDIR /app
 COPY --from=prepare_code /app /app
 COPY --from=prepare_code /public /public
 
+# 资源完整性兜底：prepare_code 阶段可能因 GHA 缓存(type=gha)复用缺 .so 的旧层，
+# 导致 final 镜像缺失站点认证扩展、后端 import 即崩(ModuleNotFoundError: app.helper.sites)。
+# 此处强制校验并在缺失时重新下载，确保镜像必然包含认证闸门依赖的 sites.*.so 与 user.sites.v2.bin。
+RUN python_ver=$(python3 -c 'import sys; print(f"cpython-{sys.version_info.major}{sys.version_info.minor}")') \
+    && ARCH=$(uname -m) \
+    && SUFFIX=$([ "$ARCH" = "aarch64" ] && echo aarch64-linux-gnu || echo x86_64-linux-gnu) \
+    && BASE="https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2" \
+    && SO="/app/app/helper/sites.${python_ver}-${SUFFIX}.so" \
+    && BIN="/app/app/helper/user.sites.v2.bin" \
+    && if [ ! -s "$SO" ]; then echo "[resource-guard] re-download sites.so"; curl -fsSL "${BASE}/sites.${python_ver}-${SUFFIX}.so" -o "$SO"; fi \
+    && if [ ! -s "$BIN" ]; then echo "[resource-guard] re-download user.sites.v2.bin"; curl -fsSL "${BASE}/user.sites.v2.bin" -o "$BIN"; fi \
+    && test -s "$SO" && test -s "$BIN" && echo "[resource-guard] OK so=$(stat -c%s "$SO") bin=$(stat -c%s "$BIN")"
+
 RUN cp -f /app/docker/nginx.common.conf /etc/nginx/common.conf \
     && cp -f /app/docker/nginx.template.conf /etc/nginx/nginx.template.conf \
     && cp -f /app/docker/update.sh /usr/local/bin/mp_update.sh \

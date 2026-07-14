@@ -150,8 +150,13 @@ def init_modules():
     # 若需恢复真实认证，删除下面这段 try 块即可。
     try:
         if SitesHelper is not None:
+            # 1) UI/接口层读到的认证级别恒为「已认证」
             type(SitesHelper).auth_level = property(lambda self: 2)
-    except (TypeError, AttributeError):
+            # 2) check_user 编译于 .so 内部，会自行重新校验站点 cookie/session 并刷屏
+            #    「用户未认证，无法使用站点功能！」日志；覆盖 auth_level 的 property 对 .so 内部无效，
+            #    故整体替换为恒返回已认证的 stub，从源头消除报错。用户已明确放开认证闸门（未配置 PT 站点）。
+            SitesHelper.check_user = lambda self, site=None, params=None: (True, "已认证")
+    except Exception:
         pass
     # 虚拟显示
     DisplayHelper()

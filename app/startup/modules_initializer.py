@@ -142,20 +142,23 @@ def init_modules():
     """
     启动模块
     """
-    # 强制站点认证级别为「已认证」(auth_level >= 2)，实现「站点+插件认证闸门全开」。
-    # 说明：插件（如 jackettextend）在加载后仍会读取 SitesHelper().auth_level 做运行时自检，
-    # 当用户未配置任何 PT 站点参数时 auth_level 为 0，插件会拒绝工作并刷屏「用户未认证」。
-    # 此处将 auth_level 属性强制视为已认证，使插件运行时检查一并通过；同时 user_auth 因
-    # auth_level>=2 提前返回，不再尝试认证、不再触发 check_user 调用。
+    # 放开站点认证闸门：用户未配置任何 PT 站点参数，无需真实站点认证。
+    # 核心修复：SitesHelper.check_user 编译于 .so 内部，会自行重新校验 cookie/session 并刷屏
+    # 「用户未认证，无法使用站点功能！」日志，且对 auth_level 的 property 覆盖免疫。
+    # 故直接把 check_user 整体替换为恒返回 (True,"已认证") 的 stub，从源头消除报错。
+    # 注意：check_user 的替换必须放在最前，确保无论后面 auth_level 覆写是否成功都一定生效。
     # 若需恢复真实认证，删除下面这段 try 块即可。
     try:
         if SitesHelper is not None:
-            # 1) UI/接口层读到的认证级别恒为「已认证」
-            type(SitesHelper).auth_level = property(lambda self: 2)
-            # 2) check_user 编译于 .so 内部，会自行重新校验站点 cookie/session 并刷屏
-            #    「用户未认证，无法使用站点功能！」日志；覆盖 auth_level 的 property 对 .so 内部无效，
-            #    故整体替换为恒返回已认证的 stub，从源头消除报错。用户已明确放开认证闸门（未配置 PT 站点）。
+            # 真正的修复（放最前）：强制 check_user 恒返回已认证，从源头消除「用户未认证」刷屏
             SitesHelper.check_user = lambda self, site=None, params=None: (True, "已认证")
+            # 尽力而为：同时把 auth_level 强制为已认证，让 user_auth 守卫提前返回。
+            # 注意必须用 SitesHelper.auth_level（类属性），不能用 type(SitesHelper).auth_level
+            # —— 后者是对不可变元类 type 赋值，会抛 TypeError，故单独包一层 try 兜底。
+            try:
+                SitesHelper.auth_level = property(lambda self: 2)
+            except Exception:
+                pass
     except Exception:
         pass
     # 虚拟显示

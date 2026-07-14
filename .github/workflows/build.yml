@@ -103,6 +103,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           cache-from: type=gha,scope=moviepilot-docker,version=2
           cache-to: type=gha,scope=moviepilot-docker,mode=max,version=2
 

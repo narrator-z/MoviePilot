@@ -95,26 +95,30 @@ FROM prepare_package AS prepare_code
 
 WORKDIR /app
 
+ARG GITHUB_TOKEN
+
 COPY . .
 RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
-    && curl -sL "https://github.com/jxxghp/MoviePilot-Frontend/releases/download/${FRONTEND_VERSION}/dist.zip" | busybox unzip -d / - \
+    && GH_AUTH=$([ -n "${GITHUB_TOKEN:-}" ] && echo "-H Authorization: Bearer ${GITHUB_TOKEN}" || echo "") \
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors $GH_AUTH "https://github.com/jxxghp/MoviePilot-Frontend/releases/download/${FRONTEND_VERSION}/dist.zip" | busybox unzip -d / - \
     && mv /dist /public \
-    && curl -sL "https://github.com/jxxghp/MoviePilot-Plugins/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors $GH_AUTH "https://github.com/jxxghp/MoviePilot-Plugins/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \
     && mv -f /tmp/MoviePilot-Plugins-main/plugins.v2/* /app/app/plugins/ \
     && cat /tmp/MoviePilot-Plugins-main/package.json | jq -r 'to_entries[] | select(.value.v2 == true) | .key' | awk '{print tolower($0)}' | \
     while read -r i; do if [ ! -d "/app/app/plugins/$i" ]; then mv "/tmp/MoviePilot-Plugins-main/plugins/$i" "/app/app/plugins/"; else echo "跳过 $i"; fi; done \
-    && curl -sL "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/user.sites.v2.bin" -o /app/app/helper/user.sites.v2.bin \
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors $GH_AUTH "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/user.sites.v2.bin" -o /app/app/helper/user.sites.v2.bin \
     && python_ver=$(python3 -c 'import sys; print(f"cpython-{sys.version_info.major}{sys.version_info.minor}")') \
     && ARCH=$(uname -m) \
     && if [ "$ARCH" = "aarch64" ]; then SUFFIX="aarch64-linux-gnu"; else SUFFIX="x86_64-linux-gnu"; fi \
-    && curl -sL "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/sites.${python_ver}-${SUFFIX}.so" -o "/app/app/helper/sites.${python_ver}-${SUFFIX}.so"
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors $GH_AUTH "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/sites.${python_ver}-${SUFFIX}.so" -o "/app/app/helper/sites.${python_ver}-${SUFFIX}.so"
 
 # 叠加拉取用户自定义插件仓库（narrator-z/MoviePilot-PluginsV2），覆盖官方同名插件，
 # 以便镜像直接使用该仓库中最新的 jackettextend / prowlarrextend 等插件。
 # 置于官方插件拉取之后执行，确保用户仓库版本优先于官方同名插件。
 # 采用「叠加」而非「替换」：官方 jxxghp/MoviePilot-Plugins 已经提供了完整的插件生态打底，
 # 这里仅用用户仓库中的同名插件覆盖，官方其他插件（非同名插件）得以完整保留。
-RUN curl -sL "https://github.com/narrator-z/MoviePilot-PluginsV2/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \
+RUN GH_AUTH=$([ -n "${GITHUB_TOKEN:-}" ] && echo "-H Authorization: Bearer ${GITHUB_TOKEN}" || echo "") \
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors $GH_AUTH "https://github.com/narrator-z/MoviePilot-PluginsV2/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \
     && mv -f /tmp/MoviePilot-PluginsV2-main/plugins.v2/* /app/app/plugins/ \
     && rm -rf /tmp/MoviePilot-PluginsV2-main
 

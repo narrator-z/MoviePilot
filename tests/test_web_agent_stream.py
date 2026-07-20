@@ -183,7 +183,8 @@ def test_build_web_agent_command_items_returns_slash_commands():
 
 def test_build_web_agent_command_items_includes_sites_command():
     """WebAgent 命令建议应包含内建站点管理命令。"""
-    commands = _build_web_agent_command_items()
+    with patch("app.command.Scheduler"), patch("app.command.ThreadHelper"):
+        commands = _build_web_agent_command_items()
 
     assert any(command["command"] == "/sites" for command in commands)
 
@@ -293,6 +294,21 @@ def test_web_agent_admin_context_uses_current_user_id():
 
         assert asyncio.run(agent._is_system_admin_context()) is True
         user_oper.return_value.async_get_by_id.assert_awaited_once_with(7)
+
+
+def test_web_agent_reused_for_background_task_disables_streaming():
+    """Web Agent 被后台任务复用且渠道已清空时应改用非流式广播。"""
+    agent = _WebAgentMoviePilotAgent(
+        session_id="web-agent:scheduled-session",
+        user_id="7",
+        channel=None,
+        source=None,
+        username="admin",
+        replay_mode=ReplyMode.DISPATCH,
+    )
+
+    assert agent.is_background is True
+    assert agent._should_stream() is False
 
 
 def test_web_agent_channel_supports_streaming_and_attachments():

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core.metainfo import MetaInfo, MetaInfoPath, find_metainfo
+from app.core.meta.metaanime import MetaAnime
 from app.helper.torrent import TorrentHelper
 from app.schemas.types import MediaType
 from tests.cases.meta import meta_cases
@@ -169,6 +170,91 @@ def test_python_metainfo_fallback_preserves_xxx_movie_title():
     assert meta.audio_encode == "DDP 5.1"
 
 
+def test_python_subtitle_episode_range_fin_with_chinese_season():
+    """Python 兜底解析应识别副标题中 [01-26Fin] 格式的集数范围（#6103）。"""
+    with patch("app.core.metainfo.rust_accel.parse_metainfo", return_value=None):
+        meta = MetaInfo(
+            title="JoJos Bizarre Adventure S01 2012 1080i BluRay x264 FLAC 2.0-AnimeF@ADE",
+            subtitle="JOJO的奇妙冒险 第一季 / JoJo's Bizarre Adventure [01-26Fin] [简繁字幕]",
+        )
+
+    assert meta.type == MediaType.TV
+    assert meta.begin_season == 1
+    assert meta.begin_episode == 1
+    assert meta.end_episode == 26
+    assert meta.total_episode == 26
+
+
+def test_subtitle_episode_range_fin_with_default_parser():
+    """默认解析路径应识别副标题中 [01-26Fin] 格式的集数范围（#6103）。"""
+    meta = MetaInfo(
+        title="JoJos Bizarre Adventure S01 2012 1080i BluRay x264 FLAC 2.0-AnimeF@ADE",
+        subtitle="JOJO的奇妙冒险 第一季 / JoJo's Bizarre Adventure [01-26Fin] [简繁字幕]",
+    )
+
+    assert meta.type == MediaType.TV
+    assert meta.begin_season == 1
+    assert meta.begin_episode == 1
+    assert meta.end_episode == 26
+    assert meta.total_episode == 26
+
+
+def test_python_subtitle_episode_range_fin_without_chinese_marker():
+    """副标题无中文季集标记时也应识别 [01-38Fin] 集数范围。"""
+    with patch("app.core.metainfo.rust_accel.parse_metainfo", return_value=None):
+        meta = MetaInfo(
+            title="Some Show S01 2022 1080p WEB-DL H264-GRP",
+            subtitle="Some Show [01-38Fin]",
+        )
+
+    assert meta.begin_episode == 1
+    assert meta.end_episode == 38
+    assert meta.total_episode == 38
+
+
+def test_python_subtitle_episode_range_end_variant():
+    """END/完结 等完结标记变体同样应识别为集数范围。"""
+    with patch("app.core.metainfo.rust_accel.parse_metainfo", return_value=None):
+        meta_end = MetaInfo(
+            title="Some Show S01 2022 1080p WEB-DL H264-GRP",
+            subtitle="Some Show 01-24 END",
+        )
+        meta_cn = MetaInfo(
+            title="Some Show S01 2022 1080p WEB-DL H264-GRP",
+            subtitle="某剧 01-12完结",
+        )
+
+    assert meta_end.begin_episode == 1
+    assert meta_end.end_episode == 24
+    assert meta_cn.begin_episode == 1
+    assert meta_cn.end_episode == 12
+
+
+def test_python_subtitle_year_range_not_treated_as_episodes():
+    """年份范围（如 2019-2020）不得误识别为集数。"""
+    with patch("app.core.metainfo.rust_accel.parse_metainfo", return_value=None):
+        meta = MetaInfo(
+            title="Some Collection 2020 1080p WEB-DL H264-GRP",
+            subtitle="A Collection [2019-2020Fin]",
+        )
+
+    assert meta.begin_episode is None
+    assert meta.total_episode == 0
+
+
+def test_python_subtitle_episode_range_fin_rejects_numeric_suffix():
+    """Python 兜底解析不得把带数字后缀的完结范围截断识别为集数。"""
+    for subtitle in ("Some Show [01-26Fin]2", "Some Show 01-26Fin 2"):
+        with patch("app.core.metainfo.rust_accel.parse_metainfo", return_value=None):
+            meta = MetaInfo(
+                title="Some Show S01 2022 1080p WEB-DL H264-GRP",
+                subtitle=subtitle,
+            )
+
+        assert meta.begin_episode is None
+        assert meta.total_episode == 0
+
+
 def test_custom_words_replace_then_episode_offset():
     """测试复杂识别词仍按先替换、后集数偏移的顺序处理。"""
     custom_words = ["旧名 => 新名 && 第 <> 集 >> EP+1"]
@@ -270,6 +356,60 @@ def test_video_bit_extracted_for_video_title():
     meta = MetaInfo(title="The 355 2022 BluRay 1080p DTS-HD MA5.1 X265.10bit-BeiTai")
     assert meta.video_encode == "x265 10bit"
     assert meta.video_bit == "10bit"
+
+
+def test_special_season_zero_enables_whole_season_resource_parsing():
+    """只有 S00、没有集号的整季标题仍应识别后续编码信息。"""
+    with patch("app.core.metainfo.rust_accel.parse_metainfo", return_value=None):
+        meta = MetaInfo(title="Demo Show S00 X265 AAC")
+
+    assert meta.begin_season == 0
+    assert meta.video_encode == "x265"
+    assert meta.audio_encode == "AAC"
+
+
+def test_anime_parser_preserves_numeric_special_season_zero():
+    """第三方动漫解析器返回整数 0 时也应保留特别季。"""
+    parsed = {
+        "anime_title": "Demo Anime",
+        "anime_season": 0,
+        "episode_number": "1",
+    }
+    with patch("app.core.meta.metaanime.anitopy.parse", return_value=parsed):
+        meta = MetaAnime(title="Demo Anime S00E01")
+
+    assert meta.begin_season == 0
+    assert meta.begin_episode == 1
+    assert meta.type == MediaType.TV
+
+    parsed["anime_season"] = [0, "1"]
+    with patch("app.core.meta.metaanime.anitopy.parse", return_value=parsed):
+        ranged_meta = MetaAnime(title="Demo Anime S00-S01")
+
+    assert ranged_meta.begin_season == 0
+    assert ranged_meta.end_season == 1
+
+
+def test_anime_parser_ignores_empty_and_invalid_season_values():
+    """第三方动漫季号的空值和非法列表项应按未指定处理且不得抛错。"""
+    empty = {
+        "anime_title": "Demo Anime",
+        "anime_season": "",
+        "episode_number": "1",
+    }
+    invalid_list = {
+        "anime_title": "Demo Anime",
+        "anime_season": ["", "invalid"],
+        "episode_number": "1",
+    }
+
+    with patch("app.core.meta.metaanime.anitopy.parse", return_value=empty):
+        empty_meta = MetaAnime(title="Demo Anime E01")
+    with patch("app.core.meta.metaanime.anitopy.parse", return_value=invalid_list):
+        invalid_meta = MetaAnime(title="Demo Anime E01")
+
+    assert empty_meta.begin_season is None
+    assert invalid_meta.begin_season is None
 
 
 def test_hdr_vivid_effect_extracted_for_video_title():

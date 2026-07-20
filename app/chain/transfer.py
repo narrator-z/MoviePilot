@@ -1240,17 +1240,33 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             history_exists: bool = True,
     ):
         """
-        当同一种子的任务都已结束时，回写下载器已整理标签，并确保 downloadfiles 有记录。
+        当同一种子的任务都已结束且种子已完成下载时，回写下载器已整理标签，并确保 downloadfiles 有记录。
         """
         if (
-                history_exists
-                and download_hash
-                and self.jobview.is_torrent_done(download_hash)
+                not history_exists
+                or not download_hash
+                or not self.jobview.is_torrent_done(download_hash)
         ):
             self.transfer_completed(hashs=download_hash, downloader=downloader)
             # 磁力链接等无法在添加时解析出文件清单的，在整理完成阶段兜底补写 downloadfiles，
             # 保证“订阅 → 文件统计”的“下载”列能正常统计历史下载。
             self._ensure_download_files_for_transfer(download_hash, downloader)
+
+    def __is_torrent_download_completed(
+            self, download_hash: str, downloader: Optional[str]
+    ) -> bool:
+        """
+        检查种子在下载器中是否已完成下载；查询不到或查询失败时视为未完成，
+        留待下载器定时轮询兜底，避免误打已整理标签。
+        """
+        try:
+            torrents = self.list_torrents(hashs=download_hash, downloader=downloader)
+            if not torrents:
+                return False
+            return all((torrent.progress or 0) >= 100 for torrent in torrents)
+        except Exception as e:
+            logger.error(f"检查种子 {download_hash} 下载进度失败：{e}")
+            return False
 
     def _ensure_download_files_for_transfer(
             self,

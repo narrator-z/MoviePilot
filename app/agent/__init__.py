@@ -58,6 +58,7 @@ from app.chain import ChainBase
 from app.core.config import settings
 from app.core.event import eventmanager
 from app.db.agentchat_oper import AgentChatOper
+from app.db.agenttask_oper import AgentTaskOper
 from app.db.user_oper import UserOper
 from app.log import logger
 from app.schemas import AgentLLMProviderEventData, AgentTokensUsageEventData, Notification, NotificationType
@@ -1627,20 +1628,21 @@ class MoviePilotAgent:
             if not streaming_stopped:
                 await self.stream_handler.stop_streaming()
 
-    async def send_agent_message(self, message: str, title: str = ""):
+    async def send_agent_message(self, message: str, title: str = "") -> None:
         """
-        通过原渠道发送消息给用户
+        发送 Agent 消息；后台任务不绑定原渠道，交由通知链广播。
         """
+        broadcast = self.is_background
         self._save_assistant_display_message_once(message)
         await AgentChain().async_post_message(
             Notification(
-                channel=self.channel,
-                source=self.source,
+                channel=None if broadcast else self.channel,
+                source=None if broadcast else self.source,
                 mtype=NotificationType.Agent,
-                userid=self.user_id,
-                username=self.username,
-                original_message_id=self.original_message_id,
-                original_chat_id=self.original_chat_id,
+                userid=None if broadcast else self.user_id,
+                username=self.username or (settings.SUPERUSER if broadcast else None),
+                original_message_id=None if broadcast else self.original_message_id,
+                original_chat_id=None if broadcast else self.original_chat_id,
                 title=title,
                 text=message,
                 save_history=False,
@@ -2000,12 +2002,11 @@ class AgentManager:
         else:
             agent = self.active_agents[session_id]
             agent.user_id = task.user_id
-            if task.channel:
-                agent.channel = task.channel
-            if task.source:
-                agent.source = task.source
-            if task.username:
-                agent.username = task.username
+            # 每条队列任务都携带完整消息上下文，None 也必须覆盖，避免后台任务
+            # 复用会话 Agent 时继续沿用上一条入站消息的渠道。
+            agent.channel = task.channel
+            agent.source = task.source
+            agent.username = task.username
             agent.original_message_id = task.original_message_id
             agent.original_chat_id = task.original_chat_id
             agent.reply_mode = task.reply_mode
@@ -2122,6 +2123,89 @@ class AgentManager:
         finally:
             await agent.cleanup()
             memory_manager.clear_memory(session_id, user_id)
+
+    async def execute_scheduled_task(self, task_id: int) -> tuple[bool, str]:
+        """
+        按持久化上下文唤醒 Agent 执行自主定时任务并向用户回传结果。
+
+        :param task_id: Agent 定时任务 ID
+        :return: 执行是否成功及结果摘要
+        """
+        if not settings.AI_AGENT_ENABLE:
+            return False, "AI Agent 未启用"
+        oper = AgentTaskOper()
+        task = oper.get(task_id)
+        if not task or not task.enabled:
+            return False, "Agent 定时任务不存在或已停用"
+        if not oper.mark_running(task_id):
+            return False, "Agent 定时任务当前不可执行"
+
+        task_message = (
+            f"定时任务已按计划触发。请立即完成下面的任务，不要只确认收到，"
+            f"也不要重复创建同一个定时任务。\n\n"
+            f"任务名称：{task.name}\n"
+            f"任务内容：{task.content}\n\n"
+            "完成后请直接向用户报告本次执行结果；如果无法完成，请说明原因。"
+        )
+        success = True
+        result = ""
+        notification_username = task.username or settings.SUPERUSER
+        try:
+            result = await self.process_message(
+                session_id=task.session_id,
+                user_id=task.user_id,
+                message=task_message,
+                channel=None,
+                source=None,
+                username=notification_username,
+                original_chat_id=None,
+                reply_mode=ReplyMode.DISPATCH,
+                allow_message_tools=True,
+                wait_for_completion=True,
+            )
+            result_text = str(result or "").strip()
+            success = bool(result_text) and not result_text.startswith(
+                (AGENT_EXECUTION_ERROR_PREFIX, "处理消息时发生错误")
+            )
+            if not result_text:
+                result = "定时任务已执行，但 Agent 未返回结果"
+                await AgentChain().async_post_message(
+                    Notification(
+                        mtype=NotificationType.Agent,
+                        username=notification_username,
+                        title=f"定时任务：{task.name}",
+                        text=result,
+                        save_history=False,
+                    )
+                )
+        except Exception as err:
+            success = False
+            result = f"Agent 定时任务执行失败：{str(err)}"
+            logger.error(f"Agent 定时任务 {task_id} 执行失败: {str(err)}")
+            await AgentChain().async_post_message(
+                Notification(
+                    mtype=NotificationType.Agent,
+                    username=notification_username,
+                    title=f"定时任务执行失败：{task.name}",
+                    text=result,
+                    save_history=False,
+                )
+            )
+        finally:
+            current_task = oper.get(task_id)
+            oper.finish(
+                task_id=task_id,
+                success=success,
+                result=str(result or ""),
+                disable=bool(
+                    current_task
+                    and task.trigger_type == "date"
+                    and current_task.trigger_type == task.trigger_type
+                    and current_task.run_at == task.run_at
+                ),
+            )
+
+        return success, str(result or "任务执行完成")
 
     @staticmethod
     def _build_heartbeat_prompt() -> str:

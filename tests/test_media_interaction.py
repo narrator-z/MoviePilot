@@ -20,6 +20,16 @@ def clear_media_interactions():
     plugin_input_interaction_manager.clear()
 
 
+@pytest.fixture(autouse=True)
+def mock_default_media_search():
+    """未显式验证搜索结果的消息路由用例不访问真实媒体元数据服务"""
+    with patch(
+        "app.chain.media.MediaChain.search",
+        side_effect=lambda title: (_build_meta(title), []),
+    ):
+        yield
+
+
 def _build_meta(name: str) -> MetaBase:
     """构造媒体识别元数据。"""
     meta = MetaBase(name)
@@ -126,6 +136,24 @@ def _build_single_download_dir() -> list[TransferDirectoryConf]:
             priority=1,
         ),
     ]
+
+
+def test_rebuild_download_scope_keeps_special_season_zero():
+    """重新下载特别季时只能重建季 0 范围，不能扩展为整部剧的所有季。"""
+    meta = _build_meta("测试剧")
+    meta.begin_season = 0
+    mediainfo = MediaInfo(
+        type=MediaType.TV,
+        title="测试剧",
+        year="2026",
+        tmdb_id=1,
+        seasons={0: [1, 2], 1: [1, 2, 3]},
+    )
+
+    no_exists = MediaInteractionChain._get_noexits_info(meta, mediainfo)
+
+    assert list(no_exists[1]) == [0]
+    assert no_exists[1][0].total_episode == 2
 
 
 def test_message_routes_text_reply_to_media_interaction_before_ai():

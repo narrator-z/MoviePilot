@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union, Any, List, Generator
+from typing import Optional, Tuple, Union, Any, List, Generator, Dict
 
 from app import schemas
 from app.core.context import MediaInfo
@@ -44,13 +44,14 @@ class PlexModule(_ModuleBase, _MediaServerBase[Plex]):
         """
         return 3
 
-    def stop(self):
-        """
-        停止模块服务
-        """
+    def stop(self) -> None:
+        """停止模块"""
         for server in self.get_instances().values():
-            if server:
-                server.close()
+            try:
+                if server:
+                    server.close()
+            except Exception as err:
+                logger.error(f"停止Plex模块实例失败：{err}")
 
     def test(self) -> Optional[Tuple[bool, str]]:
         """
@@ -348,3 +349,18 @@ class PlexModule(_ModuleBase, _MediaServerBase[Plex]):
         if not server_obj:
             return None
         return server_obj.get_play_url(item_id)
+
+    def mediaserver_season_episode_ids(self, server: str, item_id: Union[str, int],
+                                       season: int) -> Optional[Dict[int, str]]:
+        """
+        获取指定季的集号到条目 ID 映射
+
+        :param server: Plex 媒体服务器名称
+        :param item_id: 剧集在 Plex 中的条目 ID / key
+        :param season: 季号
+        :return: 集号到条目 ID 的映射，服务器不可用或无数据时返回 None
+        """
+        server_obj: Plex = self.get_instance(server)
+        if not server_obj:
+            return None
+        return server_obj.get_season_episode_ids(str(item_id), season)

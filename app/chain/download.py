@@ -142,9 +142,23 @@ class DownloadChain(ChainBase):
                 logger.warn(str(err))
                 return None, None, str(err)
             if re.match(r"^[A-Za-z]:/", validated_save_path):
-                return storage, Path(validated_save_path), ""
-            file_uri = FileURI.from_uri(validated_save_path)
-            return file_uri.storage or storage, Path(file_uri.path), ""
+                target_dir = Path(validated_save_path)
+            else:
+                file_uri = FileURI.from_uri(validated_save_path)
+                storage = file_uri.storage or storage
+                target_dir = Path(file_uri.path)
+
+            dir_info = DirectoryHelper().get_download_dir_by_save_path(
+                media=media_info,
+                save_path=validated_save_path,
+            )
+            if dir_info:
+                target_dir = DownloadChain._append_download_classification(
+                    root_path=target_dir,
+                    dir_info=dir_info,
+                    media_info=media_info,
+                )
+            return storage, target_dir, ""
 
         dir_info = DirectoryHelper().get_dir(media_info, include_unsorted=True)
         storage = dir_info.storage if dir_info else storage
@@ -152,15 +166,33 @@ class DownloadChain(ChainBase):
             logger.error(f"未找到下载目录：{media_info.type.value} {media_info.title_year}")
             return None, None, "未找到下载目录"
 
-        if not dir_info.media_type and dir_info.download_type_folder:
-            download_dir = Path(dir_info.download_path) / media_info.type.value
-        else:
-            download_dir = Path(dir_info.download_path)
+        download_dir = DownloadChain._append_download_classification(
+            root_path=Path(dir_info.download_path),
+            dir_info=dir_info,
+            media_info=media_info,
+        )
+        return storage, download_dir, ""
 
+    @staticmethod
+    def _append_download_classification(
+            root_path: Path,
+            dir_info: schemas.TransferDirectoryConf,
+            media_info: MediaInfo,
+    ) -> Path:
+        """
+        按下载目录配置拼装媒体类型和类别子目录。
+
+        :param root_path: 下载根目录
+        :param dir_info: 下载目录配置
+        :param media_info: 媒体信息
+        :return: 应传给存储或下载器的媒体下载目录
+        """
+        download_dir = root_path
+        if not dir_info.media_type and dir_info.download_type_folder:
+            download_dir = download_dir / media_info.type.value
         if not dir_info.media_category and dir_info.download_category_folder and media_info.category:
             download_dir = download_dir / media_info.category
-
-        return storage, download_dir, ""
+        return download_dir
 
     @staticmethod
     def _upload_subtitle_file(
@@ -572,10 +604,13 @@ class DownloadChain(ChainBase):
         )
         meta = getattr(context, "meta_info", None)
         site = getattr(torrent, "site", None) or getattr(torrent, "site_name", None)
+        meta_season = getattr(meta, "season", None)
+        media_season = getattr(media, "season", None)
+        season = meta_season if meta_season is not None else media_season
         payload = {
             "media_type": str(media_type or ""),
             "media_key": str(media_key or ""),
-            "season": str(getattr(meta, "season", None) or getattr(media, "season", None) or ""),
+            "season": str(season) if season is not None else "",
             "episodes": cls._format_failure_episodes(meta) or "",
             "site": str(site or ""),
             "resource": cls._torrent_resource_key(torrent),
@@ -901,36 +936,17 @@ class DownloadChain(ChainBase):
         # 获取种子文件的文件夹名和文件清单
         _folder_name, _file_list = TorrentHelper().get_fileinfo_from_torrent_content(torrent_content)
 
-        storage = 'local'
-        # 下载目录
-        if save_path is not None:
-            download_dir = Path(save_path)
-        else:
-            # 根据媒体信息查询下载目录配置
-            dir_info = DirectoryHelper().get_dir(_media, include_unsorted=True)
-            storage = dir_info.storage if dir_info else storage
-            # 拼装子目录
-            if dir_info:
-                # 一级目录
-                if not dir_info.media_type and dir_info.download_type_folder:
-                    # 一级自动分类
-                    download_dir = Path(dir_info.download_path) / _media.type.value
-                else:
-                    # 一级不分类
-                    download_dir = Path(dir_info.download_path)
-
-                # 二级目录
-                if not dir_info.media_category and dir_info.download_category_folder and _media and _media.category:
-                    # 二级自动分类
-                    download_dir = download_dir / _media.category
-            else:
-                # 未找到下载目录，且没有自定义下载目录
-                logger.error(f"未找到下载目录：{_media.type.value} {_media.title_year}")
+        storage, download_dir, error_msg = self._resolve_media_download_dir(
+            media_info=_media,
+            save_path=save_path,
+        )
+        if not download_dir:
+            if error_msg == "未找到下载目录":
                 self.messagehelper.put(f"{_media.type.value} {_media.title_year} 未找到下载目录！",
                                        title="下载失败", role="system")
-                return (None, "未找到下载目录") if return_detail else None
-            fileURI = FileURI(storage=storage, path=download_dir.as_posix())
-            download_dir = Path(fileURI.uri)
+            return (None, error_msg or "未找到下载目录") if return_detail else None
+        file_uri = FileURI(storage=storage, path=download_dir.as_posix())
+        download_dir = Path(file_uri.uri)
 
         # 添加下载
         result: Optional[tuple] = self.download(content=torrent_content,
@@ -1291,7 +1307,7 @@ class DownloadChain(ChainBase):
                     if not tv.episodes:
                         if not need_seasons.get(need_mid):
                             need_seasons[need_mid] = []
-                        need_seasons[need_mid].append(tv.season or 1)
+                        need_seasons[need_mid].append(tv.season if tv.season is not None else 1)
             logger.info(f"缺失整季：{need_seasons}")
             # 查找整季包含的种子，只处理整季没集的种子或者是集数超过季的种子
             for need_mid, need_season in need_seasons.items():

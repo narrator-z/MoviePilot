@@ -7,6 +7,8 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
+from app.testing.bootstrap import ensure_optional_stub
+
 sys.modules.setdefault("qbittorrentapi", ModuleType("qbittorrentapi"))
 setattr(sys.modules["qbittorrentapi"], "TorrentFilesList", list)
 sys.modules.setdefault("transmission_rpc", ModuleType("transmission_rpc"))
@@ -15,13 +17,10 @@ sys.modules.setdefault("psutil", ModuleType("psutil"))
 sys.modules.setdefault("aioshutil", ModuleType("aioshutil"))
 sys.modules.setdefault("pyquery", ModuleType("pyquery"))
 setattr(sys.modules["pyquery"], "PyQuery", object)
-sys.modules.setdefault("dateparser", ModuleType("dateparser"))
-setattr(sys.modules["dateparser"], "parse", lambda *args, **kwargs: None)
-sys.modules.setdefault("dateutil", ModuleType("dateutil"))
-dateutil_parser = ModuleType("dateutil.parser")
-setattr(dateutil_parser, "parse", lambda *args, **kwargs: None)
-sys.modules.setdefault("dateutil.parser", dateutil_parser)
-setattr(sys.modules["dateutil"], "parser", dateutil_parser)
+# 改用 ensure_optional_stub：仅在 dateparser/dateutil 未安装时补占位模块，已安装则保留真实模块，
+# 避免模块级打桩污染 sys.modules，导致其它用例（如 StringUtils.unify_datetime_str）拿到假的 parse。
+ensure_optional_stub("dateparser", parse=lambda *args, **kwargs: None)
+ensure_optional_stub("dateutil.parser", parse=lambda *args, **kwargs: None)
 
 from app.chain.message import MessageChain
 from app.chain.skills import SkillsChain, skills_interaction_manager

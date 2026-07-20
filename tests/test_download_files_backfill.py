@@ -303,7 +303,7 @@ def test_transfer_completion_triggers_download_files_backfill(monkeypatch):
     chain.jobview.is_torrent_done.return_value = True
     chain.transfer_completed = MagicMock()
     chain.list_torrents = MagicMock(
-        return_value=[SimpleNamespace(save_path="/downloads/movie", path=None)]
+        return_value=[SimpleNamespace(save_path="/downloads/movie", path=None, progress=100)]
     )
 
     # __mark_torrent_completed_if_done 为双下划线私有方法，存在名称改写（name mangling）。

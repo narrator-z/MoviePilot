@@ -1247,10 +1247,24 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                 or not download_hash
                 or not self.jobview.is_torrent_done(download_hash)
         ):
-            self.transfer_completed(hashs=download_hash, downloader=downloader)
-            # 磁力链接等无法在添加时解析出文件清单的，在整理完成阶段兜底补写 downloadfiles，
-            # 保证“订阅 → 文件统计”的“下载”列能正常统计历史下载。
-            self._ensure_download_files_for_transfer(download_hash, downloader)
+            return
+        # 作业视图只包含已登记的整理任务；多集种子部分文件先下载完成时，
+        # 剩余文件尚未产生任务，此时打已整理标签会使下载器轮询永久跳过
+        # 剩余文件（#6009），因此必须确认种子已整体下载完成。
+        if not self.__is_torrent_download_completed(download_hash, downloader):
+            logger.debug(
+                f"种子 {download_hash} 尚未下载完成或状态未知，暂不设置已整理标签"
+            )
+            return
+        if not self.jobview.is_torrent_done(download_hash):
+            logger.debug(
+                f"种子 {download_hash} 存在新登记的整理任务，暂不设置已整理标签"
+            )
+            return
+        self.transfer_completed(hashs=download_hash, downloader=downloader)
+        # 磁力链接等无法在添加时解析出文件清单的，在整理完成阶段兜底补写 downloadfiles，
+        # 保证“订阅 → 文件统计”的“下载”列能正常统计历史下载。
+        self._ensure_download_files_for_transfer(download_hash, downloader)
 
     def __is_torrent_download_completed(
             self, download_hash: str, downloader: Optional[str]
@@ -1286,26 +1300,31 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             return
         try:
             torrents = self.list_torrents(hashs=download_hash, downloader=downloader)
+            if not torrents:
+                return
+            # 取种子的保存目录作为文件根路径（qbittorrent 文件 name 相对 save_path）；
+            # 下载器返回的种子对象字段可能不完整（如异常状态、测试 mock），用 getattr 容错，
+            # 避免因缺少 save_path/path 而中断整个整理标记循环。
+            first = torrents[0]
+            save_path = getattr(first, "save_path", None) or (
+                str(getattr(first, "path", None)) if getattr(first, "path", None) else None
+            )
+            if not save_path:
+                return
+            # 通过 downloadhistory 获取种子名称，写入 torrentname 字段
+            history = DownloadHistoryOper().get_by_hash(download_hash)
+            org_string = getattr(history, "torrent_name", "") or ""
+            # 复用 DownloadChain 的回查补写逻辑（延迟导入避免循环依赖）
+            from app.chain.download import DownloadChain
+            DownloadChain()._add_download_files_from_downloader(
+                download_hash=download_hash,
+                downloader=downloader,
+                save_path=Path(save_path),
+                org_string=org_string,
+            )
         except Exception as err:
             logger.debug(f"整理阶段回查下载器种子失败（hash={download_hash}）：{err}")
             return
-        if not torrents:
-            return
-        # 取种子的保存目录作为文件根路径（qbittorrent 文件 name 相对 save_path）
-        save_path = torrents[0].save_path or (str(torrents[0].path) if torrents[0].path else None)
-        if not save_path:
-            return
-        # 通过 downloadhistory 获取种子名称，写入 torrentname 字段
-        history = DownloadHistoryOper().get_by_hash(download_hash)
-        org_string = history.torrent_name if history else ""
-        # 复用 DownloadChain 的回查补写逻辑（延迟导入避免循环依赖）
-        from app.chain.download import DownloadChain
-        DownloadChain()._add_download_files_from_downloader(
-            download_hash=download_hash,
-            downloader=downloader,
-            save_path=Path(save_path),
-            org_string=org_string or "",
-        )
 
     def __send_metadata_scrape_event(
             self, task: TransferTask, transferinfo: TransferInfo

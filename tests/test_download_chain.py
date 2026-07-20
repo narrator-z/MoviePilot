@@ -161,9 +161,12 @@ def test_download_single_submits_download_added_to_background(monkeypatch):
 
     assert result == "hash123"
     chain.download_added.assert_not_called()
-    assert len(_FakeThreadHelper.submitted) == 1
+    # 下载成功后会提交两个后台任务：downloadfiles 补写（磁力链接/无文件清单场景）
+    # 与站点字幕后处理（download_added）；本测试关注后者不阻塞接口返回。
+    assert len(_FakeThreadHelper.submitted) == 2
 
-    task, args, kwargs = _FakeThreadHelper.submitted[0]
+    # 第二个任务为上游的 download_added 后处理（本测试关注的对象）
+    task, args, kwargs = _FakeThreadHelper.submitted[1]
     assert args == ()
     assert kwargs == {}
 

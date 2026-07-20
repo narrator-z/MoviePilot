@@ -48,6 +48,11 @@ DOWNLOAD_FAILURE_RESOURCE_ERROR_KEYWORDS = (
     "invalid torrent",
 )
 
+# 磁力链接添加后，从下载器回查文件清单的最大重试次数与每次重试间隔（秒）。
+# 磁力链接刚添加时元数据可能尚未就绪，需要在后台轮询等待其解析完成后再补写 downloadfiles。
+_DOWNLOAD_FILES_MAX_RETRY: int = 6
+_DOWNLOAD_FILES_RETRY_INTERVAL: int = 10
+
 
 class DownloadChain(ChainBase):
     """
@@ -382,6 +387,117 @@ class DownloadChain(ChainBase):
             ThreadHelper().submit(_run_download_added)
         except Exception as err:
             logger.error(f"提交下载成功后处理后台任务失败：{str(err)}")
+
+    def _add_download_files_from_downloader(
+            self,
+            download_hash: str,
+            downloader: Optional[str],
+            save_path: Path,
+            org_string: str,
+            episodes: Optional[Set[int]] = None,
+    ) -> bool:
+        """
+        从下载器回查种子文件清单并写入 downloadfiles 表。
+
+        用于磁力链接等无法从种子内容解析出文件清单的场景。写入前会检查该 hash
+        是否已存在记录，保证幂等、避免重复写入。
+        :param download_hash: 下载任务 Hash
+        :param downloader: 下载器名称
+        :param save_path: 文件保存目录（用于拼接完整路径）
+        :param org_string: 种子名称，写入 torrentname 字段
+        :param episodes: 需要保留的集数（可选，用于筛选）
+        :return: 是否成功写入了文件记录
+        """
+        if not download_hash or not downloader:
+            return False
+
+        # 已存在记录则跳过，避免重复写入（幂等）
+        if DownloadHistoryOper().get_files_by_hash(download_hash):
+            return False
+
+        try:
+            torrent_files = self.torrent_files(download_hash, downloader)
+        except Exception as err:
+            logger.debug(f"从下载器回查文件清单失败（hash={download_hash}）：{err}")
+            return False
+
+        if not torrent_files:
+            return False
+
+        # qbittorrent 返回列表，transmission 等可能返回带 .data 属性的对象
+        if isinstance(torrent_files, list):
+            files = torrent_files
+        else:
+            files = getattr(torrent_files, "data", []) or []
+
+        # 只处理音视频、字幕格式
+        media_exts = settings.RMT_MEDIAEXT + settings.RMT_SUBEXT + settings.RMT_AUDIOEXT
+        files_to_add = []
+        for file in files:
+            file_name = getattr(file, "name", None)
+            if not file_name:
+                continue
+            if episodes:
+                # 按集数筛选需要保留的文件
+                file_meta = MetaInfo(Path(file_name).stem)
+                if not file_meta.begin_episode or file_meta.begin_episode not in episodes:
+                    continue
+            if not Path(file_name).suffix or Path(file_name).suffix.lower() not in media_exts:
+                continue
+            files_to_add.append({
+                "download_hash": download_hash,
+                "downloader": downloader,
+                "fullpath": (save_path / file_name).as_posix(),
+                "savepath": save_path.as_posix(),
+                "filepath": file_name,
+                "torrentname": org_string,
+            })
+
+        if files_to_add:
+            DownloadHistoryOper().add_files(files_to_add)
+            logger.info(f"已从下载器回写 {len(files_to_add)} 个下载文件记录（hash={download_hash}）")
+            return True
+
+        return False
+
+    def _submit_download_files_task(
+            self,
+            download_hash: str,
+            downloader: Optional[str],
+            save_path: Path,
+            org_string: str,
+            episodes: Optional[Set[int]] = None,
+    ) -> None:
+        """
+        后台回查下载器文件清单并写入 downloadfiles。
+
+        磁力链接刚添加时文件元数据可能尚未就绪，故在后台进行有限次重试，
+        既不阻塞添加下载的响应，也不会因临时取不到文件列表而中断主流程。
+        """
+
+        def _run() -> None:
+            for attempt in range(_DOWNLOAD_FILES_MAX_RETRY):
+                # 已存在记录则无需继续重试
+                if DownloadHistoryOper().get_files_by_hash(download_hash):
+                    return
+                try:
+                    if self._add_download_files_from_downloader(
+                            download_hash=download_hash,
+                            downloader=downloader,
+                            save_path=save_path,
+                            org_string=org_string,
+                            episodes=episodes,
+                    ):
+                        return
+                except Exception as err:
+                    logger.debug(f"回写下载文件清单失败（hash={download_hash}）：{err}")
+                if attempt < _DOWNLOAD_FILES_MAX_RETRY - 1:
+                    time.sleep(_DOWNLOAD_FILES_RETRY_INTERVAL)
+
+        try:
+            ThreadHelper().submit(_run)
+        except Exception as err:
+            logger.error(f"提交下载文件清单回写后台任务失败：{err}")
 
     @staticmethod
     def _is_subscribe_source(source: Optional[str]) -> bool:
@@ -896,6 +1012,17 @@ class DownloadChain(ChainBase):
                 })
             if files_to_add:
                 downloadhis.add_files(files_to_add)
+
+            # 磁力链接等无法从种子内容解析出文件清单时，从下载器回查并补写 downloadfiles。
+            # 该路径不依赖种子内容，rclone 等场景下也能保证“下载”列可正常统计历史下载。
+            if not files_to_add:
+                self._submit_download_files_task(
+                    download_hash=_hash,
+                    downloader=_downloader,
+                    save_path=_save_path,
+                    org_string=_meta.org_string,
+                    episodes=episodes,
+                )
 
             # 下载成功发送消息
             self.post_message(

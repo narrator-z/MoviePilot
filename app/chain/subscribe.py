@@ -25,6 +25,7 @@ from app.db.models.subscribe import Subscribe
 from app.db.site_oper import SiteOper
 from app.db.subscribe_oper import SubscribeOper
 from app.db.systemconfig_oper import SystemConfigOper
+from app.db.transferhistory_oper import TransferHistoryOper
 from app.helper.interaction import (
     SlashInteractionManager,
     build_navigation_buttons,
@@ -3613,26 +3614,43 @@ class SubscribeChain(ChainBase):
                 f'未识别到媒体信息，标题：{subscribe.name}，tmdbid：{subscribe.tmdbid}，doubanid：{subscribe.doubanid}')
             return subscribe_info
 
-        # 所有媒体库文件记录
-        library_fileitems = self.media_files(mediainfo)
-        if library_fileitems:
-            for fileitem in library_fileitems:
-                # 识别文件名
-                file_meta = MetaInfo(fileitem.path)
-                # 媒体库文件信息
-                file_info = schemas.SubscribeLibraryFileInfo(
-                    storage=fileitem.storage,
-                    file_path=fileitem.path,
-                )
-                if subscribe.type == MediaType.TV.value:
-                    season_number = file_meta.begin_season
-                    if season_number is not None and season_number != subscribe.season:
-                        continue
-                    episode_number = file_meta.begin_episode
-                    if episode_number and episodes.get(episode_number):
-                        episodes[episode_number].library.append(file_info)
-                else:
-                    episodes[0].library.append(file_info)
+        # 所有媒体库文件记录：直接基于真实整理落盘记录，不依赖媒体库目录配置
+        transfer_oper = TransferHistoryOper()
+        for his in download_his:
+            transfers = transfer_oper.list_by_hash(his.download_hash)
+            for transfer in transfers:
+                if not transfer.dest:
+                    continue
+                # 整理文件清单优先；缺失时回退到目标路径
+                file_paths = []
+                for f in (transfer.files or []):
+                    if isinstance(f, dict):
+                        p = f.get("path")
+                    elif isinstance(f, str):
+                        p = f
+                    else:
+                        p = getattr(f, "path", None)
+                    if p:
+                        file_paths.append(p)
+                if not file_paths:
+                    file_paths = [transfer.dest]
+                for file_path in file_paths:
+                    # 识别文件名中的季集信息
+                    file_meta = MetaInfo(file_path)
+                    # 媒体库文件信息
+                    file_info = schemas.SubscribeLibraryFileInfo(
+                        storage=transfer.dest_storage,
+                        file_path=file_path,
+                    )
+                    if subscribe.type == MediaType.TV.value:
+                        season_number = file_meta.begin_season
+                        if season_number is not None and season_number != subscribe.season:
+                            continue
+                        episode_number = file_meta.begin_episode
+                        if episode_number and episodes.get(episode_number):
+                            episodes[episode_number].library.append(file_info)
+                    else:
+                        episodes[0].library.append(file_info)
 
         # 更新订阅信息
         subscribe_info.subscribe = Subscribe(**subscribe.to_dict())

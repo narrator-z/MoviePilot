@@ -1,7 +1,16 @@
 import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fork CI/本地 win32 环境缺少 docker 入口脚本依赖的 bash/ELF 执行与 chown/getuid 等 Linux 权限原语，"
+           "上游 Linux CI 可正常通过，故仅 win32 跳过。",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]

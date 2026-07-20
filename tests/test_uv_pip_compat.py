@@ -3,9 +3,18 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fork CI/本地 win32 环境缺少 scripts/uv-pip-compat.sh 所需的 bash/uv 执行与 venv/bin/python 路径约定，"
+           "上游 Linux CI 可正常通过，故仅 win32 跳过。",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]

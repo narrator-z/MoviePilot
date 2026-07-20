@@ -233,6 +233,26 @@ class WorkFlowManager(metaclass=Singleton):
                 return
             sleep(min(0.1, deadline - monotonic()))
 
+    @staticmethod
+    def _resolve_action_class_attr(action: Any, attr: str) -> Any:
+        """
+        解析动作类上的类级属性值。
+
+        动作类的 name/description/data 采用 ``@classmethod @property`` 形式定义，
+        在类上直接访问会得到绑定方法而非真实取值，这里统一取出 property 背后的真实值。
+        """
+        member = getattr(action, attr)
+        # @classmethod @property 叠加后，类/实例访问均为绑定方法，其底层是 property 描述符
+        func = getattr(member, "__func__", None)
+        if isinstance(func, property):
+            return func.fget(action)
+        if callable(member) and not isinstance(member, property):
+            try:
+                return member()
+            except TypeError:
+                return member
+        return member
+
     def list_actions(self) -> List[dict]:
         """
         获取所有动作
@@ -240,12 +260,12 @@ class WorkFlowManager(metaclass=Singleton):
         return [
             {
                 "type": key,
-                "name": action.name,
-                "description": action.description,
+                "name": self._resolve_action_class_attr(action, "name"),
+                "description": self._resolve_action_class_attr(action, "description"),
                 "contract": action.get_contract(),
                 "data": {
-                    "label": action.name,
-                    **action.data
+                    "label": self._resolve_action_class_attr(action, "name"),
+                    **(self._resolve_action_class_attr(action, "data") or {})
                 }
             } for key, action in self._actions.items()
         ]

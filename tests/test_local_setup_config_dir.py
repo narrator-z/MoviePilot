@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fork CI/本地 win32 环境缺少 scripts/local_setup.py 依赖的 os.getuid/geteuid 与 Linux 权限原语，"
+           "上游 Linux CI 可正常通过，故仅 win32 跳过。",
+)
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "local_setup.py"

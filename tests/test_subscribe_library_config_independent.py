@@ -99,7 +99,7 @@ class _FakeDownloadOper:
         self.get_files_by_hash_called = 0
         self.last_hash = None
 
-    def get_by_mediaid(self, tmdbid=None, doubanid=None):
+    def get_by_mediaid(self, tmdbid=None, doubanid=None, bangumiid=None, anilistid=None, media_source=None, media_id=None):
         self.get_by_mediaid_called = True
         return self._histories
 

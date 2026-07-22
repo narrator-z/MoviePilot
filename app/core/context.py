@@ -11,6 +11,8 @@ from app.utils.string import StringUtils
 
 BANGUMI_MOVIE_PLATFORMS = frozenset({"movie", "电影", "剧场版"})
 ANILIST_MOVIE_FORMATS = frozenset({"MOVIE"})
+ANILIST_CHINESE_TITLE_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+ANILIST_JAPANESE_KANA_PATTERN = re.compile(r"[\u3040-\u30ff]")
 
 
 @dataclass
@@ -254,6 +256,8 @@ class MediaInfo:
     recognize_cache_hit = False
     # 来源：themoviedb、douban、bangumi、anilist
     source: str = None
+    # 当前数据源原生ID，主要用于保留插件自定义数据源身份
+    media_id: str = None
     # 请求级刮削来源；为空时使用系统设置
     scrape_source: str = None
     # 类型 电影、电视剧
@@ -883,6 +887,30 @@ class MediaInfo:
             values.append(str(date_info.get("day")).zfill(2))
         return "-".join(values)
 
+    @staticmethod
+    def _anilist_chinese_title(info: dict) -> Optional[str]:
+        """
+        从 anilist-chinese 注入的标题和别名中选择中文标题。
+
+        :param info: AniList 媒体信息
+        :return: 中文标题，未找到时返回 None
+        """
+        translated_title = (info.get("title") or {}).get("chinese")
+        if not translated_title:
+            return None
+        if (
+            ANILIST_CHINESE_TITLE_PATTERN.search(str(translated_title))
+            and not ANILIST_JAPANESE_KANA_PATTERN.search(str(translated_title))
+        ):
+            return str(translated_title)
+        for synonym in reversed(info.get("synonyms") or []):
+            if (
+                ANILIST_CHINESE_TITLE_PATTERN.search(str(synonym))
+                and not ANILIST_JAPANESE_KANA_PATTERN.search(str(synonym))
+            ):
+                return str(synonym)
+        return str(translated_title)
+
     def set_anilist_info(self, info: dict) -> None:
         """
         初始化 AniList 媒体信息。
@@ -897,7 +925,13 @@ class MediaInfo:
         self.type = self.type or self.get_anilist_media_type(info)
 
         titles = info.get("title") or {}
-        self.title = self.title or titles.get("english") or titles.get("romaji") or titles.get("native")
+        self.title = (
+            self.title
+            or self._anilist_chinese_title(info)
+            or titles.get("native")
+            or titles.get("romaji")
+            or titles.get("english")
+        )
         self.en_title = self.en_title or titles.get("english")
         self.original_title = self.original_title or titles.get("native") or titles.get("romaji")
         self.names = list(
@@ -1062,14 +1096,19 @@ class MediaInfo:
         dicts["douban_info"] = None
         dicts["bangumi_info"] = None
         dicts["anilist_info"] = None
-        dicts["mediaid_prefix"] = self.source
         source_ids = {
             "themoviedb": self.tmdb_id,
             "douban": self.douban_id,
             "bangumi": self.bangumi_id,
             "anilist": self.anilist_id,
         }
-        media_id = source_ids.get(self.source)
+        media_source = self.source or next(
+            (source for source, media_id in source_ids.items() if media_id is not None),
+            None,
+        )
+        dicts["source"] = media_source
+        dicts["mediaid_prefix"] = media_source
+        media_id = self.media_id or source_ids.get(media_source)
         dicts["media_id"] = str(media_id) if media_id is not None else None
         return dicts
 
@@ -1111,7 +1150,7 @@ class Context:
     media_recognize_fail_count: int = 0
     # 候选资源来源：rss、spider、search、unknown。
     resource_source: str = "unknown"
-    # 候选匹配来源：tmdbid、doubanid、imdbid、title、plugin、unknown。
+    # 候选匹配来源：tmdbid、doubanid、bangumiid、anilistid、imdbid、title、plugin、unknown。
     match_source: str = "unknown"
     # 候选自身是否已经识别出有效媒体 ID。
     candidate_recognized: bool = False

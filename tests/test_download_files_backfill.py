@@ -10,7 +10,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import app.chain.download as download_module
 import app.chain.transfer as transfer_module
@@ -217,12 +217,14 @@ def test_torrent_file_uses_original_path_and_skips_backfill(monkeypatch):
         ),
     )
 
-    result = chain.download_single(
-        context=context,
-        torrent_content=b"torrent-content",
-        save_path="/downloads",
-        username="tester",
-    )
+    with patch("app.chain.download.MediaChain") as _mc:
+        _mc.return_value.supplement_tmdb_info.side_effect = lambda media_info, meta_info=None: media_info
+        result = chain.download_single(
+            context=context,
+            torrent_content=b"torrent-content",
+            save_path="/downloads",
+            username="tester",
+        )
 
     assert result == "hash_torrent"
     # 原链路写入文件明细
@@ -270,12 +272,14 @@ def test_magnet_triggers_background_backfill(monkeypatch):
         ),
     )
 
-    result = chain.download_single(
-        context=context,
-        torrent_content="magnet:?xt=urn:btih:abcdef",
-        save_path="/downloads",
-        username="tester",
-    )
+    with patch("app.chain.download.MediaChain") as _mc:
+        _mc.return_value.supplement_tmdb_info.side_effect = lambda media_info, meta_info=None: media_info
+        result = chain.download_single(
+            context=context,
+            torrent_content="magnet:?xt=urn:btih:abcdef",
+            save_path="/downloads",
+            username="tester",
+        )
 
     assert result == "hash_magnet"
     # 原链路无文件可写

@@ -55,7 +55,7 @@ from app.schemas.types import (
     ContentType,
 )
 from app.utils.mixins import ConfigReloadMixin
-from app.utils.media import normalize_media_source, parse_media_key, resolve_media_identity
+from app.utils.media import parse_media_key, resolve_media_identity
 from app.utils.singleton import Singleton
 from app.utils.string import StringUtils
 from app.utils.system import SystemUtils

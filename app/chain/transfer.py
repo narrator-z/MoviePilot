@@ -1623,6 +1623,62 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             except Exception as e:
                 logger.error(f"整理队列处理出现错误：{e} - {traceback.format_exc()}")
 
+    def _fallback_recognize_by_meta(self, task, download_history):
+        """无可用识别 ID 时按文件名识别(兜底)。"""
+        recognize_kwargs = {"obtain_images": True}
+        if task.media_source:
+            recognize_kwargs["source"] = task.media_source
+        mediainfo = MediaChain().recognize_by_meta(task.meta, **recognize_kwargs)
+        if mediainfo and download_history and download_history.media_category:
+            mediainfo.category = download_history.media_category
+        return mediainfo
+
+    def _collect_recognize_ids(self, task, download_history):
+        """整理识别时优先收集识别 ID:下载记录优先,其次用订阅/任务携带的 tmdbid 兜底,
+        保证默认按 tmdbid 一致识别;都没有返回 None(走文件名兜底)。"""
+        if download_history:
+            ids = dict(
+                media_id=download_history.media_id,
+                tmdbid=download_history.tmdbid,
+                doubanid=download_history.doubanid,
+                bangumiid=download_history.bangumiid,
+                anilistid=download_history.anilistid,
+                source=download_history.media_source,
+                episode_group=download_history.episode_group,
+            )
+            if any(ids.get(k) for k in ("tmdbid", "doubanid", "bangumiid", "anilistid", "media_id")):
+                return ids
+        tmdbid = self._resolve_subscription_tmdbid(task, download_history)
+        if tmdbid:
+            return {"tmdbid": tmdbid, "source": "themoviedb"}
+        return None
+
+    def _resolve_subscription_tmdbid(self, task, download_history):
+        """从订阅/任务中解析 tmdbid,用于无下载记录 ID 时的兜底一致识别。"""
+        if task and getattr(task.mediainfo, "tmdb_id", None):
+            return task.mediainfo.tmdb_id
+        name = None
+        if download_history and download_history.title:
+            name = download_history.title
+        elif task and task.meta and task.meta.name:
+            name = task.meta.name
+        if not name:
+            return None
+        try:
+            from app.db.subscribe_oper import SubscribeOper
+            subs = SubscribeOper().list() or []
+        except Exception:
+            return None
+        norm = lambda s: re.sub(r"\s+", "", str(s)).lower()
+        nname = norm(name)
+        for sub in subs:
+            if not sub.tmdbid:
+                continue
+            sn = norm(sub.name) if sub.name else ""
+            if sn == nname or (sn and (sn in nname or nname in sn)):
+                return sub.tmdbid
+        return None
+
     def __handle_transfer(
             self, task: TransferTask, callback: Optional[Callable] = None
     ) -> Optional[Tuple[bool, str]]:
@@ -1644,26 +1700,13 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     history_year_conflict = self._is_movie_year_conflict(
                         task.meta, download_history
                     )
-                    if (
-                            (
-                                download_history.media_id
-                                or download_history.tmdbid
-                                or download_history.doubanid
-                                or download_history.bangumiid
-                                or download_history.anilistid
-                            )
-                            and not history_year_conflict
-                    ):
-                        # 下载记录中已存在识别信息
+                    # 整理识别默认优先带 ID(下载记录/订阅/任务),一致;无 ID 才 fallback 文件名
+                    ids = self._collect_recognize_ids(task, download_history)
+                    if ids and not history_year_conflict:
+                        # 整理识别优先使用 ID（下载记录/订阅/任务携带）保证一致识别
                         mediainfo: Optional[MediaInfo] = self.recognize_media(
                             mtype=MediaType(download_history.type),
-                            tmdbid=download_history.tmdbid,
-                            doubanid=download_history.doubanid,
-                            bangumiid=download_history.bangumiid,
-                            anilistid=download_history.anilistid,
-                            source=download_history.media_source,
-                            mediaid=download_history.media_id,
-                            episode_group=download_history.episode_group,
+                            **ids,
                         )
                         need_obtain_images = True
                         if mediainfo:
@@ -1676,22 +1719,24 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                                 f"{task.fileitem.name} 文件年份 {task.meta.year} 与下载记录年份 "
                                 f"{download_history.year} 不一致，按文件名重新识别"
                             )
-                        recognize_kwargs = {"obtain_images": True}
-                        if task.media_source:
-                            recognize_kwargs["source"] = task.media_source
-                        mediainfo = MediaChain().recognize_by_meta(
-                            task.meta, **recognize_kwargs
+                        mediainfo = self._fallback_recognize_by_meta(
+                            task, download_history
                         )
-                        if mediainfo and download_history.media_category:
-                            mediainfo.category = download_history.media_category
                 else:
-                    # 识别媒体信息
-                    recognize_kwargs = {"obtain_images": True}
-                    if task.media_source:
-                        recognize_kwargs["source"] = task.media_source
-                    mediainfo = MediaChain().recognize_by_meta(
-                        task.meta, **recognize_kwargs
-                    )
+                    # 识别媒体信息：同样优先使用 ID 兜底一致识别，无 ID 再按文件名
+                    ids = self._collect_recognize_ids(task, None)
+                    if ids:
+                        mediainfo: Optional[MediaInfo] = self.recognize_media(
+                            mtype=(
+                                MediaType(task.meta.type.value)
+                                if task.meta and task.meta.type
+                                else MediaType.TV
+                            ),
+                            **ids,
+                        )
+                        need_obtain_images = True
+                    else:
+                        mediainfo = self._fallback_recognize_by_meta(task, None)
 
                 # 按名称识别时已在识别链路补图，这里只补齐显式ID识别的场景。
                 if mediainfo and need_obtain_images:
@@ -1766,17 +1811,18 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             mediainfo = MediaChain().supplement_tmdb_info(mediainfo, task.meta)
             task.mediainfo = mediainfo
 
-            # 只有 TMDB 主源沿用历史 TMDB 标题，避免辅助 ID 改写其它识别源标题。
-            if (
-                    not settings.SCRAP_FOLLOW_TMDB
-                    and normalize_media_source(mediainfo.source) == "themoviedb"
-            ):
+            # 同一 tmdbid 的整理历史存在时,复用其标题与类别,保证同一剧始终落在同一目录。
+            if mediainfo.tmdb_id:
                 transfer_history = transferhis.get_by_type_tmdbid(
                     tmdbid=mediainfo.tmdb_id, mtype=mediainfo.type.value
                 )
-                if transfer_history and mediainfo.title != transfer_history.title:
-                    mediainfo.title = transfer_history.title
-                    mediainfo_changed = True
+                if transfer_history:
+                    if mediainfo.title != transfer_history.title:
+                        mediainfo.title = transfer_history.title
+                        mediainfo_changed = True
+                    if not mediainfo.category and transfer_history.category:
+                        mediainfo.category = transfer_history.category
+                        mediainfo_changed = True
 
             if mediainfo_changed:
                 # 更新任务信息

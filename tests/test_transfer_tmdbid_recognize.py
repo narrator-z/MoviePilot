@@ -177,3 +177,45 @@ def test_consistency_guard_reuses_title_and_category(monkeypatch) -> None:
 
     assert task.mediainfo.title == "金特务：本色回归"
     assert task.mediainfo.category == "日韩剧"
+
+
+def test_consistency_guard_preserves_custom_category(monkeypatch) -> None:
+    """当 mediainfo 已带自定义 category 时,护栏不应用历史 category 覆盖它(边角 1a)。"""
+    chain = _make_chain()
+    history = SimpleNamespace(title="金特务：本色回归", category="日韩剧")
+    fake_transferhis = SimpleNamespace(
+        get_by_type_tmdbid=lambda **_kw: history,
+    )
+    fake_media = SimpleNamespace(
+        supplement_tmdb_info=lambda media, _meta: media,
+    )
+    monkeypatch.setattr(
+        "app.chain.transfer.TransferHistoryOper",
+        lambda: fake_transferhis,
+    )
+    monkeypatch.setattr(
+        "app.chain.transfer.MediaChain",
+        lambda: fake_media,
+    )
+    mediainfo = MediaInfo(
+        tmdb_id=296206,
+        type=MediaType.MOVIE,
+        title="Agent Kim Reactivated",
+    )
+    # 模拟用户已在 download_history.media_category 设置自定义类别
+    mediainfo.category = "我的自定义类别"
+    task = SimpleNamespace(
+        mediainfo=mediainfo,
+        meta=SimpleNamespace(name="Agent Kim Reactivated 2026"),
+        fileitem=SimpleNamespace(name="f.mkv", path="/downloads/f.mkv"),
+        target_directory=SimpleNamespace(library_storage="local"),
+        transfer_batch_id=None,
+        library_category_folder=False,
+        preview=True,
+    )
+
+    chain._TransferChain__handle_transfer(task)
+
+    # 标题仍复用历史(一致),但自定义类别必须被保留,不被历史 category 覆盖
+    assert task.mediainfo.title == "金特务：本色回归"
+    assert task.mediainfo.category == "我的自定义类别"

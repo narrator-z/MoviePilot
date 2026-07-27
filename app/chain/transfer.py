@@ -1669,13 +1669,13 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             subs = SubscribeOper().list() or []
         except Exception:
             return None
-        norm = lambda s: re.sub(r"\s+", "", str(s)).lower()
+        norm = lambda s: re.sub(r"\d{4}$", "", re.sub(r"[\s()（）\[\]【】]+", "", str(s))).lower()
         nname = norm(name)
         for sub in subs:
             if not sub.tmdbid:
                 continue
             sn = norm(sub.name) if sub.name else ""
-            if sn == nname or (sn and (sn in nname or nname in sn)):
+            if sn and sn == nname:
                 return sub.tmdbid
         return None
 

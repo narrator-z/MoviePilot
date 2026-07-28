@@ -25,10 +25,12 @@ from app.schemas.types import (
     ScrapingPolicy,
     SystemConfigKey,
 )
+from app.utils.dom import DomUtils
 from app.utils.http import RequestUtils
 from app.utils.mixins import ConfigReloadMixin
 from app.utils.singleton import Singleton
 from app.utils.string import StringUtils
+from xml.dom import minidom
 
 recognize_lock = Lock()
 scraping_lock = Lock()
@@ -1153,6 +1155,61 @@ class MediaChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                         overwrite=overwrite,
                     )
 
+    def _enrich_nfo_with_resolved_ids(self, nfo_content, mediainfo: MediaInfo):
+        """
+        为豆瓣/Bangumi 等非 TMDB 源生成的 NFO 补全 TMDB/IMDB id。
+
+        ChineseSubFinder / Emby / Jellyfin 依赖 NFO 中的 tmdbid/imdbid 进行剧集匹配，
+        而豆瓣/Bangumi 源的 NFO 默认不写这些字段，会导致 CSF 报
+        "IMDB TMDB ID is empty"。此处复用既有的豆瓣/Bangumi→TMDB 反查能力，
+        把解析到的 id 注入 NFO 根节点（与 TMDB 源 NFO 格式一致）。
+
+        任何异常均回退到原始 NFO 内容，绝不破坏既有刮削结果；无可用 id 时原样返回。
+        """
+        # TMDB 源 NFO 已含 id，无需处理
+        if mediainfo.tmdb_id:
+            return nfo_content
+        # 仅对确实持有豆瓣/Bangumi id 的介质尝试反查
+        if not (mediainfo.douban_id or mediainfo.bangumi_id):
+            return nfo_content
+        try:
+            tmdbinfo = None
+            if mediainfo.douban_id:
+                tmdbinfo = self.get_tmdbinfo_by_doubanid(
+                    mediainfo.douban_id, mtype=mediainfo.type
+                )
+            elif mediainfo.bangumi_id:
+                tmdbinfo = self.get_tmdbinfo_by_bangumiid(mediainfo.bangumi_id)
+            if not tmdbinfo:
+                return nfo_content
+            tmdb_id = tmdbinfo.get("id")
+            imdb_id = (tmdbinfo.get("external_ids") or {}).get("imdb_id")
+            if not tmdb_id and not imdb_id:
+                return nfo_content
+
+            doc = minidom.parseString(nfo_content)
+            root = doc.documentElement
+            if not root:
+                return nfo_content
+
+            # 与 TMDB 源 NFO 保持一致：tmdbid + uniqueid(tmdb) + imdbid + uniqueid(imdb)
+            if tmdb_id:
+                DomUtils.add_node(doc, root, "tmdbid", str(tmdb_id))
+                uniqueid_tmdb = DomUtils.add_node(doc, root, "uniqueid", str(tmdb_id))
+                uniqueid_tmdb.setAttribute("type", "tmdb")
+                uniqueid_tmdb.setAttribute(
+                    "default", "true" if not imdb_id else "false"
+                )
+            if imdb_id:
+                DomUtils.add_node(doc, root, "imdbid", str(imdb_id))
+                uniqueid_imdb = DomUtils.add_node(doc, root, "uniqueid", str(imdb_id))
+                uniqueid_imdb.setAttribute("type", "imdb")
+                uniqueid_imdb.setAttribute("default", "true")
+            return doc.toprettyxml(indent="  ", encoding="utf-8")
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"为 NFO 补全 TMDB/IMDB id 失败：{err}")
+            return nfo_content
+
     def _scrape_nfo_generic(
             self,
             current_fileitem: schemas.FileItem,
@@ -1203,6 +1260,11 @@ class MediaChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                 episode=episode_number,
             )
             if nfo_content:
+                # 豆瓣/Bangumi 源 NFO 缺 TMDB/IMDB id，注入以支持 CSF/Emby/Jellyfin 匹配
+                if item_type in (ScrapingTarget.TV, ScrapingTarget.MOVIE):
+                    nfo_content = self._enrich_nfo_with_resolved_ids(
+                        nfo_content, mediainfo
+                    )
                 self._save_file(fileitem=base_item, path=nfo_path, content=nfo_content)
             else:
                 logger.warn(f"{nfo_path.name} NFO 文件生成失败！")

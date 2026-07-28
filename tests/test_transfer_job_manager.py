@@ -676,6 +676,10 @@ class TransferJobManagerTest(unittest.TestCase):
         chain.transfer_completed = fake_transfer_completed
         chain.list_torrents = lambda **kwargs: [SimpleNamespace(progress=100)]
         task = make_task(1)
+        # 文件名兜底仅对“有可用名称”的介质生效；无可用名称时识别仍应失败，
+        # 并保持“标记下载器哈希已完成”的健壮性契约（避免无限重试）。
+        # 命名介质走文件名兜底的逻辑由 test_media_recog_transfer 单独覆盖。
+        task.meta.name = ""
         task.downloader = "qbittorrent"
         task.download_hash = "abc123"
         self.assertTrue(chain.jobview.add_task(task))

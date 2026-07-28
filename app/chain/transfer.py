@@ -1877,26 +1877,28 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             if not task.target_storage and task.target_directory:
                 task.target_storage = task.target_directory.library_storage
 
-            # 手动/文件名兜底媒体无 tmdb_id，无法获取 TMDB 分类，放开“按媒体类别整理”的强制要求
-            if (self._requires_automatic_category(task)
-                    and not task.mediainfo.category
-                    and task.mediainfo.tmdb_id):
-                if task.mediainfo.tmdb_id:
-                    error_message = "TMDB 信息未匹配到媒体分类，无法按媒体类别整理"
-                else:
-                    error_message = "未识别到 TMDB 辅助信息，无法按媒体类别整理"
-                logger.error(f"{task.fileitem.name} {error_message}")
-                if callback:
-                    return callback(
-                        task,
-                        TransferInfo(
-                            success=False,
-                            fileitem=task.fileitem,
-                            transfer_type=task.transfer_type,
-                            message=error_message,
-                        ),
-                    )
-                return False, error_message
+            if self._requires_automatic_category(task) and not task.mediainfo.category:
+                # 仅当媒体具备可获取分类的身份（tmdb_id 或来源）时才强制“按媒体类别整理”：
+                # 具备身份却无分类 → 明确失败（保持原行为，含 anilist/bangumi 等无 tmdb 但有来源的情况）。
+                # 手动/文件名兜底媒体（source 与 tmdb_id 均为空）无法获取 TMDB 分类，
+                # 放开该强制要求，允许落到类型目录。
+                if task.mediainfo.tmdb_id or task.mediainfo.source:
+                    if task.mediainfo.tmdb_id:
+                        error_message = "TMDB 信息未匹配到媒体分类，无法按媒体类别整理"
+                    else:
+                        error_message = "未识别到 TMDB 辅助信息，无法按媒体类别整理"
+                    logger.error(f"{task.fileitem.name} {error_message}")
+                    if callback:
+                        return callback(
+                            task,
+                            TransferInfo(
+                                success=False,
+                                fileitem=task.fileitem,
+                                transfer_type=task.transfer_type,
+                                message=error_message,
+                            ),
+                        )
+                    return False, error_message
 
             # 正在处理
             self.jobview.running_task(task)

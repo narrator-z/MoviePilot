@@ -437,6 +437,7 @@ class SubscribeEndpointTest(TestCase):
             subscribe_model.async_exists_by_username = AsyncMock(
                 side_effect=[None, own]
             )
+            subscribe_model.async_find_same_media = AsyncMock(return_value=None)
             subscribe_model.return_value = created
 
             sid, message = asyncio.run(

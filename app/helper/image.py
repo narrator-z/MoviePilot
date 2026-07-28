@@ -1,9 +1,6 @@
-import asyncio
 import io
-import threading
 from pathlib import Path
-from typing import Awaitable, Callable, Optional, List
-from urllib.parse import urljoin
+from typing import Optional, List
 
 from PIL import Image
 
@@ -180,8 +177,6 @@ class ImageHelper(metaclass=Singleton):
         _ttl = settings.GLOBAL_IMAGE_CACHE_DAYS * 24 * 3600
         self.file_cache = FileCache(base=_base_path, ttl=_ttl)
         self.async_file_cache = AsyncFileCache(base=_base_path, ttl=_ttl)
-        self._guarded_fetch_tasks: dict[tuple, asyncio.Task[Optional[bytes]]] = {}
-        self._guarded_fetch_tasks_lock = threading.Lock()
 
     @staticmethod
     def _prepare_cache_path(url: str) -> str:
@@ -193,16 +188,31 @@ class ImageHelper(metaclass=Singleton):
         return cache_path.as_posix()
 
     @staticmethod
-    def _validate_image(content: bytes) -> bool:
-        """验证图片"""
+    def get_image_mime_type(content: bytes, verify: bool = True) -> Optional[str]:
+        """
+        根据图片内容返回 Pillow 识别的图片 MIME 类型。
+
+        外部响应在写入缓存前需要完整校验；已校验的缓存只需读取格式头。
+        非图片或可脚本化的 MIME 类型不作为图片代理响应。
+        """
         if not content:
-            return False
+            return None
         try:
-            Image.open(io.BytesIO(content)).verify()
-            return True
-        except Exception as e:
-            logger.warn(f"Invalid image format: {e}")
-            return False
+            with Image.open(io.BytesIO(content)) as image:
+                image_format = (image.format or "").upper()
+                if verify:
+                    image.verify()
+            mime_type = Image.MIME.get(image_format)
+            if (
+                not mime_type
+                or not mime_type.startswith("image/")
+                or mime_type == "image/svg+xml"
+            ):
+                return None
+            return mime_type
+        except Exception as err:
+            logger.warning(f"Invalid image format: {err}")
+            return None
 
     @staticmethod
     def _get_request_params(url: str, proxy: Optional[bool], cookies: Optional[str | dict]) -> dict:
@@ -229,6 +239,26 @@ class ImageHelper(metaclass=Singleton):
         """
         获取图片（同步版本）
         """
+        result = self.fetch_image_with_mime_type(
+            url=url,
+            proxy=proxy,
+            use_cache=use_cache,
+            cookies=cookies,
+        )
+        return result[0] if result else None
+
+    def fetch_image_with_mime_type(
+        self,
+        url: str,
+        proxy: Optional[bool] = None,
+        use_cache: bool = True,
+        cookies: Optional[str | dict] = None,
+    ) -> Optional[tuple[bytes, str]]:
+        """
+        同步获取图片及其内容识别 MIME 类型。
+
+        网络响应在写入缓存前完整验证一次；缓存命中仅重新识别格式头。
+        """
         if not url:
             return None
 
@@ -238,7 +268,9 @@ class ImageHelper(metaclass=Singleton):
         if use_cache:
             content = self.file_cache.get(cache_path, region="images")
             if content:
-                return content
+                mime_type = self.get_image_mime_type(content, verify=False)
+                if mime_type:
+                    return content, mime_type
 
         # 请求远程图片
         params = self._get_request_params(url, proxy, cookies)
@@ -248,13 +280,13 @@ class ImageHelper(metaclass=Singleton):
             return None
 
         content = response.content
-        # 验证图片
-        if not self._validate_image(content):
+        mime_type = self.get_image_mime_type(content)
+        if not mime_type:
             return None
 
         # 保存缓存
         self.file_cache.set(cache_path, content, region="images")
-        return content
+        return content, mime_type
 
     async def async_fetch_image(
         self,
@@ -265,6 +297,26 @@ class ImageHelper(metaclass=Singleton):
         """
         获取图片（异步版本）
         """
+        result = await self.async_fetch_image_with_mime_type(
+            url=url,
+            proxy=proxy,
+            use_cache=use_cache,
+            cookies=cookies,
+        )
+        return result[0] if result else None
+
+    async def async_fetch_image_with_mime_type(
+        self,
+        url: str,
+        proxy: Optional[bool] = None,
+        use_cache: bool = True,
+        cookies: Optional[str | dict] = None,
+    ) -> Optional[tuple[bytes, str]]:
+        """
+        异步获取图片及其内容识别 MIME 类型。
+
+        网络响应在写入缓存前完整验证一次；缓存命中仅重新识别格式头。
+        """
         if not url:
             return None
 
@@ -274,7 +326,9 @@ class ImageHelper(metaclass=Singleton):
         if use_cache:
             content = await self.async_file_cache.get(cache_path, region="images")
             if content:
-                return content
+                mime_type = self.get_image_mime_type(content, verify=False)
+                if mime_type:
+                    return content, mime_type
 
         # 请求远程图片
         params = self._get_request_params(url, proxy, cookies)
@@ -284,154 +338,10 @@ class ImageHelper(metaclass=Singleton):
             return None
 
         content = response.content
-        # 验证图片
-        if not self._validate_image(content):
+        mime_type = self.get_image_mime_type(content)
+        if not mime_type:
             return None
 
         # 保存缓存
         await self.async_file_cache.set(cache_path, content, region="images")
-        return content
-
-    async def async_fetch_image_guarded(
-        self,
-        url: str,
-        *,
-        redirect_validator: Callable[[str], Awaitable[bool]],
-        redirect_policy: str,
-        max_bytes: int,
-        proxy: Optional[bool] = None,
-        use_cache: bool = True,
-        max_redirects: int = 3,
-    ) -> Optional[bytes]:
-        """
-        以有界流式请求抓取需要逐跳校验的图片。
-
-        每个重定向目标必须重新通过调用方的安全校验，字节上限和图片有效性检查在
-        写入共享缓存前生效。只有抓取策略完全等价的并发调用才共享一次远端抓取：
-        合并键包含缓存键、`redirect_policy`、字节上限、代理与重定向上限，避免某
-        次调用收到超出自身上限的图片，或沿用他人的重定向授权。
-
-        :param redirect_validator: 逐跳校验重定向目标的协程
-        :param redirect_policy: 描述该校验授权范围的稳定标识；`redirect_validator`
-            通常是每次请求新建的闭包，无法按对象身份判断等价，由调用方显式声明
-        """
-        if not url or max_bytes <= 0:
-            return None
-
-        cache_path = self._prepare_cache_path(url)
-        if use_cache:
-            content = await self.async_file_cache.get(cache_path, region="images")
-            if content:
-                if len(content) <= max_bytes and self._validate_image(content):
-                    return content
-                await self.async_file_cache.delete(cache_path, region="images")
-
-        task_key = (
-            cache_path,
-            redirect_policy,
-            max_bytes,
-            proxy,
-            use_cache,
-            max_redirects,
-        )
-        loop = asyncio.get_running_loop()
-        with self._guarded_fetch_tasks_lock:
-            task = self._guarded_fetch_tasks.get(task_key)
-            if task is None or task.get_loop() is not loop:
-                task = loop.create_task(
-                    self._download_guarded_image(
-                        url=url,
-                        cache_path=cache_path,
-                        redirect_validator=redirect_validator,
-                        max_bytes=max_bytes,
-                        proxy=proxy,
-                        use_cache=use_cache,
-                        max_redirects=max_redirects,
-                    )
-                )
-                self._guarded_fetch_tasks[task_key] = task
-                task.add_done_callback(
-                    lambda completed, key=task_key: self._forget_guarded_fetch_task(
-                        key, completed
-                    )
-                )
-
-        return await asyncio.shield(task)
-
-    def _forget_guarded_fetch_task(
-        self, task_key: tuple, task: asyncio.Task[Optional[bytes]]
-    ) -> None:
-        """抓取完成后只移除仍指向该任务的合并键，避免旧任务清除后继任务。"""
-        with self._guarded_fetch_tasks_lock:
-            if self._guarded_fetch_tasks.get(task_key) is task:
-                self._guarded_fetch_tasks.pop(task_key, None)
-
-    async def _download_guarded_image(
-        self,
-        *,
-        url: str,
-        cache_path: str,
-        redirect_validator: Callable[[str], Awaitable[bool]],
-        max_bytes: int,
-        proxy: Optional[bool],
-        use_cache: bool,
-        max_redirects: int,
-    ) -> Optional[bytes]:
-        """执行一次受保护图片抓取，并在任务内复查并写入共享缓存。"""
-        if use_cache:
-            content = await self.async_file_cache.get(cache_path, region="images")
-            if content:
-                if len(content) <= max_bytes and self._validate_image(content):
-                    return content
-                await self.async_file_cache.delete(cache_path, region="images")
-
-        current_url = url
-        redirects = 0
-
-        while True:
-            params = self._get_request_params(current_url, proxy, cookies=None)
-            request = AsyncRequestUtils(**params, follow_redirects=False)
-
-            async with request.get_stream(current_url) as response:
-                if response is None:
-                    return None
-
-                if response.status_code in {301, 302, 303, 307, 308}:
-                    location = response.headers.get("location")
-                    if not location or redirects >= max_redirects:
-                        return None
-                    next_url = urljoin(current_url, location)
-                    if not await redirect_validator(next_url):
-                        return None
-                    current_url = next_url
-                    redirects += 1
-                    continue
-
-                if response.status_code != 200:
-                    logger.warning(
-                        "登录壁纸抓取失败，状态码: %s",
-                        response.status_code,
-                    )
-                    return None
-
-                content_length = response.headers.get("content-length")
-                if content_length:
-                    try:
-                        if int(content_length) > max_bytes:
-                            return None
-                    except ValueError:
-                        pass
-
-                payload = bytearray()
-                async for chunk in response.aiter_bytes():
-                    payload.extend(chunk)
-                    if len(payload) > max_bytes:
-                        return None
-                break
-
-        content = bytes(payload)
-        if not self._validate_image(content):
-            return None
-        if use_cache:
-            await self.async_file_cache.set(cache_path, content, region="images")
-        return content
+        return content, mime_type

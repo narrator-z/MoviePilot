@@ -14,6 +14,7 @@ from app.db.systemconfig_oper import SystemConfigOper
 from app.db.user_oper import get_current_active_user
 from app.helper.directory import DirectoryHelper
 from app.schemas.types import SystemConfigKey
+from app.utils.media import build_filename_mediainfo
 from app.utils.security import SecurityUtils
 
 router = APIRouter()
@@ -129,6 +130,9 @@ def add(
             source=media_source,
             obtain_images=False,
         )
+        # 无显式 ID 且 TMDB/豆瓣未收录：用文件名兜底，允许下载落 unsorted/按 type（C-2）
+        if not mediainfo:
+            mediainfo = build_filename_mediainfo(metainfo)
     if not mediainfo:
         return schemas.Response(success=False, message="无法识别媒体信息")
     # 种子信息

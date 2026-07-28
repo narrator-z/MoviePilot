@@ -1,4 +1,10 @@
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Union
+
+import hashlib
+import re
+
+from app.core.context import MediaInfo
+from app.schemas.types import MediaType
 
 
 MEDIA_SOURCE_ALIASES = {
@@ -110,3 +116,52 @@ def build_media_key(source: Optional[str], media_id: Optional[Any]) -> str:
         return ""
     prefix = MEDIA_SOURCE_PREFIXES.get(normalized_source, normalized_source)
     return f"{prefix}:{str(media_id).strip()}"
+
+
+def manual_media_key(name: Optional[str], year: Optional[Union[str, int]] = None) -> str:
+    """
+    为无 TMDB/豆瓣等外部 ID 的“手动/文件名识别”媒体生成稳定身份键。
+
+    键由归一化后的 ``name + year`` 取 SHA1 前 16 位构成，避免与已识别媒体串扰，
+    并保证同一内容在不同次下载/整理中得到一致的去重键（决策 Q2）。
+    返回形如 ``manual:<sha1_hex_16>``。
+    """
+    norm = re.sub(r"\s+", "", str(name or "").strip().lower())
+    key = f"{norm}|{str(year or '').strip()}"
+    return f"manual:{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}"
+
+
+def build_filename_mediainfo(meta, media_type: Optional[MediaType] = None) -> MediaInfo:
+    """
+    用下载文件名解析出的 MetaInfo 直接构造一个没有外部 ID 的 MediaInfo（tmdb_id=None）。
+
+    用于整理/下载兜底：让 TMDB/豆瓣未收录内容（短剧等）也能走通整理与下载目录路由。
+
+    - 类型决策（决策 Q1）：若类型为 TV/UNKNOWN 且文件名也无集号（begin_episode 为 None），
+      整包当电影处理，以绕过 transhandler 对 TV 文件的集数硬拒。
+    - 身份键（决策 Q2）：media_id = manual_media_key(name, year)，保证去重稳定。
+    - 命名中的 S/E 由文件自身 MetaInfo 在 transhandler 阶段驱动，此处仅透传 title/season 等展示信息。
+    """
+    name = getattr(meta, "name", None) or ""
+    mtype = media_type or getattr(meta, "type", None) or MediaType.UNKNOWN
+    # 当电影处理：TV/UNKNOWN 且文件名无集号 → 电影
+    if mtype in (MediaType.TV, MediaType.UNKNOWN) and getattr(meta, "begin_episode", None) is None:
+        mtype = MediaType.MOVIE
+    year = getattr(meta, "year", None)
+    season = None
+    begin_season = getattr(meta, "begin_season", None)
+    if begin_season:
+        try:
+            season = int(begin_season)
+        except (TypeError, ValueError):
+            season = None
+    return MediaInfo(
+        source=None,
+        scrape_source=None,
+        type=mtype,
+        title=name,
+        year=str(year) if year else None,
+        season=season,
+        tmdb_id=None,
+        media_id=manual_media_key(name, year),
+    )

@@ -55,7 +55,7 @@ from app.schemas.types import (
     ContentType,
 )
 from app.utils.mixins import ConfigReloadMixin
-from app.utils.media import parse_media_key, resolve_media_identity
+from app.utils.media import build_filename_mediainfo, parse_media_key, resolve_media_identity
 from app.utils.singleton import Singleton
 from app.utils.string import StringUtils
 from app.utils.system import SystemUtils
@@ -1745,6 +1745,11 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                 if mediainfo and task.media_source:
                     mediainfo.scrape_source = task.media_source
 
+                # 外部识别失败兜底：用下载文件名直接构造无 ID 的 MediaInfo，
+                # 让 TMDB/豆瓣未收录内容（短剧等）也能整理进库（决策 Q1/Q2/C-1）
+                if not mediainfo and task.meta and getattr(task.meta, "name", None):
+                    mediainfo = build_filename_mediainfo(task.meta)
+
                 if not mediainfo:
                     if task.preview:
                         return False, "未识别到媒体信息"
@@ -1872,7 +1877,10 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             if not task.target_storage and task.target_directory:
                 task.target_storage = task.target_directory.library_storage
 
-            if self._requires_automatic_category(task) and not task.mediainfo.category:
+            # 手动/文件名兜底媒体无 tmdb_id，无法获取 TMDB 分类，放开“按媒体类别整理”的强制要求
+            if (self._requires_automatic_category(task)
+                    and not task.mediainfo.category
+                    and task.mediainfo.tmdb_id):
                 if task.mediainfo.tmdb_id:
                     error_message = "TMDB 信息未匹配到媒体分类，无法按媒体类别整理"
                 else:

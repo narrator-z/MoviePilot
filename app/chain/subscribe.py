@@ -1004,6 +1004,10 @@ class SubscribeChain(ChainBase):
         if anilistid:
             mediainfo.anilist_id = anilistid
 
+        # 豆瓣/Bangumi 源主识别可能拿不到 tmdbid：按标题+年份二次识别尽力回填，
+        # 仅写入 tmdbid/imdbid/tvdbid，保留订阅原有的 doubanid/media_source/media_id。
+        self._backfill_tmdbid_by_title_year(mediainfo, self.recognize_media)
+
         media_source, media_id = resolve_media_identity(
             media=mediainfo, source=media_source, media_id=media_id
         )
@@ -1210,6 +1214,10 @@ class SubscribeChain(ChainBase):
         if anilistid:
             mediainfo.anilist_id = anilistid
 
+        # 豆瓣/Bangumi 源主识别可能拿不到 tmdbid：按标题+年份二次识别尽力回填，
+        # 仅写入 tmdbid/imdbid/tvdbid，保留订阅原有的 doubanid/media_source/media_id。
+        await self._abackfill_tmdbid_by_title_year(mediainfo, self.async_recognize_media)
+
         media_source, media_id = resolve_media_identity(
             media=mediainfo, source=media_source, media_id=media_id
         )
@@ -1299,6 +1307,52 @@ class SubscribeChain(ChainBase):
         ):
             return True
         return False
+
+    def _backfill_tmdbid_by_title_year(self, mediainfo: MediaInfo, recognize) -> None:
+        """
+        豆瓣/Bangumi 源主识别拿不到 tmdbid 时，按标题+年份二次识别尽力回填。
+
+        仅把回退结果中的 tmdbid/imdbid/tvdbid 写回 mediainfo，绝不覆盖订阅原有的
+        doubanid / media_source / media_id，避免把跨源订阅错误改写成 TMDB 来源。
+        """
+        if mediainfo.tmdb_id is not None:
+            return
+        if not mediainfo.title or not mediainfo.year:
+            return
+        fallback = recognize(
+            meta=MetaInfo(f"{mediainfo.title} {mediainfo.year}"),
+            mtype=mediainfo.type,
+            cache=False,
+        )
+        if fallback and fallback.tmdb_id is not None:
+            mediainfo.tmdb_id = fallback.tmdb_id
+            if fallback.imdb_id:
+                mediainfo.imdb_id = fallback.imdb_id
+            if fallback.tvdb_id:
+                mediainfo.tvdb_id = fallback.tvdb_id
+
+    async def _abackfill_tmdbid_by_title_year(self, mediainfo: MediaInfo, recognize) -> None:
+        """
+        异步版：豆瓣/Bangumi 源主识别拿不到 tmdbid 时，按标题+年份二次识别尽力回填。
+
+        与 :meth:`_backfill_tmdbid_by_title_year` 语义一致，仅回写 tmdbid/imdbid/tvdbid，
+        保留订阅原有的 doubanid / media_source / media_id。
+        """
+        if mediainfo.tmdb_id is not None:
+            return
+        if not mediainfo.title or not mediainfo.year:
+            return
+        fallback = await recognize(
+            meta=MetaInfo(f"{mediainfo.title} {mediainfo.year}"),
+            mtype=mediainfo.type,
+            cache=False,
+        )
+        if fallback and fallback.tmdb_id is not None:
+            mediainfo.tmdb_id = fallback.tmdb_id
+            if fallback.imdb_id:
+                mediainfo.imdb_id = fallback.imdb_id
+            if fallback.tvdb_id:
+                mediainfo.tvdb_id = fallback.tvdb_id
 
     def search(
             self,
@@ -2156,6 +2210,9 @@ class SubscribeChain(ChainBase):
                 logger.warn(
                     f'未识别到媒体信息，标题：{subscribe.name}，tmdbid：{subscribe.tmdbid}，doubanid：{subscribe.doubanid}')
                 continue
+            # 豆瓣/Bangumi 幽灵订阅（tmdbid 为空）按标题+年份二次识别补全 tmdbid，
+            # 供后续种子/历史匹配与写入；仅补 tmdbid/imdbid/tvdbid，保留原 doubanid 与来源。
+            self._backfill_tmdbid_by_title_year(mediainfo, self.recognize_media)
             # 对于电视剧，获取当前季的总集数
             episodes = mediainfo.seasons.get(subscribe.season) or []
             progress_update = {}
@@ -3828,6 +3885,8 @@ class SubscribeChain(ChainBase):
             anilistid=subscribe.anilistid,
             media_source=subscribe.media_source,
             media_id=subscribe.media_id,
+            title=subscribe.name,
+            year=subscribe.year,
         )
         if download_his:
             for his in download_his:

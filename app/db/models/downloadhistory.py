@@ -124,24 +124,39 @@ class DownloadHistory(Base):
             cls, db: Session, tmdbid: Optional[int] = None,
             doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
             anilistid: Optional[int] = None, media_source: Optional[str] = None,
-            media_id: Optional[str] = None,
+            media_id: Optional[str] = None, title: Optional[str] = None,
+            year: Optional[str] = None,
     ):
-        """按统一媒体身份或兼容 ID 查询下载历史。"""
+        """
+        按统一媒体身份或兼容 ID 查询下载历史。
+
+        当身份（tmdbid/doubanid/media_source+media_id 等）查询无结果、且同时传入
+        ``title`` 与 ``year`` 时，按标题+年份回退匹配历史。历史表的 title/year 必定
+        有值，因此该回退可作为订阅详情关联兜底层，使 tmdbid 为空的订阅也能命中历史。
+        """
         query = db.query(DownloadHistory)
         if media_source and media_id:
-            return query.filter(
+            histories = query.filter(
                 DownloadHistory.media_source == media_source,
                 DownloadHistory.media_id == str(media_id),
             ).all()
-        if tmdbid is not None:
-            return query.filter(DownloadHistory.tmdbid == tmdbid).all()
-        if doubanid:
-            return query.filter(DownloadHistory.doubanid == doubanid).all()
-        if bangumiid is not None:
-            return query.filter(DownloadHistory.bangumiid == bangumiid).all()
-        if anilistid is not None:
-            return query.filter(DownloadHistory.anilistid == anilistid).all()
-        return []
+        elif tmdbid is not None:
+            histories = query.filter(DownloadHistory.tmdbid == tmdbid).all()
+        elif doubanid:
+            histories = query.filter(DownloadHistory.doubanid == doubanid).all()
+        elif bangumiid is not None:
+            histories = query.filter(DownloadHistory.bangumiid == bangumiid).all()
+        elif anilistid is not None:
+            histories = query.filter(DownloadHistory.anilistid == anilistid).all()
+        else:
+            histories = []
+        # 身份查询无结果且提供了标题/年份时，按标题+年份回退匹配历史
+        if not histories and title and year:
+            histories = query.filter(
+                DownloadHistory.title == title,
+                DownloadHistory.year == year,
+            ).all()
+        return histories
 
     @classmethod
     @db_query

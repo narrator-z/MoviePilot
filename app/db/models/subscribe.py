@@ -368,6 +368,132 @@ class Subscribe(Base):
         return db.query(cls).filter(cls.mediaid == mediaid).first()
 
     @classmethod
+    @db_query
+    def find_same_media(
+            cls, db: Session, name: Optional[str] = None, year: Optional[str] = None,
+            season: Optional[int] = None, tmdbid: Optional[int] = None,
+            doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
+            media_source: Optional[str] = None, media_id: Optional[str] = None,
+            username: Optional[str] = None,
+    ):
+        """
+        按跨身份同剧口径查询既有订阅，用于创建订阅时的去重与身份合并。
+
+        同剧判定顺序（命中即返回，避免新建"幽灵订阅"）：
+
+        1. tmdbid 优先：若传入 tmdbid，按 tmdbid（叠加 season）查询；
+        2. 标题 + 年份 + 季：name == title AND year == year AND season == season；
+        3. doubanid / bangumiid：若传入这些 ID，再按它们查询。
+
+        owner_scope 场景需保留 ``username`` 作用域（与 ``exists_by_username`` 同口径）。
+        返回的既有可能与请求身份不完全相同，但属于同一部剧，由调用方负责合并身份字段。
+        """
+        # 1. tmdbid 优先
+        if tmdbid is not None:
+            query = db.query(cls).filter(cls.tmdbid == tmdbid)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            existing = query.first()
+            if existing:
+                return existing
+        # 2. 标题 + 年份 + 季（跨任意来源的同剧兜底）
+        if name:
+            query = db.query(cls).filter(cls.name == name)
+            if year:
+                query = query.filter(cls.year == year)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            existing = query.first()
+            if existing:
+                return existing
+        # 3. doubanid / bangumiid
+        if doubanid:
+            query = db.query(cls).filter(cls.doubanid == doubanid)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            existing = query.first()
+            if existing:
+                return existing
+        if bangumiid is not None:
+            query = db.query(cls).filter(cls.bangumiid == bangumiid)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            existing = query.first()
+            if existing:
+                return existing
+        return None
+
+    @classmethod
+    @async_db_query
+    async def async_find_same_media(
+            cls, db: AsyncSession, name: Optional[str] = None, year: Optional[str] = None,
+            season: Optional[int] = None, tmdbid: Optional[int] = None,
+            doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
+            media_source: Optional[str] = None, media_id: Optional[str] = None,
+            username: Optional[str] = None,
+    ):
+        """
+        异步按跨身份同剧口径查询既有订阅（供 ``async_add`` 使用）。
+
+        判定顺序与 ``find_same_media`` 一致：tmdbid -> 标题+年份+季 -> doubanid/bangumiid，
+        同样保留 ``username`` 作用域。命中返回同一部剧的可能不同身份的既有订阅。
+        """
+        # 1. tmdbid 优先
+        if tmdbid is not None:
+            query = select(cls).filter(cls.tmdbid == tmdbid)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            result = await db.execute(query)
+            existing = result.scalars().first()
+            if existing:
+                return existing
+        # 2. 标题 + 年份 + 季（跨任意来源的同剧兜底）
+        if name:
+            query = select(cls).filter(cls.name == name)
+            if year:
+                query = query.filter(cls.year == year)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            result = await db.execute(query)
+            existing = result.scalars().first()
+            if existing:
+                return existing
+        # 3. doubanid / bangumiid
+        if doubanid:
+            query = select(cls).filter(cls.doubanid == doubanid)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            result = await db.execute(query)
+            existing = result.scalars().first()
+            if existing:
+                return existing
+        if bangumiid is not None:
+            query = select(cls).filter(cls.bangumiid == bangumiid)
+            if season is not None:
+                query = query.filter(cls.season == season)
+            if username:
+                query = query.filter(cls.username == username)
+            result = await db.execute(query)
+            existing = result.scalars().first()
+            if existing:
+                return existing
+        return None
+
+    @classmethod
     @async_db_query
     async def async_get_by_mediaid(cls, db: AsyncSession, mediaid: str):
         result = await db.execute(

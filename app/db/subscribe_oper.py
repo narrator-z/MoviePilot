@@ -52,6 +52,26 @@ class SubscribeOper(DbOper):
                                                      **identity_params)
         else:
             subscribe = Subscribe.exists(self._db, **identity_params)
+        if subscribe:
+            return subscribe.id, "订阅已存在"
+        # 跨身份同剧去重：精确身份未命中时，尝试按 tmdbid/标题年份/doubanid 等
+        # 找到"同剧不同身份"的既有订阅；命中则合并身份字段，避免新建幽灵订阅。
+        same_media = Subscribe.find_same_media(
+            self._db,
+            name=mediainfo.title,
+            year=mediainfo.year,
+            season=kwargs.get("season"),
+            tmdbid=mediainfo.tmdb_id,
+            doubanid=mediainfo.douban_id,
+            bangumiid=mediainfo.bangumi_id,
+            media_source=media_source,
+            media_id=media_id,
+            username=username,
+        )
+        if same_media:
+            # 合并 mediainfo 携带的身份字段到既有订阅（不插入新行），返回既有订阅 id
+            self.__merge_subscribe_identity(same_media, mediainfo)
+            return same_media.id, "订阅已存在"
         kwargs.update({
             "name": mediainfo.title,
             "year": mediainfo.year,
@@ -73,19 +93,16 @@ class SubscribeOper(DbOper):
             "date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         })
         kwargs = _normalize_integer_flags(kwargs)
-        if not subscribe:
-            subscribe = Subscribe(**kwargs)
-            subscribe.create(self._db)
-            # 查询订阅
-            if username:
-                subscribe = Subscribe.exists_by_username(self._db,
-                                                         username=username,
-                                                         **identity_params)
-            else:
-                subscribe = Subscribe.exists(self._db, **identity_params)
-            return subscribe.id, "新增订阅成功"
+        subscribe = Subscribe(**kwargs)
+        subscribe.create(self._db)
+        # 查询订阅
+        if username:
+            subscribe = Subscribe.exists_by_username(self._db,
+                                                     username=username,
+                                                     **identity_params)
         else:
-            return subscribe.id, "订阅已存在"
+            subscribe = Subscribe.exists(self._db, **identity_params)
+        return subscribe.id, "新增订阅成功"
 
     async def async_add(self, mediainfo: MediaInfo, **kwargs) -> Tuple[int, str]:
         """
@@ -113,6 +130,26 @@ class SubscribeOper(DbOper):
                                                                  **identity_params)
         else:
             subscribe = await Subscribe.async_exists(self._db, **identity_params)
+        if subscribe:
+            return subscribe.id, "订阅已存在"
+        # 跨身份同剧去重：精确身份未命中时，按 tmdbid/标题年份/doubanid 找到同剧
+        # 既有订阅则合并身份字段，避免新建幽灵订阅。
+        same_media = await Subscribe.async_find_same_media(
+            self._db,
+            name=mediainfo.title,
+            year=mediainfo.year,
+            season=kwargs.get("season"),
+            tmdbid=mediainfo.tmdb_id,
+            doubanid=mediainfo.douban_id,
+            bangumiid=mediainfo.bangumi_id,
+            media_source=media_source,
+            media_id=media_id,
+            username=username,
+        )
+        if same_media:
+            # 合并 mediainfo 携带的身份字段到既有订阅（不插入新行），返回既有订阅 id
+            self.__merge_subscribe_identity(same_media, mediainfo)
+            return same_media.id, "订阅已存在"
         kwargs.update({
             "name": mediainfo.title,
             "year": mediainfo.year,
@@ -134,19 +171,69 @@ class SubscribeOper(DbOper):
             "date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         })
         kwargs = _normalize_integer_flags(kwargs)
-        if not subscribe:
-            subscribe = Subscribe(**kwargs)
-            await subscribe.async_create(self._db)
-            # 查询订阅
-            if username:
-                subscribe = await Subscribe.async_exists_by_username(self._db,
-                                                                     username=username,
-                                                                     **identity_params)
-            else:
-                subscribe = await Subscribe.async_exists(self._db, **identity_params)
-            return subscribe.id, "新增订阅成功"
+        subscribe = Subscribe(**kwargs)
+        await subscribe.async_create(self._db)
+        # 查询订阅
+        if username:
+            subscribe = await Subscribe.async_exists_by_username(self._db,
+                                                                 username=username,
+                                                                 **identity_params)
         else:
-            return subscribe.id, "订阅已存在"
+            subscribe = await Subscribe.async_exists(self._db, **identity_params)
+        return subscribe.id, "新增订阅成功"
+
+    def __merge_subscribe_identity(self, existing: Subscribe, mediainfo: MediaInfo) -> None:
+        """将 mediainfo 携带的身份字段合并写回既有订阅，用于跨来源同剧去重。
+
+        仅拷贝 mediainfo 中“非 None”的字段，且身份字段（tmdbid/doubanid/media_source
+        等）只在既有订阅对应字段为空时才补全——绝不允许用新来源的空值或非空身份覆盖
+        既有订阅已有的有效身份，避免把 TMDB 订阅错误改写成豆瓣来源或反之。命中既有订阅
+        时不插入新行，直接复用既有订阅并补全缺失身份（tmdbid 等）。
+        """
+        updates: dict = {}
+        # 身份字段：仅在既有订阅对应字段为空时才补全，禁止覆盖已有身份
+        identity_fields = {
+            "tmdbid", "imdbid", "tvdbid", "doubanid",
+            "bangumiid", "anilistid", "media_source", "media_id",
+        }
+        # tmdb 系 / 豆瓣 / Bangumi / AniList 等身份 ID 与基础元信息（一对一字段映射）
+        simple_fields = (
+            ("tmdbid", "tmdb_id"),
+            ("imdbid", "imdb_id"),
+            ("tvdbid", "tvdb_id"),
+            ("doubanid", "douban_id"),
+            ("bangumiid", "bangumi_id"),
+            ("anilistid", "anilist_id"),
+            ("media_source", "media_source"),
+            ("media_id", "media_id"),
+            ("name", "title"),
+            ("year", "year"),
+            ("episode_group", "episode_group"),
+            ("vote", "vote_average"),
+            ("description", "overview"),
+        )
+        for column, attr in simple_fields:
+            value = getattr(mediainfo, attr, None)
+            if value is None:
+                continue
+            # 身份字段需确保不覆盖既有订阅已有的有效值
+            if column in identity_fields:
+                current = getattr(existing, column, None)
+                if current not in (None, ""):
+                    continue
+            updates[column] = value
+        # 类型需取枚举值
+        if mediainfo.type is not None:
+            updates["type"] = mediainfo.type.value
+        # 海报 / 背景图需调用方法获取
+        poster = mediainfo.get_poster_image()
+        if poster is not None:
+            updates["poster"] = poster
+        backdrop = mediainfo.get_backdrop_image()
+        if backdrop is not None:
+            updates["backdrop"] = backdrop
+        if updates:
+            self.update(existing.id, updates)
 
     def exists(
             self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,

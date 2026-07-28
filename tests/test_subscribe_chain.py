@@ -41,6 +41,12 @@ def _load_subscribe_chain_class():
         def recognize_media(self, *args, **kwargs):
             return None
 
+        def obtain_images(self, *args, **kwargs):
+            return None
+
+        async def async_obtain_images(self, *args, **kwargs):
+            return None
+
     chain_module.ChainBase = _ChainBase
 
     interaction_module = ensure_module("app.helper.interaction", types.ModuleType("app.helper.interaction"))
@@ -113,7 +119,9 @@ def _load_subscribe_chain_class():
         """提供订阅刷新测试需要的 MetaInfo 核心字段。"""
 
         def __init__(self, title="", *args, **kwargs):
+            begin_season = kwargs.pop("begin_season", None)
             super().__init__(name=title, episode_list=[])
+            self.begin_season = begin_season
 
         @property
         def season_seq(self):
@@ -184,6 +192,7 @@ def _load_subscribe_chain_class():
         def __init__(self):
             self.downloading = []
             self.downloaded = []
+            self.download = []
             self.library = []
 
     class _SubscrbieInfo:
@@ -227,6 +236,21 @@ def _load_subscribe_chain_class():
     schemas_module.MediaRecognizeConvertEventData = _MediaRecognizeConvertEventData
     schemas_module.SubscribeEpisodesRefreshEventData = _SubscribeEpisodesRefreshEventData
     schemas_module.SubscribeCompletionCheckEventData = _SubscribeCompletionCheckEventData
+
+    class _TransferInfo:
+        """提供整理历史记录链接到订阅详情所需的最小结构。"""
+
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FileItem:
+        """提供文件条目结构，供整理/订阅文件信息回查使用。"""
+
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
+
+    schemas_module.TransferInfo = _TransferInfo
+    schemas_module.FileItem = _FileItem
 
     logger_module = ensure_module("app.log", types.ModuleType("app.log"))
 
@@ -1790,8 +1814,9 @@ class SubscribeChainTest(TestCase):
             bangumi_id=None,
             anilist_id=None,
             get_poster_image=lambda: "poster",
-            get_backdrop_image=lambda: "backdrop",
-        )
+                get_backdrop_image=lambda: "backdrop",
+                to_dict=lambda: {},
+            )
 
         with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper") as subscribe_oper_cls:
             subscribe_oper = subscribe_oper_cls.return_value
@@ -1863,6 +1888,180 @@ class SubscribeChainTest(TestCase):
         )
 
         self.assertEqual(interested, list(range(84, 93)))
+
+    def test_add_backfills_tmdbid_from_title_year_when_douban_null(self):
+        """豆瓣源主识别拿不到 tmdbid 时，应按标题+年份二次识别回填 tmdbid 落库。"""
+        recorded = {}
+
+        class _SubscribeOper:
+            def add(self, mediainfo, **kwargs):
+                recorded["mediainfo"] = mediainfo
+                recorded["kwargs"] = kwargs
+                return 1, "新增订阅成功"
+
+            def update(self, *args, **kwargs):
+                return None
+
+            def get(self, *args, **kwargs):
+                return None
+
+            def list(self, *args, **kwargs):
+                return []
+
+            def delete(self, *args, **kwargs):
+                return None
+
+            def add_history(self, *args, **kwargs):
+                return None
+
+        chain = SubscribeChain()
+
+        def _recognize(**kwargs):
+            # 首次（按 doubanid）拿不到 tmdbid；二次（按标题+年份）命中 tmdbid
+            if kwargs.get("doubanid"):
+                return SimpleNamespace(
+                    title="躲在超市后门抽烟的两人", year="2022",
+                    type=MediaType.MOVIE, vote_average=8.0, overview="",
+                    imdb_id=None, tvdb_id=None, source="douban", tmdb_id=None,
+                    douban_id="12345", bangumi_id=None, anilist_id=None,
+                    episode_group=None, seasons={},
+                    get_poster_image=lambda: "poster",
+                    get_backdrop_image=lambda: "backdrop",
+                    get_message_image=lambda: "poster",
+                    to_dict=lambda: {},
+                )
+            return SimpleNamespace(
+                title="躲在超市后门抽烟的两人", year="2022",
+                type=MediaType.MOVIE, vote_average=8.0, overview="",
+                imdb_id="tt9", tvdb_id=9, source="themoviedb", tmdb_id=296286,
+                douban_id=None, bangumi_id=None, anilist_id=None,
+                episode_group=None, seasons=None,
+                get_poster_image=lambda: "poster",
+                get_backdrop_image=lambda: "backdrop",
+                get_message_image=lambda: "poster",
+                to_dict=lambda: {},
+            )
+
+        chain.recognize_media = _recognize
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            sid, msg = chain.add(
+                title="躲在超市后门抽烟的两人", year="2022", doubanid="12345",
+                mtype=MediaType.MOVIE, message=False,
+            )
+
+        self.assertEqual(sid, 1)
+        self.assertEqual(recorded["mediainfo"].tmdb_id, 296286)
+        # 护栏：二次识别不得覆盖原有 doubanid
+        self.assertEqual(recorded["mediainfo"].douban_id, "12345")
+
+    def test_check_backfills_tmdbid_for_existing_douban_sub(self):
+        """周期性 check 应为既有豆瓣幽灵订阅（tmdbid 为空）按标题+年份补全 tmdbid。"""
+        subscribe = self._build_subscribe(
+            tmdbid=None,
+            doubanid="12345",
+            media_source="douban",
+            media_id="12345",
+            type=MediaType.MOVIE.value,
+            name="躲在超市后门抽烟的两人",
+            year="2022",
+        )
+        chain = SubscribeChain()
+
+        def _recognize(**kwargs):
+            if kwargs.get("doubanid"):
+                return SimpleNamespace(
+                    title="躲在超市后门抽烟的两人", year="2022",
+                    type=MediaType.MOVIE, vote_average=8.0, overview="",
+                    imdb_id=None, tvdb_id=None, source="douban", tmdb_id=None,
+                    douban_id="12345", bangumi_id=None, anilist_id=None,
+                    episode_group=None, seasons={},
+                    get_poster_image=lambda: "poster",
+                    get_backdrop_image=lambda: "backdrop",
+                    get_message_image=lambda: "poster",
+                    to_dict=lambda: {},
+                )
+            return SimpleNamespace(
+                title="躲在超市后门抽烟的两人", year="2022",
+                type=MediaType.MOVIE, vote_average=8.0, overview="",
+                imdb_id="tt9", tvdb_id=9, source="themoviedb", tmdb_id=296286,
+                douban_id=None, bangumi_id=None, anilist_id=None,
+                episode_group=None, seasons=None,
+                get_poster_image=lambda: "poster",
+                get_backdrop_image=lambda: "backdrop",
+                get_message_image=lambda: "poster",
+                to_dict=lambda: {},
+            )
+
+        chain.recognize_media = _recognize
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper") as subscribe_oper_cls:
+            subscribe_oper = subscribe_oper_cls.return_value
+            subscribe_oper.list.return_value = [subscribe]
+            subscribe_oper.update.return_value = None
+
+            chain.check()
+
+        payload = subscribe_oper.update.call_args.args[1]
+        self.assertEqual(payload["tmdbid"], 296286)
+        self.assertEqual(payload["imdbid"], "tt9")
+        self.assertEqual(payload["tvdbid"], 9)
+        # 护栏：保留原 doubanid 与来源，不被 themoviedb 覆盖
+        self.assertEqual(payload["doubanid"], "12345")
+        self.assertEqual(payload["media_source"], "douban")
+
+    def test_subscribe_files_info_matches_history_by_title_year_when_tmdbid_null(self):
+        """tmdbid 为空的订阅应按标题+年份命中下载历史，详情页关联下载/整理文件。"""
+        captured = {}
+
+        class _DownloadHistoryOper:
+            def get_by_mediaid(self, tmdbid=None, doubanid=None, bangumiid=None,
+                               anilistid=None, media_source=None, media_id=None,
+                               title=None, year=None):
+                captured.update({
+                    "tmdbid": tmdbid, "doubanid": doubanid,
+                    "title": title, "year": year,
+                })
+                if title and year:
+                    return [SimpleNamespace(
+                        download_hash="h1", torrent_name="Torrent", torrent_site="Site",
+                    )]
+                return []
+
+            def get_files_by_hash(self, download_hash, state=1):
+                return [SimpleNamespace(
+                    downloader="qb", fullpath="/path/Test.Show.mkv",
+                    filepath="/path/Test.Show.mkv",
+                )]
+
+        class _TransferHistoryOper:
+            def list_by_hash(self, download_hash):
+                return []
+
+        class _MediaServerHelper:
+            def get_services(self):
+                return {}
+
+        subscribe = self._build_subscribe(
+            tmdbid=None,
+            type=MediaType.MOVIE.value,
+            name="测试剧",
+            year="2022",
+        )
+        chain = SubscribeChain()
+        chain.recognize_media = lambda **kwargs: SimpleNamespace(
+            title="测试剧", year="2022", type=MediaType.MOVIE,
+        )
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "DownloadHistoryOper", _DownloadHistoryOper), \
+                patch.object(SUBSCRIBE_CHAIN_MODULE, "TransferHistoryOper", _TransferHistoryOper), \
+                patch.object(SUBSCRIBE_CHAIN_MODULE, "MediaServerHelper", _MediaServerHelper):
+            info = chain.subscribe_files_info(subscribe)
+
+        self.assertEqual(captured["tmdbid"], None)
+        self.assertEqual(captured["title"], "测试剧")
+        self.assertEqual(captured["year"], "2022")
+        self.assertTrue(len(info.episodes[0].download) > 0)
 
 
 class SubscribeFilterAllowedEpisodesTest(TestCase):

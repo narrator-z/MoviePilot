@@ -1,7 +1,11 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import sqlalchemy as sa
+from sqlalchemy.orm import sessionmaker
+
 from app.chain.transfer import TransferChain
+from app.db.models.downloadhistory import DownloadHistory
 
 
 class FakeDownloadHistoryOper:
@@ -306,3 +310,52 @@ def test_resolve_download_history_stops_at_nested_category_root(monkeypatch):
     )
 
     assert history is None
+
+
+def _make_downloadhistory_session():
+    """构造内存 SQLite 会话，用于下载历史查询的单元测试，不触碰真实数据库。"""
+    engine = sa.create_engine("sqlite://")
+    DownloadHistory.__table__.create(engine)
+    Session = sessionmaker(bind=engine)
+    return Session()
+
+
+def test_get_by_mediaid_falls_back_to_title_year_when_tmdbid_null():
+    """tmdbid 为空的下载历史应按标题+年份回退匹配，使豆瓣/Bangumi 订阅也能关联命中。
+
+    这是本次修复的核心兜底：豆瓣/Bangumi 来源的订阅tmdbid为NULL，按tmdbid查询下载
+    历史永远空，导致订阅详情页关联不到已下载/整理的文件（"下载了但信息丢失"）。当身份
+    查询（tmdbid/doubanid 等）无结果且同时传入 title 与 year 时，应按标题+年份回退命中。
+    """
+    db = _make_downloadhistory_session()
+    db.add(DownloadHistory(
+        title="躲在超市后门抽烟的两人",
+        year="2022",
+        type="电影",
+        path="/downloads/Torrent",
+        tmdbid=None,
+        doubanid=None,
+        downloader="qb",
+        download_hash="hash1",
+        torrent_name="Torrent",
+    ))
+    db.commit()
+
+    # 仅按空 tmdbid 查询时不应误命中（无身份、无标题回退）
+    by_tmdb = DownloadHistory.get_by_mediaid(db, tmdbid=None)
+    assert by_tmdb == []
+
+    # 按标题+年份回退应命中同剧历史，使订阅能关联下载/整理文件
+    by_title_year = DownloadHistory.get_by_mediaid(
+        db, tmdbid=None, title="躲在超市后门抽烟的两人", year="2022"
+    )
+    assert len(by_title_year) == 1
+    assert by_title_year[0].title == "躲在超市后门抽烟的两人"
+    assert by_title_year[0].year == "2022"
+
+    # 标题/年份不匹配时不应命中，避免跨剧污染
+    no_match = DownloadHistory.get_by_mediaid(
+        db, tmdbid=None, title="另一部电影", year="2020"
+    )
+    assert no_match == []
+    db.close()

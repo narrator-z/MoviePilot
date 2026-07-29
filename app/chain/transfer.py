@@ -1638,7 +1638,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         保证默认按 tmdbid 一致识别;都没有返回 None(走文件名兜底)。"""
         if download_history:
             ids = dict(
-                media_id=download_history.media_id,
+                mediaid=download_history.media_id,
                 tmdbid=download_history.tmdbid,
                 doubanid=download_history.doubanid,
                 bangumiid=download_history.bangumiid,
@@ -1646,7 +1646,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                 source=download_history.media_source,
                 episode_group=download_history.episode_group,
             )
-            if any(ids.get(k) for k in ("tmdbid", "doubanid", "bangumiid", "anilistid", "media_id")):
+            if any(ids.get(k) for k in ("tmdbid", "doubanid", "bangumiid", "anilistid", "mediaid")):
                 return ids
         tmdbid = self._resolve_subscription_tmdbid(task, download_history)
         if tmdbid:

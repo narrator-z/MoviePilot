@@ -449,7 +449,8 @@ class ConfigModel(BaseModel):
         "https://github.com/Hqyel/MoviePilot-Plugins-Third,"
         "https://github.com/xijin285/MoviePilot-Plugins,"
         "https://github.com/Seed680/MoviePilot-Plugins,"
-        "https://github.com/imaliang/MoviePilot-Plugins"
+        "https://github.com/imaliang/MoviePilot-Plugins,"
+        "https://github.com/narrator-z/MoviePilot-PluginsV2"
     )
     # 插件安装数据共享
     PLUGIN_STATISTIC_SHARE: bool = True

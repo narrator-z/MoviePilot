@@ -107,7 +107,7 @@ def test_collect_recognize_ids_prefers_download_history_id() -> None:
     ids = chain._collect_recognize_ids(None, download_history)
 
     assert ids == {
-        "media_id": None,
+        "mediaid": None,
         "tmdbid": 296206,
         "doubanid": None,
         "bangumiid": None,

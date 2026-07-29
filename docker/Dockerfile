@@ -112,15 +112,6 @@ RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/
     && if [ "$ARCH" = "aarch64" ]; then SUFFIX="aarch64-linux-gnu"; else SUFFIX="x86_64-linux-gnu"; fi \
     && dl "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/sites.${python_ver}-${SUFFIX}.so" -o "/app/app/helper/sites.${python_ver}-${SUFFIX}.so"
 
-# 叠加拉取用户自定义插件仓库（narrator-z/MoviePilot-PluginsV2），覆盖官方同名插件，
-# 以便镜像直接使用该仓库中最新的 jackettextend / prowlarrextend 等插件。
-# 置于官方插件拉取之后执行，确保用户仓库版本优先于官方同名插件。
-# 采用「叠加」而非「替换」：官方 jxxghp/MoviePilot-Plugins 已经提供了完整的插件生态打底，
-# 这里仅用用户仓库中的同名插件覆盖，官方其他插件（非同名插件）得以完整保留。
-RUN dl() { if [ -n "${GITHUB_TOKEN:-}" ]; then curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors -H "Authorization: Bearer ${GITHUB_TOKEN}" "$@"; else curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "$@"; fi; } \
-    && dl "https://github.com/narrator-z/MoviePilot-PluginsV2/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \
-    && mv -f /tmp/MoviePilot-PluginsV2-main/plugins.v2/* /app/app/plugins/ \
-    && rm -rf /tmp/MoviePilot-PluginsV2-main
 
 # final 阶段: 安装运行时依赖和配置最终镜像
 FROM prepare_package AS final

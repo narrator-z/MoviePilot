@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Union, Tuple
+from typing import Any, Callable, Dict, List, Optional, Union, Tuple, Set
 
 from app import schemas
 from app.chain import ChainBase
@@ -27,6 +27,7 @@ from app.db.site_oper import SiteOper
 from app.db.subscribe_oper import SubscribeOper
 from app.db.systemconfig_oper import SystemConfigOper
 from app.db.transferhistory_oper import TransferHistoryOper
+from app.db.models.transferhistory import TransferHistory
 from app.helper.interaction import (
     SlashInteractionManager,
     build_navigation_buttons,
@@ -1633,9 +1634,6 @@ class SubscribeChain(ChainBase):
         """
         判断是否应完成订阅
         """
-        media_keys = _subscribe_media_keys(subscribe)
-        # 是否有剩余集
-        no_lefts = not lefts or not any(lefts.get(media_key) for media_key in media_keys)
         if downloads and meta.type == MediaType.TV:
             self.__record_subscribe_download_facts(subscribe=subscribe, mediainfo=mediainfo, downloads=downloads)
         elif downloads:
@@ -1646,9 +1644,10 @@ class SubscribeChain(ChainBase):
                 mediainfo=mediainfo,
                 downloads=downloads,
             )
-        # 是否完成订阅
+        # 是否完成订阅（真实入库守卫：必须确有成功转存记录才完成，
+        # 避免媒体服务器误报或“有下载记录即算”导致少集/没入库就进历史）
         if not subscribe.best_version:
-            # 普通订阅：先按 lefts 写 lack，再判断完成
+            # 普通订阅：先按 lefts 写 lack（用于界面显示缺失集），再判断完成
             if meta.type == MediaType.TV:
                 self.__refresh_subscribe_progress_with_no_exists(
                     no_exists=lefts,
@@ -1656,12 +1655,10 @@ class SubscribeChain(ChainBase):
                     touch_last_update=bool(downloads),
                     scene="download",
                 )
-            if ((no_lefts and meta.type == MediaType.TV)
-                    or (downloads and meta.type == MediaType.MOVIE)
-                    or force):
+            if self.__is_truly_completed(subscribe=subscribe, meta=meta, mediainfo=mediainfo):
                 self.__finish_subscribe(subscribe=subscribe, meta=meta, mediainfo=mediainfo)
             else:
-                logger.info(f'{mediainfo.title_year} 未下载完整，继续订阅 ...')
+                logger.info(f'{mediainfo.title_year} 未完成真实入库（缺少成功转存记录或集数不齐），继续订阅以确保不遗漏 ...')
             return
 
         if meta.type == MediaType.TV:
@@ -1676,6 +1673,74 @@ class SubscribeChain(ChainBase):
             self.__finish_subscribe(subscribe=subscribe, meta=meta, mediainfo=mediainfo)
         elif not downloads:
             logger.info(f'{mediainfo.title_year} 继续洗版 ...')
+
+    @staticmethod
+    def __parse_episode_numbers(episodes: Optional[str]) -> Set[int]:
+        """从 transferhistory.episodes 字段解析集号集合，支持 E01-E08 范围与离散集。"""
+        if not episodes:
+            return set()
+        nums = [int(x) for x in re.findall(r"\d+", episodes or "")]
+        if "-" in (episodes or "") and len(nums) >= 2:
+            return set(range(nums[0], nums[-1] + 1))
+        return set(nums)
+
+    def __has_successful_transfer(self, subscribe: Subscribe, meta: MetaBase, mediainfo: MediaInfo) -> bool:
+        """
+        真实入库佐证：该媒体是否有我们自己的成功转存记录(status=True)。
+        用于复核媒体服务器(如飞牛影视)的存在性回报是否可信，避免误报导致误删订阅。
+        """
+        try:
+            if subscribe.tmdbid:
+                rows = TransferHistory.list_by(mtype=meta.type.value, tmdbid=subscribe.tmdbid)
+                if any(r.status for r in rows):
+                    return True
+            if subscribe.name:
+                rows = TransferHistory.list_by_title(title=subscribe.name, status=True)
+                if rows:
+                    return True
+        except Exception as err:
+            logger.warning(f"订阅 {subscribe.name} 转存记录查询失败，按未入库处理：{err}")
+        return False
+
+    def __tv_transferred_episodes(self, subscribe: Subscribe, season: int) -> Set[int]:
+        """返回该季已成功转存(status=True)的集号集合。"""
+        episodes: Set[int] = set()
+        if subscribe.tmdbid:
+            try:
+                rows = TransferHistory.list_by(
+                    mtype=MediaType.TV.value,
+                    tmdbid=subscribe.tmdbid,
+                    season=f"S{season:02d}",
+                )
+                for r in rows:
+                    if r.status:
+                        episodes |= self.__parse_episode_numbers(r.episodes)
+            except Exception as err:
+                logger.warning(f"订阅 {subscribe.name} 转存记录查询失败，按未入库处理：{err}")
+        return episodes
+
+    def __is_truly_completed(self, subscribe: Subscribe, meta: MetaBase, mediainfo: MediaInfo) -> bool:
+        """
+        真实入库守卫：完成订阅删除前，确认资源确实已成功转存入库，避免仅凭
+        媒体服务器存在性检查(如飞牛影视误报)或下载记录就删除订阅并转入历史。
+        依据：TransferHistory 中 status=True 的成功转存记录覆盖所有应追集(TV)/资源(电影)。
+        """
+        if subscribe.best_version:
+            return self.__is_best_version_complete(subscribe)
+        if meta.type == MediaType.MOVIE:
+            return self.__has_successful_transfer(subscribe, meta, mediainfo)
+        season = subscribe.season
+        total = self.__resolve_effective_total_episode(subscribe, mediainfo)
+        if not season or not total:
+            logger.info(f'{mediainfo.title_year} 无法判定应追集数范围，暂不自动完成订阅')
+            return False
+        transferred = self.__tv_transferred_episodes(subscribe, season)
+        start = subscribe.start_episode or 1
+        missing = [ep for ep in range(start, total + 1) if ep not in transferred]
+        if missing:
+            logger.info(f'{mediainfo.title_year} 仍有缺失集未成功转存：{missing}，暂不完成订阅')
+            return False
+        return True
 
     def refresh(self, progress_callback: Optional[Callable[..., None]] = None) -> None:
         """
@@ -4083,13 +4148,16 @@ class SubscribeChain(ChainBase):
             mediakey=mediakey,
         )
 
-        # 如果已下载完毕，执行订阅完成操作
-        if exist_flag:
-            logger.info(f'{mediainfo.title_year} 已全部下载')
-            self.finish_subscribe_or_not(subscribe=subscribe, meta=meta, mediainfo=mediainfo, force=True)
+        # 真实入库守卫：媒体库回报“已存在”时，必须我们也有成功转存记录(status=True)佐证，
+        # 否则视为媒体服务器(如飞牛影视 fn)误报，继续下载补齐而非跳过/完成，
+        # 避免订阅卡死(一直跳过)或误删(直接完成转历史)。
+        truly_exist = bool(exist_flag) and self.__has_successful_transfer(subscribe, meta, mediainfo)
+        if truly_exist:
+            logger.info(f'{mediainfo.title_year} 已确认真实入库，完成订阅')
+            self.finish_subscribe_or_not(subscribe=subscribe, meta=meta, mediainfo=mediainfo, lefts=no_exists)
             return True, no_exists
 
-        # 返回结果，表示媒体未完全下载或存在
+        # 返回结果，表示媒体未完全下载或存在（含媒体服务器误报场景，将继续下载补齐）
         return False, no_exists
 
     def resolve_subscribe_missing(self, subscribe: Subscribe, meta: MetaBase,

@@ -2740,11 +2740,15 @@ class SubscribeProgressEntrypointTest(TestCase):
                 updates.append(payload)
 
         with patch.object(self.module, "SubscribeOper", return_value=_SubscribeOper()), \
-                patch.object(self.SubscribeChain, "_SubscribeChain__finish_subscribe"):
+                patch.object(self.SubscribeChain, "_SubscribeChain__finish_subscribe"), \
+                patch.object(self.module, "TransferHistory") as _th:
+            # 模拟该季已成功转存，使真实入库守卫通过（下载且转存成功才完成）
+            _th.list_by.return_value = [SimpleNamespace(episodes="E01", status=True)]
+            _th.list_by_title.return_value = []
             self.SubscribeChain().finish_subscribe_or_not(
                 subscribe=subscribe,
-                meta=SimpleNamespace(type=MediaType.TV),
-                mediainfo=SimpleNamespace(title_year="测试剧 (2026)"),
+                meta=SimpleNamespace(type=MediaType.TV, seasons={1: [object() for _ in range(5)]}),
+                mediainfo=SimpleNamespace(title_year="测试剧 (2026)", seasons={1: [object() for _ in range(5)]}),
                 downloads=None,
                 lefts=None,
             )
@@ -3904,7 +3908,12 @@ class SubscribeDownloadFactsTest(TestCase):
             finished.append(subscribe.current_priority)
 
         with patch.object(self.module, "SubscribeOper", return_value=_SubscribeOper()), \
-                patch.object(chain, "_SubscribeChain__finish_subscribe", side_effect=finish_probe):
+                patch.object(chain, "_SubscribeChain__finish_subscribe", side_effect=finish_probe), \
+                patch.object(self.module, "TransferHistory") as _th:
+            # 模拟电影已成功转存，使真实入库守卫通过（下载且转存成功才完成）
+            _th.list_by.return_value = [SimpleNamespace(episodes="E01", status=True,
+                                                         type=MediaType.MOVIE.value, tmdbid=30003)]
+            _th.list_by_title.return_value = []
             chain.finish_subscribe_or_not(
                 subscribe=subscribe,
                 meta=SimpleNamespace(type=MediaType.MOVIE),

@@ -44,7 +44,7 @@ from app.log import logger
 from app.schemas import (MediaRecognizeConvertEventData, SubscribeEpisodesRefreshEventData,
                          SubscribeCompletionCheckEventData)
 from app.schemas.types import MediaType, SystemConfigKey, MessageChannel, NotificationType, EventType, ChainEventType, \
-    ContentType
+    ContentType, ModuleType
 from app.utils.media import (
     build_media_key,
     normalize_media_source,
@@ -1655,10 +1655,13 @@ class SubscribeChain(ChainBase):
                     touch_last_update=bool(downloads),
                     scene="download",
                 )
-            if self.__is_truly_completed(subscribe=subscribe, meta=meta, mediainfo=mediainfo):
+            # 双重闸门：既要有我们自己的成功转存记录(status=True)，也要媒体服务器(飞牛等)确报已入库。
+            # 二者缺一不可 —— 否则“已转存但库里没有(飞牛没有的)”或“库误报存在”都会被误判完成转历史。
+            if self.__is_truly_completed(subscribe=subscribe, meta=meta, mediainfo=mediainfo) \
+                    and self.__fn_confirms_present(subscribe=subscribe, meta=meta, mediainfo=mediainfo):
                 self.__finish_subscribe(subscribe=subscribe, meta=meta, mediainfo=mediainfo)
             else:
-                logger.info(f'{mediainfo.title_year} 未完成真实入库（缺少成功转存记录或集数不齐），继续订阅以确保不遗漏 ...')
+                logger.info(f'{mediainfo.title_year} 未完成真实入库（缺少成功转存记录、集数不齐或媒体库未确认入库），继续订阅以确保不遗漏 ...')
             return
 
         if meta.type == MediaType.TV:
@@ -1701,6 +1704,27 @@ class SubscribeChain(ChainBase):
         except Exception as err:
             logger.warning(f"订阅 {subscribe.name} 转存记录查询失败，按未入库处理：{err}")
         return False
+
+    def __fn_confirms_present(self, subscribe: Subscribe, meta: MetaBase, mediainfo: MediaInfo) -> bool:
+        """
+        媒体服务器(飞牛影视等)确报已入库复核：以媒体库实际存在性为最终完成闸门，
+        避免“我们转存记录成功(status=True)但媒体库里根本没有(飞牛没有的)”也被判完成转历史。
+
+        - 已配置媒体服务器：必须媒体库回报已存在才放行（与 check_and_handle_existing_media 口径一致）。
+        - 未配置任何媒体服务器：无库可查，退化为仅以转存记录为准（保持旧行为，不误删订阅）。
+        - 查询异常：按“未入库”处理，宁可不完成也不要误删订阅。
+        """
+        if not getattr(self, "modulemanager", None) \
+                or not any(self.modulemanager.get_running_type_modules(ModuleType.MediaServer)):
+            # 没有媒体服务器（或运行期尚未初始化模块管理器），无法以库复核，信任转存记录即可
+            return True
+        try:
+            exist_flag, _ = self.resolve_subscribe_missing(
+                subscribe=subscribe, meta=meta, mediainfo=mediainfo)
+            return bool(exist_flag)
+        except Exception as err:
+            logger.warning(f"订阅 {subscribe.name} 媒体库存在性查询失败，按未入库处理：{err}")
+            return False
 
     def __tv_transferred_episodes(self, subscribe: Subscribe, season: int) -> Set[int]:
         """返回该季已成功转存(status=True)的集号集合。"""

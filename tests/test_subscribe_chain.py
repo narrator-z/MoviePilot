@@ -3827,7 +3827,8 @@ class SubscribeDownloadFactsTest(TestCase):
 
         with patch.object(self.module, "SubscribeOper") as subscribe_oper_cls, \
                 patch.object(chain, "_SubscribeChain__refresh_subscribe_progress_with_no_exists") as refresh_mock, \
-                patch.object(chain, "_SubscribeChain__finish_subscribe"):
+                patch.object(chain, "_SubscribeChain__finish_subscribe"), \
+                patch.object(chain, "resolve_subscribe_missing", return_value=(True, {})):
             subscribe_oper = subscribe_oper_cls.return_value
             subscribe_oper.update.return_value = None
 
@@ -3863,7 +3864,8 @@ class SubscribeDownloadFactsTest(TestCase):
 
         with patch.object(self.module, "SubscribeOper") as subscribe_oper_cls, \
                 patch.object(chain, "_SubscribeChain__refresh_subscribe_progress_with_no_exists") as refresh_mock, \
-                patch.object(chain, "_SubscribeChain__finish_subscribe"):
+                patch.object(chain, "_SubscribeChain__finish_subscribe"), \
+                patch.object(chain, "resolve_subscribe_missing", return_value=(True, {})):
             subscribe_oper = subscribe_oper_cls.return_value
             subscribe_oper.update.return_value = None
 
@@ -3909,6 +3911,7 @@ class SubscribeDownloadFactsTest(TestCase):
 
         with patch.object(self.module, "SubscribeOper", return_value=_SubscribeOper()), \
                 patch.object(chain, "_SubscribeChain__finish_subscribe", side_effect=finish_probe), \
+                patch.object(chain, "resolve_subscribe_missing", return_value=(True, {})), \
                 patch.object(self.module, "TransferHistory") as _th:
             # 模拟电影已成功转存，使真实入库守卫通过（下载且转存成功才完成）
             _th.list_by.return_value = [SimpleNamespace(episodes="E01", status=True,

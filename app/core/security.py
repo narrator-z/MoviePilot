@@ -286,6 +286,18 @@ def verify_token(
         verify_apitoken(api_token)
         return __create_superuser_token_payload()
     else:
+        # 兜底：同源重复请求 / Service Worker 重发时可能不带 Bearer 头，
+        # 此时回落到已下发的资源令牌 Cookie 完成鉴权，避免被误判为未登录而强制登出。
+        resource_cookie = request.cookies.get(settings.PROJECT_NAME)
+        if resource_cookie:
+            try:
+                payload = __verify_token(token=resource_cookie, purpose="resource")
+            except HTTPException:
+                payload = None
+            if payload:
+                # 顺带刷新资源令牌 Cookie，保持其不过期
+                set_or_refresh_resource_token_cookie(request, response, payload)
+                return payload
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",

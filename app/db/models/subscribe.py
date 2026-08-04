@@ -130,8 +130,9 @@ class Subscribe(Base):
             doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
             anilistid: Optional[int] = None, media_source: Optional[str] = None,
             media_id: Optional[str] = None, season: Optional[int] = None,
+            episode_group: Optional[str] = None,
     ):
-        """按媒体身份与季号查询已有订阅。"""
+        """按媒体身份、季号与剧集组查询已有订阅。"""
         condition = cls._identity_condition(
             media_source, media_id, tmdbid, doubanid, bangumiid, anilistid
         )
@@ -140,6 +141,7 @@ class Subscribe(Base):
         query = db.query(cls).filter(condition)
         if season is not None:
             query = query.filter(cls.season == season)
+        query = query.filter(cls.episode_group == episode_group)
         return query.first()
 
     @classmethod
@@ -149,8 +151,9 @@ class Subscribe(Base):
             doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
             anilistid: Optional[int] = None, media_source: Optional[str] = None,
             media_id: Optional[str] = None, season: Optional[int] = None,
+            episode_group: Optional[str] = None,
     ):
-        """异步按媒体身份与季号查询已有订阅。"""
+        """异步按媒体身份、季号与剧集组查询已有订阅。"""
         condition = cls._identity_condition(
             media_source, media_id, tmdbid, doubanid, bangumiid, anilistid
         )
@@ -159,6 +162,7 @@ class Subscribe(Base):
         query = select(cls).filter(condition)
         if season is not None:
             query = query.filter(cls.season == season)
+        query = query.filter(cls.episode_group == episode_group)
         result = await db.execute(query)
         return result.scalars().first()
 
@@ -169,9 +173,10 @@ class Subscribe(Base):
             doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
             anilistid: Optional[int] = None, media_source: Optional[str] = None,
             media_id: Optional[str] = None, season: Optional[int] = None,
+            episode_group: Optional[str] = None,
     ):
         """
-        按订阅 owner 查询同一媒体的订阅行。
+        按订阅 owner、媒体身份、季号与剧集组查询订阅行。
         """
         if not username:
             return None
@@ -183,6 +188,7 @@ class Subscribe(Base):
         query = db.query(cls).filter(cls.username == username, condition)
         if season is not None:
             query = query.filter(cls.season == season)
+        query = query.filter(cls.episode_group == episode_group)
         return query.first()
 
     @classmethod
@@ -192,9 +198,10 @@ class Subscribe(Base):
             doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
             anilistid: Optional[int] = None, media_source: Optional[str] = None,
             media_id: Optional[str] = None, season: Optional[int] = None,
+            episode_group: Optional[str] = None,
     ):
         """
-        异步按订阅 owner 查询同一媒体的订阅行。
+        异步按订阅 owner、媒体身份、季号与剧集组查询订阅行。
         """
         if not username:
             return None
@@ -206,6 +213,7 @@ class Subscribe(Base):
         query = select(cls).filter(cls.username == username, condition)
         if season is not None:
             query = query.filter(cls.season == season)
+        query = query.filter(cls.episode_group == episode_group)
         result = await db.execute(query)
         return result.scalars().first()
 
@@ -374,7 +382,7 @@ class Subscribe(Base):
             season: Optional[int] = None, tmdbid: Optional[int] = None,
             doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
             media_source: Optional[str] = None, media_id: Optional[str] = None,
-            username: Optional[str] = None,
+            username: Optional[str] = None, episode_group: Optional[str] = None,
     ):
         """
         按跨身份同剧口径查询既有订阅，用于创建订阅时的去重与身份合并。
@@ -385,17 +393,24 @@ class Subscribe(Base):
         2. 标题 + 年份 + 季：name == title AND year == year AND season == season；
         3. doubanid / bangumiid：若传入这些 ID，再按它们查询。
 
+        所有分支均叠加 ``episode_group`` 作用域（与 ``exists`` 同口径），
+        主季（NULL）与自定义剧集组视为不同订阅，不得互相合并。
         owner_scope 场景需保留 ``username`` 作用域（与 ``exists_by_username`` 同口径）。
         返回的既有可能与请求身份不完全相同，但属于同一部剧，由调用方负责合并身份字段。
         """
-        # 1. tmdbid 优先
-        if tmdbid is not None:
-            query = db.query(cls).filter(cls.tmdbid == tmdbid)
+
+        def _scope(query):
+            """叠加季号、剧集组与用户作用域，避免跨剧集组误合并。"""
             if season is not None:
                 query = query.filter(cls.season == season)
+            query = query.filter(cls.episode_group == episode_group)
             if username:
                 query = query.filter(cls.username == username)
-            existing = query.first()
+            return query
+
+        # 1. tmdbid 优先
+        if tmdbid is not None:
+            existing = _scope(db.query(cls).filter(cls.tmdbid == tmdbid)).first()
             if existing:
                 return existing
         # 2. 标题 + 年份 + 季（跨任意来源的同剧兜底）
@@ -403,30 +418,16 @@ class Subscribe(Base):
             query = db.query(cls).filter(cls.name == name)
             if year:
                 query = query.filter(cls.year == year)
-            if season is not None:
-                query = query.filter(cls.season == season)
-            if username:
-                query = query.filter(cls.username == username)
-            existing = query.first()
+            existing = _scope(query).first()
             if existing:
                 return existing
         # 3. doubanid / bangumiid
         if doubanid:
-            query = db.query(cls).filter(cls.doubanid == doubanid)
-            if season is not None:
-                query = query.filter(cls.season == season)
-            if username:
-                query = query.filter(cls.username == username)
-            existing = query.first()
+            existing = _scope(db.query(cls).filter(cls.doubanid == doubanid)).first()
             if existing:
                 return existing
         if bangumiid is not None:
-            query = db.query(cls).filter(cls.bangumiid == bangumiid)
-            if season is not None:
-                query = query.filter(cls.season == season)
-            if username:
-                query = query.filter(cls.username == username)
-            existing = query.first()
+            existing = _scope(db.query(cls).filter(cls.bangumiid == bangumiid)).first()
             if existing:
                 return existing
         return None
@@ -438,22 +439,28 @@ class Subscribe(Base):
             season: Optional[int] = None, tmdbid: Optional[int] = None,
             doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
             media_source: Optional[str] = None, media_id: Optional[str] = None,
-            username: Optional[str] = None,
+            username: Optional[str] = None, episode_group: Optional[str] = None,
     ):
         """
         异步按跨身份同剧口径查询既有订阅（供 ``async_add`` 使用）。
 
         判定顺序与 ``find_same_media`` 一致：tmdbid -> 标题+年份+季 -> doubanid/bangumiid，
-        同样保留 ``username`` 作用域。命中返回同一部剧的可能不同身份的既有订阅。
+        同样叠加 ``episode_group`` 与 ``username`` 作用域。
+        命中返回同一部剧的可能不同身份的既有订阅。
         """
-        # 1. tmdbid 优先
-        if tmdbid is not None:
-            query = select(cls).filter(cls.tmdbid == tmdbid)
+
+        def _scope(query):
+            """叠加季号、剧集组与用户作用域，避免跨剧集组误合并。"""
             if season is not None:
                 query = query.filter(cls.season == season)
+            query = query.filter(cls.episode_group == episode_group)
             if username:
                 query = query.filter(cls.username == username)
-            result = await db.execute(query)
+            return query
+
+        # 1. tmdbid 优先
+        if tmdbid is not None:
+            result = await db.execute(_scope(select(cls).filter(cls.tmdbid == tmdbid)))
             existing = result.scalars().first()
             if existing:
                 return existing
@@ -462,32 +469,18 @@ class Subscribe(Base):
             query = select(cls).filter(cls.name == name)
             if year:
                 query = query.filter(cls.year == year)
-            if season is not None:
-                query = query.filter(cls.season == season)
-            if username:
-                query = query.filter(cls.username == username)
-            result = await db.execute(query)
+            result = await db.execute(_scope(query))
             existing = result.scalars().first()
             if existing:
                 return existing
         # 3. doubanid / bangumiid
         if doubanid:
-            query = select(cls).filter(cls.doubanid == doubanid)
-            if season is not None:
-                query = query.filter(cls.season == season)
-            if username:
-                query = query.filter(cls.username == username)
-            result = await db.execute(query)
+            result = await db.execute(_scope(select(cls).filter(cls.doubanid == doubanid)))
             existing = result.scalars().first()
             if existing:
                 return existing
         if bangumiid is not None:
-            query = select(cls).filter(cls.bangumiid == bangumiid)
-            if season is not None:
-                query = query.filter(cls.season == season)
-            if username:
-                query = query.filter(cls.username == username)
-            result = await db.execute(query)
+            result = await db.execute(_scope(select(cls).filter(cls.bangumiid == bangumiid)))
             existing = result.scalars().first()
             if existing:
                 return existing

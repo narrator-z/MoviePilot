@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 6
+version: 7
 description: >-
   Use this skill when you need to call MoviePilot REST API endpoints directly
   with the bundled Python client. Covers MoviePilot HTTP endpoints across media
@@ -175,7 +175,7 @@ Streaming search sends `{"type":"heartbeat"}` every 15 seconds without business 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/download/` | List active downloads. Params: `name` (downloader name) |
+| GET | `/api/v1/download/` | List active downloads. Params: `name` (downloader name); linked history adds media type and source `site_name` |
 | POST | `/api/v1/download/` | Add download (with media info). Body: JSON |
 | POST | `/api/v1/download/add` | Add download without media info. Body: `torrent_in`, optional `media_source` + `media_id` (all four dedicated IDs remain supported), `downloader`, `save_path` |
 | POST | `/api/v1/download/subtitle` | Download subtitle file to the recognized media download directory. Body: `subtitle_in`, optional `media_source` + `media_id` (all four dedicated IDs remain supported), `save_path` |
@@ -251,7 +251,7 @@ Streaming search sends `{"type":"heartbeat"}` every 15 seconds without business 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/history/download` | Download history. Params: `page`, `count` |
+| GET | `/api/v1/history/download` | Download history, newest first. Params: `page`, `count`. `poster` is the poster image; legacy `image` is the backdrop image. |
 | DELETE | `/api/v1/history/download` | Delete download history. Body: DownloadHistory JSON |
 | GET | `/api/v1/history/transfer` | Transfer history. Params: `title`, `page`, `count`, `status` |
 | DELETE | `/api/v1/history/transfer` | Delete transfer history. Params: `deletesrc`, `deletedest`. Body: TransferHistory |
@@ -324,13 +324,16 @@ Streaming search sends `{"type":"heartbeat"}` every 15 seconds without business 
 | GET | `/api/v1/dashboard/network` | Network traffic |
 | GET | `/api/v1/dashboard/network2` | Network traffic (API_TOKEN) |
 
-### Plugin (22 endpoints)
+### Plugin (25 endpoints)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/plugin/` | List plugins. Params: `state` (installed/market/all), `force` |
 | GET | `/api/v1/plugin/installed` | List installed plugins |
 | GET | `/api/v1/plugin/statistic` | Plugin install statistics |
+| GET | `/api/v1/plugin/rating` | Batch plugin ratings. Params: comma-separated `plugin_ids` |
+| GET | `/api/v1/plugin/rating/{plugin_id}` | Get average rating, rating count, and this installation's rating |
+| POST | `/api/v1/plugin/rating/{plugin_id}` | Rate an installed plugin. Body: `{"rating": 4.5}`; range 0.1-5.0 |
 | GET | `/api/v1/plugin/install/{plugin_id}` | Install plugin. Params: `repo_url`, `force` |
 | GET | `/api/v1/plugin/reload/{plugin_id}` | Reload plugin |
 | GET | `/api/v1/plugin/reset/{plugin_id}` | Reset plugin config & data |
@@ -501,6 +504,11 @@ The two list endpoints return local cache totals plus `shared_recognized` and
 | POST | `/api/v1/mcp/tools/call` | Call a tool. Body: `{"tool_name":"...","arguments":{...}}` |
 | GET | `/api/v1/mcp/tools/{tool_name}` | Get tool definition |
 | GET | `/api/v1/mcp/tools/{tool_name}/schema` | Get tool input schema |
+
+The exposed tool list is dynamic: it includes tools declared by enabled plugins
+and is refreshed lazily after plugin startup, shutdown, reload, or configuration
+activation. Clients that cache MCP metadata must request `tools/list` again or
+reconnect after a plugin lifecycle change.
 
 ### Agent MCP Client (3 endpoints)
 

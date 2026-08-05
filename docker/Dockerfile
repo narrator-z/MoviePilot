@@ -101,7 +101,7 @@ COPY . .
 RUN set -euxo pipefail \
     && FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
     && echo "FRONTEND_VERSION=${FRONTEND_VERSION}" \
-    && dl() { if [ -n "${GITHUB_TOKEN:-}" ]; then curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors -H "Authorization: Bearer ${GITHUB_TOKEN}" "$@"; else curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "$@"; fi; } \
+    && dl() { curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "$@"; } \
     && dl "https://github.com/narrator-z/MoviePilot-Frontend/releases/download/${FRONTEND_VERSION}/dist.zip" | busybox unzip -d / - \
     && mv /dist /public \
     && dl "https://github.com/jxxghp/MoviePilot-Plugins/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \

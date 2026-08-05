@@ -246,8 +246,11 @@ def __verify_token(token: str, purpose: Optional[str] = "authentication") -> sch
 
         return schemas.TokenPayload(**payload)
     except (jwt.DecodeError, jwt.InvalidTokenError, jwt.ImmatureSignatureError):
+        # 返回 401（未认证、可重试）而非 403：前端仅对 403 做强制登出，
+        # 401 不会触发登出，后端 verify_token 会继续用资源令牌 Cookie 兜底，
+        # 避免浏览器持有过期/旧密钥 Bearer 时（尤其移动端）被误判未登录而登出。
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="token校验不通过",
         )
     except ValidationError:

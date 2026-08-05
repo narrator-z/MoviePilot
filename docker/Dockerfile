@@ -98,11 +98,15 @@ WORKDIR /app
 ARG GITHUB_TOKEN
 
 COPY . .
-RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
+RUN set -euxo pipefail \
+    && FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
+    && echo "FRONTEND_VERSION=${FRONTEND_VERSION}" \
     && dl() { if [ -n "${GITHUB_TOKEN:-}" ]; then curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors -H "Authorization: Bearer ${GITHUB_TOKEN}" "$@"; else curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "$@"; fi; } \
-    && dl "https://github.com/narrator-z/MoviePilot-Frontend/releases/download/${FRONTEND_VERSION}/dist.zip" | busybox unzip -d / - \
-    && mv /dist /public \
-    && dl "https://github.com/jxxghp/MoviePilot-Plugins/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \
+    && dl "https://github.com/narrator-z/MoviePilot-Frontend/releases/download/${FRONTEND_VERSION}/dist.zip" -o /tmp/frontend.zip \
+    && busybox unzip -d /tmp/frontend_ext /tmp/frontend.zip \
+    && mv /tmp/frontend_ext/dist /public \
+    && dl "https://github.com/jxxghp/MoviePilot-Plugins/archive/refs/heads/main.zip" -o /tmp/plugins.zip \
+    && busybox unzip -d /tmp /tmp/plugins.zip \
     && mv -f /tmp/MoviePilot-Plugins-main/plugins.v2/* /app/app/plugins/ \
     && cat /tmp/MoviePilot-Plugins-main/package.json | jq -r 'to_entries[] | select(.value.v2 == true) | .key' | awk '{print tolower($0)}' | \
     while read -r i; do if [ ! -d "/app/app/plugins/$i" ]; then mv "/tmp/MoviePilot-Plugins-main/plugins/$i" "/app/app/plugins/"; else echo "跳过 $i"; fi; done \

@@ -18,6 +18,7 @@ from passlib.context import CryptContext
 
 from app import schemas
 from app.core.cache import cached
+from pydantic import ValidationError
 from app.core.config import settings
 from app.log import logger
 
@@ -249,6 +250,13 @@ def __verify_token(token: str, purpose: Optional[str] = "authentication") -> sch
             status_code=status.HTTP_403_FORBIDDEN,
             detail="token校验不通过",
         )
+    except ValidationError:
+        # 令牌本身可解码，但载荷不符合当前 TokenPayload schema（常见于旧版本签发的令牌）。
+        # 视为未认证，返回 401 让前端重新登录，避免抛出 500 导致页面异常。
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="token校验不通过",
+        )
 
 
 def verify_token(
@@ -271,38 +279,48 @@ def verify_token(
     :return: 解析后的 TokenPayload
     :raises HTTPException: 如果令牌无效或用途不匹配
     """
+    payload = None
+    # 优先使用 Bearer 令牌鉴权
     if jwt_token:
-        # 验证并解析 JWT 认证令牌
-        payload = __verify_token(token=jwt_token, purpose="authentication")
+        try:
+            payload = __verify_token(token=jwt_token, purpose="authentication")
+        except HTTPException:
+            # Bearer 令牌无效（如旧密钥签发、已过期）时不立即拒绝，
+            # 继续尝试下方的资源令牌 Cookie / API Key / API Token 兜底，
+            # 避免浏览器持有旧令牌时被误判为未登录而强制登出。
+            payload = None
 
+    if payload:
         # 如果没有 resource_token，生成并写入到 Cookie
         set_or_refresh_resource_token_cookie(request, response, payload)
-
         return payload
-    elif api_key:
+
+    if api_key:
         verify_apikey(api_key)
         return __create_superuser_token_payload()
-    elif api_token:
+
+    if api_token:
         verify_apitoken(api_token)
         return __create_superuser_token_payload()
-    else:
-        # 兜底：同源重复请求 / Service Worker 重发时可能不带 Bearer 头，
-        # 此时回落到已下发的资源令牌 Cookie 完成鉴权，避免被误判为未登录而强制登出。
-        resource_cookie = request.cookies.get(settings.PROJECT_NAME)
-        if resource_cookie:
-            try:
-                payload = __verify_token(token=resource_cookie, purpose="resource")
-            except HTTPException:
-                payload = None
-            if payload:
-                # 顺带刷新资源令牌 Cookie，保持其不过期
-                set_or_refresh_resource_token_cookie(request, response, payload)
-                return payload
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+
+    # 兜底：同源重复请求 / Service Worker 重发时可能不带 Bearer 头，
+    # 此时回落到已下发的资源令牌 Cookie 完成鉴权，避免被误判为未登录而强制登出。
+    resource_cookie = request.cookies.get(settings.PROJECT_NAME)
+    if resource_cookie:
+        try:
+            payload = __verify_token(token=resource_cookie, purpose="resource")
+        except HTTPException:
+            payload = None
+        if payload:
+            # 顺带刷新资源令牌 Cookie，保持其不过期
+            set_or_refresh_resource_token_cookie(request, response, payload)
+            return payload
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def verify_resource_token(

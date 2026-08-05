@@ -69,3 +69,51 @@ def test_verify_token_bearer_still_works():
     resp = _FakeResponse()
     payload = security.verify_token(req, resp, access, None, None)
     assert payload.username == "narratorz"
+
+
+def test_verify_token_invalid_bearer_falls_back_to_cookie():
+    """Bearer 失效（旧密钥签发）但资源令牌 Cookie 有效 -> 回落到 Cookie，不抛 403。
+
+    这是修复『点击插件页即被踢』的关键：浏览器可能仍持有修复前旧密钥签发的
+    无效 Bearer，此时不应直接 403，而应尝试同源下发的资源令牌 Cookie 兜底。
+    """
+    # 用错误密钥伪造一个『可解码但验签失败』的 Bearer
+    bad_payload = {
+        "exp": security.datetime.datetime.now(security.datetime.UTC) + timedelta(minutes=30),
+        "iat": security.datetime.datetime.now(security.datetime.UTC),
+        "sub": "1",
+        "username": "narratorz",
+        "super_user": True,
+        "level": 1,
+        "purpose": "authentication",
+    }
+    bad_bearer = jwt.encode(bad_payload, "this-is-a-wrong-secret-key", algorithm=security.ALGORITHM)
+
+    # 同时携带一个有效的资源令牌 Cookie
+    cookie = _make_resource_token()
+    req = _FakeRequest({settings.PROJECT_NAME: cookie})
+    resp = _FakeResponse()
+    payload = security.verify_token(req, resp, bad_bearer, None, None)
+    assert payload is not None
+    assert payload.sub == 1
+
+
+def test_verify_token_malformed_bearer_returns_401_not_500():
+    """令牌可解码但载荷不符合 schema（旧版本签名）-> 返回干净的 401，而非 500。"""
+    now = security.datetime.datetime.now(security.datetime.UTC)
+    # 用正确密钥签名，但故意制造不符合 TokenPayload 的载荷（缺 purpose、sub 为 int）
+    bad_payload = {
+        "exp": now + timedelta(minutes=30),
+        "iat": now,
+        "sub": 1,
+        "username": "narratorz",
+        "super_user": True,
+        "level": 1,
+    }
+    bad_bearer = jwt.encode(bad_payload, settings.SECRET_KEY, algorithm=security.ALGORITHM)
+    req = _FakeRequest({})
+    resp = _FakeResponse()
+    with pytest.raises(Exception) as exc:
+        security.verify_token(req, resp, bad_bearer, None, None)
+    assert exc.value.status_code == 401
+

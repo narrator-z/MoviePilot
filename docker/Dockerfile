@@ -98,9 +98,7 @@ WORKDIR /app
 ARG GITHUB_TOKEN
 
 COPY . .
-RUN set -euxo pipefail \
-    && FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
-    && echo "FRONTEND_VERSION=${FRONTEND_VERSION}" \
+RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
     && dl() { curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "$@"; } \
     && dl "https://github.com/narrator-z/MoviePilot-Frontend/releases/download/${FRONTEND_VERSION}/dist.zip" | busybox unzip -d / - \
     && mv /dist /public \

@@ -201,7 +201,7 @@ def test_login_sets_resource_token_cookie(monkeypatch):
     assert "set-cookie" in response.headers
 
     resource_cookie = response.headers["set-cookie"].split("=", 1)[1].split(";", 1)[0]
-    payload = verify_resource_token(resource_cookie)
+    payload = verify_resource_token(jwt_token=None, resource_token=resource_cookie)
     assert payload.sub == 1
     assert payload.username == "user"
     assert payload.purpose == "resource"
@@ -219,7 +219,11 @@ def test_plugin_static_file_requires_resource_token_by_default(monkeypatch):
             return []
 
     monkeypatch.setattr(plugin_endpoint, "PluginManager", FakePluginManager)
-    monkeypatch.setattr(plugin_endpoint, "verify_resource_token", lambda token: calls.append(token))
+    monkeypatch.setattr(
+        plugin_endpoint,
+        "verify_resource_token",
+        lambda jwt_token, resource_token: calls.append(resource_token),
+    )
 
     plugin_endpoint._verify_plugin_static_file_access(
         plugin_id="DemoPlugin",
@@ -249,7 +253,11 @@ def test_plugin_auth_remote_files_allow_anonymous_bootstrap(monkeypatch):
             ]
 
     monkeypatch.setattr(plugin_endpoint, "PluginManager", FakePluginManager)
-    monkeypatch.setattr(plugin_endpoint, "verify_resource_token", lambda token: calls.append(token))
+    monkeypatch.setattr(
+        plugin_endpoint,
+        "verify_resource_token",
+        lambda jwt_token, resource_token: calls.append(resource_token),
+    )
 
     plugin_endpoint._verify_plugin_static_file_access(
         plugin_id="AuthPlugin",

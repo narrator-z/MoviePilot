@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.event import eventmanager
 from app.core.plugin import PluginManager
 from app.core.security import (
+    oauth2_scheme_manual_error,
     resource_token_cookie,
     verify_apikey,
     verify_resource_token,
@@ -261,19 +262,21 @@ def _is_plugin_auth_remote_file(plugin_id: str, filepath: str) -> bool:
 
 
 def _verify_plugin_static_file_access(
-    plugin_id: str,
-    filepath: str,
+    jwt_token: Annotated[Optional[str], Security(oauth2_scheme_manual_error)] = None,
+    plugin_id: str = "",
+    filepath: str = "",
     resource_token: Annotated[Optional[str], Security(resource_token_cookie)] = None,
 ) -> None:
     """
     校验插件静态文件访问权限。
 
-    普通插件资源依赖登录后写入的资源 Cookie；登录认证插件的远程组件需要在
-    登录前加载，因此仅对插件声明的认证 remote 放行匿名读取。
+    普通插件资源优先用登录后写入的资源 Cookie 鉴权；资源 Cookie 缺失时回落到
+    Bearer（前端 axios 请求会携带），避免首次加载/跨上下文时 401 触发前端登出。
+    登录认证插件的远程组件需要在登录前加载，因此仅对插件声明的认证 remote 放行匿名读取。
     """
     if _is_plugin_auth_remote_file(plugin_id, filepath):
         return
-    verify_resource_token(resource_token)
+    verify_resource_token(jwt_token, resource_token)
 
 
 async def _get_plugin_history_detail(

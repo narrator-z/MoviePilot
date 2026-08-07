@@ -183,6 +183,12 @@ class ImageHelper(metaclass=Singleton):
         """缓存路径"""
         sanitized_path = SecurityUtils.sanitize_url_path(url)
         cache_path = Path(sanitized_path)
+        # 某些图床 URL 的 path 不含分隔符（如 https://example.png），
+        # sanitize 后会得到 '.' 或空名，Path('.').with_suffix 会抛 ValueError。
+        if not cache_path.name or cache_path.name == '.':
+            import hashlib
+            safe_name = hashlib.md5(url.encode()).hexdigest()
+            cache_path = Path(safe_name)
         if not cache_path.suffix:
             cache_path = cache_path.with_suffix(".jpg")
         return cache_path.as_posix()

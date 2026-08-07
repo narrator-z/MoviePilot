@@ -92,6 +92,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Preflight - 校验构建依赖资源可达
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" version.py)
+          echo "前端版本: ${FRONTEND_VERSION}"
+          if curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "https://github.com/narrator-z/MoviePilot-Frontend/releases/download/${FRONTEND_VERSION}/dist.zip" -o /tmp/frontend_dist.zip; then
+            echo "✅ 前端 release 存在 ($(stat -c%s /tmp/frontend_dist.zip) bytes)"
+          else
+            echo "::error::前端 release 缺失: narrator-z/MoviePilot-Frontend@${FRONTEND_VERSION} 不存在 dist.zip。请将 FRONTEND_VERSION 改为该前端仓库实际存在的 tag（参考上游值）。"
+            exit 1
+          fi
+          python_ver=$(python3 -c 'import sys; print(f"cpython-{sys.version_info.major}{sys.version_info.minor}")' 2>/dev/null || echo cpython-3.12)
+          for u in \
+            "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/user.sites.v2.bin" \
+            "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/sites.${python_ver}-x86_64-linux-gnu.so" ; do
+            if curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$u" -o /dev/null; then
+              echo "✅ $u"
+            else
+              echo "::warning::资源可达性校验失败（final 阶段有兜底重下，非致命）: $u"
+            fi
+          done
+
       - name: Build Image
         uses: docker/build-push-action@v7
         with:

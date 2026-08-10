@@ -19,7 +19,11 @@ def get_current_user(
     """
     user = User.get(db, rid=token_data.sub)
     if not user:
-        raise HTTPException(status_code=403, detail="用户不存在")
+        # 令牌可正常解出但库中已无此用户：视为"当前未认证"（401，可重试），
+        # 而非"禁止"（403）。前端对 403 会直接强制登出，对 401 会清 Bearer 后用
+        # 资源 Cookie 兜底重试；插件微前端在 HTTPS 下偶发携带 sub 不匹配的令牌，
+        # 这里返回 401 可让 Cookie 兜底成功、避免误登出。
+        raise HTTPException(status_code=401, detail="用户不存在")
     return user
 
 
@@ -32,7 +36,11 @@ async def get_current_user_async(
     """
     user = await User.async_get(db, rid=token_data.sub)
     if not user:
-        raise HTTPException(status_code=403, detail="用户不存在")
+        # 令牌可正常解出但库中已无此用户：视为"当前未认证"（401，可重试），
+        # 而非"禁止"（403）。前端对 403 会直接强制登出，对 401 会清 Bearer 后用
+        # 资源 Cookie 兜底重试；插件微前端在 HTTPS 下偶发携带 sub 不匹配的令牌，
+        # 这里返回 401 可让 Cookie 兜底成功、避免误登出。
+        raise HTTPException(status_code=401, detail="用户不存在")
     return user
 
 

@@ -178,7 +178,7 @@ class ConfigModel(BaseModel):
     PACKAGE_CACHE_DAYS: int = 90
     # pip/uv 包下载缓存根目录，留空时使用配置目录下的 .cache
     PACKAGE_CACHE_ROOT: Optional[str] = None
-    # 元数据识别缓存过期时间（小时），0为自动
+    # 单条元数据识别缓存有效期（小时），0为自动
     META_CACHE_EXPIRE: int = 0
 
     # ==================== 网络代理配置 ====================
@@ -391,6 +391,8 @@ class ConfigModel(BaseModel):
     # ==================== 整理配置 ====================
     # 文件整理线程数
     TRANSFER_THREADS: int = 1
+    # 外部接管的运行中整理任务无状态心跳超时（分钟），0 表示禁用
+    TRANSFER_TASK_TIMEOUT: int = 120
     # 电影重命名格式
     MOVIE_RENAME_FORMAT: str = (
         "{{title}}{% if year %} ({{year}}){% endif %}"
@@ -572,6 +574,8 @@ class ConfigModel(BaseModel):
     LLM_THINKING_LEVEL: Optional[str] = "off"
     # OpenAI兼容接口API协议：auto（自动）/ chat_completions / responses
     LLM_API_PROTOCOL: str = "auto"
+    # 联网搜索模式：local（本地）/ builtin（模型服务端）/ auto（自动）/ disabled（关闭）
+    LLM_WEB_SEARCH_MODE: str = "local"
     # LLM是否支持图片输入，开启后消息图片会按多模态输入发送给模型
     LLM_SUPPORT_IMAGE_INPUT: bool = True
     # 是否启用音频输入，开启后用户语音会先转写为文本再进入 Agent
@@ -586,8 +590,8 @@ class ConfigModel(BaseModel):
     LLM_USE_PROXY: bool = True
     # LLM Base URL 预设标识，用于区分同一 Base URL 下的不同模型目录
     LLM_BASE_URL_PRESET: Optional[str] = None
-    # LLM最大上下文Token数量（K）
-    LLM_MAX_CONTEXT_TOKENS: int = 128
+    # LLM最大上下文Token数量（K），仅在模型目录未提供规格时作为回退值
+    LLM_MAX_CONTEXT_TOKENS: int = 256
     # LLM OpenAI兼容接口请求User-Agent
     LLM_USER_AGENT: Optional[str] = None
     # LLM温度参数

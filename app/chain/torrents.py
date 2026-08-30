@@ -3,11 +3,12 @@ import re
 import traceback
 from typing import Callable, Dict, List, Optional, Union
 
+from app.application.chain.data import get_chain_site_port
 from app.application.configuration import get_configured_system_config
 from app.application.rss import RssHelper
 from app.application.site.sites import SitesHelper  # pylint: disable=import-error,no-name-in-module
-from app.application.torrent.download import TorrentHelper
-from app.chain.base import ChainBase
+from app.application.torrent import TorrentHelper
+from app.chain import ChainBase
 from app.chain.media import MediaChain
 from app.domain import site as site_rules
 from app.domain.context import Context, MediaInfo, MusicInfo, TorrentInfo
@@ -31,27 +32,6 @@ class TorrentsChain(ChainBase):
     # 音乐资源独立缓存，与影视种子分开计算配额与存储，避免被影视资源挤出
     _music_spider_file = "__torrents_music_cache__"
     _music_rss_file = "__rss_music_cache__"
-
-    def _cache_type(self, stype: Optional[str]) -> str:
-        """把可选缓存类型统一为本次读取使用的明确订阅模式。"""
-        return stype or self.runtime_config.subscribe_mode
-
-    def _cache_file_pair(self, stype: str) -> tuple[str, str]:
-        """返回指定订阅模式下影视与音乐缓存的唯一文件映射。"""
-        if stype == 'spider':
-            return self._spider_file, self._music_spider_file
-        return self._rss_file, self._music_rss_file
-
-    @staticmethod
-    def _merge_torrent_caches(
-        torrents_cache: Dict[str, List[Context]],
-        music_cache: Dict[str, List[Context]],
-    ) -> Dict[str, List[Context]]:
-        """按站点稳定合并音乐独立缓存，空列表不创建无效站点键。"""
-        for domain, contexts in music_cache.items():
-            if contexts:
-                torrents_cache.setdefault(domain, []).extend(contexts)
-        return torrents_cache
 
     @property
     def cache_file(self) -> str:
@@ -84,24 +64,34 @@ class TorrentsChain(ChainBase):
         :param stype: 强制指定缓存类型，spider:爬虫缓存，rss:rss缓存
         """
 
-        stype = self._cache_type(stype)
-        video_file, _music_file = self._cache_file_pair(stype)
-        torrents_cache = self.load_cache(video_file) or {}
+        if not stype:
+            stype = self.runtime_config.subscribe_mode
+
+        # 读取缓存
+        if stype == 'spider':
+            torrents_cache = self.load_cache(self._spider_file) or {}
+        else:
+            torrents_cache = self.load_cache(self._rss_file) or {}
 
         # 兼容性处理：为旧版本的Context对象补齐新增候选识别字段
         self._ensure_context_compatibility(torrents_cache, stype=stype)
 
         # 合并音乐独立缓存，供订阅匹配等消费方按站点读取完整候选
         music_cache = self.get_music_torrents(stype=stype)
-        return self._merge_torrent_caches(torrents_cache, music_cache)
+        for domain, contexts in music_cache.items():
+            if contexts:
+                torrents_cache.setdefault(domain, []).extend(contexts)
+
+        return torrents_cache
 
     def get_music_torrents(self, stype: Optional[str] = None) -> Dict[str, List[Context]]:
         """
         获取音乐独立缓存的种子
         :param stype: 强制指定缓存类型，spider:爬虫缓存，rss:rss缓存
         """
-        stype = self._cache_type(stype)
-        _video_file, music_file = self._cache_file_pair(stype)
+        if not stype:
+            stype = self.runtime_config.subscribe_mode
+        music_file = self._music_spider_file if stype == 'spider' else self._music_rss_file
         music_cache = self.load_cache(music_file) or {}
         # 兼容性处理：为旧版本的Context对象补齐新增候选识别字段
         self._ensure_context_compatibility(music_cache, stype=stype)
@@ -112,7 +102,11 @@ class TorrentsChain(ChainBase):
         返回影视与音乐缓存文件名，供按当前订阅模式回写各自缓存
         :param stype: 强制指定缓存类型，spider:爬虫缓存，rss:rss缓存
         """
-        return self._cache_file_pair(self._cache_type(stype))
+        if not stype:
+            stype = self.runtime_config.subscribe_mode
+        if stype == 'spider':
+            return self._spider_file, self._music_spider_file
+        return self._rss_file, self._music_rss_file
 
     @staticmethod
     def split_cache_contexts(
@@ -138,17 +132,27 @@ class TorrentsChain(ChainBase):
         :param stype: 强制指定缓存类型，spider:爬虫缓存，rss:rss缓存
         """
 
-        stype = self._cache_type(stype)
-        video_file, music_file = self._cache_file_pair(stype)
-        torrents_cache = await self.async_load_cache(video_file) or {}
-        music_cache = await self.async_load_cache(music_file) or {}
+        if not stype:
+            stype = self.runtime_config.subscribe_mode
+
+        # 异步读取缓存
+        if stype == 'spider':
+            torrents_cache = await self.async_load_cache(self._spider_file) or {}
+            music_cache = await self.async_load_cache(self._music_spider_file) or {}
+        else:
+            torrents_cache = await self.async_load_cache(self._rss_file) or {}
+            music_cache = await self.async_load_cache(self._music_rss_file) or {}
 
         # 兼容性处理：为旧版本的Context对象补齐新增候选识别字段
         self._ensure_context_compatibility(torrents_cache, stype=stype)
         self._ensure_context_compatibility(music_cache, stype=stype)
 
         # 合并音乐独立缓存，供订阅匹配等消费方按站点读取完整候选
-        return self._merge_torrent_caches(torrents_cache, music_cache)
+        for domain, contexts in music_cache.items():
+            if contexts:
+                torrents_cache.setdefault(domain, []).extend(contexts)
+
+        return torrents_cache
 
     def get_subscribe_cache_candidates(
             self,
@@ -798,7 +802,7 @@ class TorrentsChain(ChainBase):
                     # 获取过期rss除去passkey部分
                     new_rss = re.sub(r'&passkey=([a-zA-Z0-9]+)', f'&passkey={new_passkey}', site.get("rss"))
                     logger.info(f"更新站点 {domain} RSS地址 ...")
-                    self.site_repository.update_rss(domain=domain, rss=new_rss)
+                    get_chain_site_port().update_rss(domain=domain, rss=new_rss)
                 else:
                     # 发送消息
                     self.post_message(

@@ -1,9 +1,17 @@
 import asyncio
 import inspect
 import sys
-from typing import Callable
+from typing import Any, Callable
 
 from app.adapters.cache.redis import AsyncRedisHelper, RedisHelper
+from app.application.plugin.transaction import (
+    PluginPersistenceService,
+    configure_plugin_persistence,
+)
+from app.chain.mediaserver import MediaServerChain
+from app.chain.tmdb import TmdbChain
+from app.db.adapters.pluginidentity import TransactionalPluginIdentityStore
+from app.db.adapters.plugininstallation import TransactionalPluginInstallationStore
 
 # SitesHelper涉及资源包拉取，提前引入并容错提示
 try:
@@ -14,210 +22,441 @@ except ImportError as e:
     print(error_message, file=sys.stderr)
     sys.exit(1)
 
-from app.adapters.external.server import MoviePilotServerHelper
+from app.adapters.external.server import (
+    MoviePilotServerHelper,
+    configure_server_application_services,
+)
+from app.adapters.network.doh import DohHelper
 from app.adapters.system.host import SystemUtils
+from app.adapters.system.resource import (
+    ResourceHelper,
+    configure_resource_version_provider,
+)
+from app.adapters.web.security.access import set_superuser_token_payload_provider
+from app.api.data import ApiDataPorts, configure_api_data_runtime
+from app.application.agentdata import configure_agent_data_ports
+from app.application.agenttask import (
+    AgentTaskExecutionService,
+    configure_agent_task_execution,
+)
+from app.application.chain.context import (
+    ChainRuntimeContext,
+    configure_chain_runtime_context_provider,
+)
+from app.application.chain.data import configure_chain_data_ports, get_chain_data_ports
+from app.application.chain.durable_events import (
+    restore_download_added,
+    restore_transfer_result,
+)
 from app.application.configuration import (
+    RuntimeConfiguration,
+    RuntimeSettingsService,
+    SystemConfigService,
     TransferRetryConfig,
+    configure_runtime_configuration,
+    configure_runtime_settings,
+    configure_system_config,
+    configure_token_runtime_config,
     configure_transfer_retry_config,
     get_configured_system_config,
-    reset_transfer_retry_config,
 )
+from app.application.database import configure_database_governance
+from app.application.history import configure_transfer_history_provider
+from app.application.image import configure_wallpaper_providers
 from app.application.messaging.agent import (
     dispatch_web_agent_message_event,
     shutdown_web_agent_background_tasks,
     wait_web_agent_background_tasks,
 )
 from app.application.messaging.chat import (
+    AgentChatPersistenceService,
+    AgentChatService,
+    configure_agent_chat_persistence,
+    configure_agent_chat_service,
     get_configured_agent_chat_persistence,
 )
 from app.application.messaging.message import (
     MessageHelper,
+    MessageQueueManager,
     stop_message,
 )
-from app.application.module import configure_module_runtime, reset_module_runtime
-from app.application.outbox import configure_outbox_dispatcher
-from app.application.security.url import close_image_proxy_block_log_coalescer
-from app.application.service import configure_service_directory, reset_service_directory
-from app.command import CommandChain
-from app.db.session import (
-    close_database,
+from app.application.module import configure_module_runtime
+from app.application.outbox import (
+    OutboxDispatcher,
+    configure_outbox_dispatcher,
+    durable_event_topic,
+    validate_durable_event_handlers,
 )
+from app.application.plugin.runtime import configure_plugin_runtime
+from app.application.security.auth import AuthService, build_superuser_token_payload, configure_auth_service
+from app.application.security.passkeys import PasskeyService, configure_passkey_service
+from app.application.security.url import close_image_proxy_block_log_coalescer
+from app.application.security.user import configure_user_lookups
+from app.application.security.userconfig import (
+    UserConfigurationService,
+    configure_user_configuration,
+)
+from app.application.server.report import ServerReportService
+from app.application.server.share import ServerSharingService
+from app.application.service import configure_service_directory
+from app.application.site.health import SiteHealthService, configure_site_health_service
+from app.application.site.query import SiteQueryService, configure_site_query_service
+from app.application.subscription.write import configure_subscribe_writer
+from app.application.workflow import WorkflowQueryService, configure_workflow_query
+from app.command import CommandChain
+from app.db.adapters.chain import TransactionalChainDurableEventWriter
+from app.db.adapters.download import TransactionalDownloadFailureRepository
+from app.db.adapters.outbox import SqlAlchemyAsyncOutboxStager, SqlAlchemyOutboxRepository
+from app.db.adapters.site import TransactionalSiteRepository
+from app.db.adapters.subscription import TransactionalSubscribeWriter
+from app.db.adapters.transaction import TransactionalWriteRunner
+from app.db.adapters.transfer import TransactionalTransferAdmissionRepository
+from app.db.adapters.workflow import TransactionalWorkflowExecutionService
+from app.db.oper.agentchat import AgentChatOper
+from app.db.oper.agenttask import AgentTaskOper
+from app.db.oper.downloadhistory import DownloadHistoryOper
+from app.db.oper.mediaserver import MediaServerOper
+from app.db.oper.message import MessageOper
+from app.db.oper.passkey import PassKeyOper
+from app.db.oper.plugindata import PluginDataOper
+from app.db.oper.site import SiteOper
+from app.db.oper.subscribe import SubscribeOper
+from app.db.oper.subscribehistory import SubscribeHistoryOper
+from app.db.oper.systemconfig import SystemConfigOper
+from app.db.oper.transferhistory import TransferHistoryOper
+from app.db.oper.user import UserOper
+from app.db.oper.userconfig import UserConfigOper
+from app.db.oper.workflow import WorkflowOper, configure_workflow_legacy_writer
+from app.db.session import (
+    SessionFactory,
+    async_session_scope,
+    close_database,
+    get_async_db,
+    get_db,
+)
+from app.db.uow import (
+    SqlAlchemyAsyncUnitOfWork,
+    SqlAlchemyUnitOfWork,
+    configure_transaction_runners,
+)
+from app.db.worker import DatabaseWorker
+from app.runtime.cache import AsyncFileCache, FileCache
 from app.runtime.config import settings as legacy_settings
 from app.runtime.events import EventHandlerBinding, EventManager
 from app.runtime.execution import run_in_threadpool_to_completion
-from app.runtime.extensions.module.manager import ModuleManager
-from app.runtime.extensions.service import (
+from app.runtime.extensions.module.dispatcher import ModuleInvocationDispatcher
+from app.runtime.extensions.module_manager import ModuleManager
+from app.runtime.extensions.plugin_manager import PluginManager
+from app.runtime.extensions.service_config import (
     ServiceConfigHelper,
     configure_service_config_reader,
-    reset_service_config_reader,
 )
 from app.runtime.log import logger
+from app.runtime.observability import record_metric
 from app.runtime.settings import (
+    configure_runtime_setting_provider,
+    configure_runtime_setting_updater,
     get_runtime_setting,
 )
 from app.runtime.state import SystemHelper
+from app.runtime.stop import runtime_stop_state
 from app.runtime.tasks import get_task_registry
 from app.runtime.thread import ThreadHelper
-from app.schemas.message import Message, MessageType
+from app.schemas.message import Message
 from app.schemas.types import EventType, SystemConfigKey
-from app.startup.composition.agent import (
-    compose_agent,
-    publish_agent_services,
-    reset_agent_services,
-)
-from app.startup.composition.chain import (
-    configure_chain_runtime_context,
-    configure_wallpaper_services,
-    reset_chain_services,
-)
 from app.startup.composition.configuration import (
-    compose_configuration,
-    publish_configuration,
-    reset_configuration,
+    build_api_runtime_config,
+    build_chain_runtime_config,
+    build_scheduler_runtime_config,
+    build_token_runtime_config,
 )
-from app.startup.composition.context import HostRuntime
-from app.startup.composition.database import (
-    compose_database_services,
-    configure_database,
-    configure_workflow_execution_composition,
-    database_runtime_active,
-    publish_database_services,
-    reset_database_services,
-    reset_workflow_execution_composition,
-    start_database_runtime,
-    stop_database_runtime,
+from app.startup.composition.context import (
+    AgentChatRuntime,
+    AuthenticationRuntime,
+    HistoryRuntime,
+    HostRuntime,
+    MessagingRuntime,
+    PersistenceRuntime,
+    SiteRuntime,
+    SubscriptionRuntime,
+    WorkflowRuntime,
 )
-from app.startup.composition.network import (
-    configure_application_network_ports,
-    configure_doh_composition,
-    reset_application_network_ports,
-    stop_doh_composition,
+from app.startup.composition.database import build_database_governance
+from app.startup.composition.subscription import (
+    configure_transactional_subscription_scopes,
 )
-from app.startup.composition.outbox import build_outbox_dispatcher, reset_outbox_services
-from app.startup.composition.resource import (
-    install_site_resources,
-    reset_site_resource_composition,
-)
-from app.startup.composition.runtime import (
-    RuntimeInputs,
-    compose_runtime,
-    compose_runtime_dependencies,
-    publish_runtime,
-    reset_runtime,
-)
-from app.startup.composition.security import (
-    configure_security_access,
-    configure_security_services,
-    reset_security_access,
-    reset_security_services,
-)
-from app.startup.composition.server import configure_server_services, reset_server_services
-from app.startup.initializers.agent import (
-    configure_agent_data_context,
-    init_agent,
-    reset_agent_data_context,
-)
-from app.startup.initializers.resources import (
+from app.startup.initializers.agent import init_agent
+from app.startup.initializers.managed_resources import (
     init_managed_resources,
-    reset_managed_resources,
     stop_managed_resources,
 )
-from app.startup.initializers.scheduler import (
-    configure_scheduler_agent_tasks,
-    reset_scheduler_bindings,
-)
+
+_database_worker: DatabaseWorker | None = None
+
+
+async def stop_database_worker() -> None:
+    """停止当前进程的数据库短事务 worker。"""
+    global _database_worker
+    worker = _database_worker
+    if worker is not None:
+        await worker.shutdown()
+        _database_worker = None
+
+
+async def _initialize_configuration_services(
+    database_worker: DatabaseWorker,
+) -> SystemConfigOper:
+    """加载完整配置快照后发布系统与用户配置服务。"""
+    system_config = SystemConfigOper()
+    user_config = UserConfigOper()
+    await database_worker.run(system_config.load_snapshot)
+    await database_worker.run(user_config.load_snapshot)
+    configure_system_config(
+        SystemConfigService(
+            repository=system_config,
+            async_executor=database_worker,
+        )
+    )
+    configure_user_configuration(
+        UserConfigurationService(
+            repository=user_config,
+            async_executor=database_worker,
+        )
+    )
+    return system_config
+
+
+def _build_runtime_settings_service() -> RuntimeSettingsService:
+    """将唯一可变部署配置实现注入管理服务。"""
+    return RuntimeSettingsService(legacy_settings)
+
+
+async def _async_get_subscribe(subscribe_id: int):
+    """通过数据库操作器异步读取订阅，供服务端共享用例使用。"""
+    return await SubscribeOper().async_get(subscribe_id)
+
+
+async def _async_get_workflow(workflow_id: int):
+    """通过数据库操作器异步读取工作流，供服务端共享用例使用。"""
+    return await WorkflowOper().async_get(workflow_id)
+
+
+def _execute_legacy_transfer_command(**kwargs: Any) -> Any:
+    """把旧 Chain ABI 延迟转入唯一 TransferChain durable command。"""
+    from app.chain.transfer import TransferChain
+
+    return TransferChain().execute_legacy_transfer_command(**kwargs)
+
+
+def _build_chain_runtime_context() -> ChainRuntimeContext:
+    """在启动组合根创建 Chain 所需的运行时对象和数据端口。"""
+    return ChainRuntimeContext(
+        module_manager=ModuleManager(),
+        plugin_manager=PluginManager(),
+        event_manager=EventManager(),
+        message_oper=MessageOper(),
+        message_helper=MessageHelper(),
+        file_cache=FileCache(),
+        async_file_cache=AsyncFileCache(),
+        message_queue_factory=lambda callback: MessageQueueManager(
+            send_callback=callback
+        ),
+        module_dispatcher_factory=ModuleInvocationDispatcher,
+        legacy_transfer_command=_execute_legacy_transfer_command,
+        configuration=build_chain_runtime_config(legacy_settings),
+        data_ports=get_chain_data_ports(),
+        durable_event_writer=TransactionalChainDurableEventWriter(SessionFactory),
+        stop_state=runtime_stop_state,
+    )
 
 
 def configure_runtime_data_providers() -> None:
-    """在启动组合层装配模块和配置目录的运行时读取能力。"""
+    """在启动组合层装配运行时和外部服务所需的数据库读取能力。"""
     configure_service_config_reader(lambda key: get_configured_system_config().get(key))
     configure_module_runtime(lambda: ModuleManager())
+    configure_plugin_runtime(lambda: PluginManager())
     configure_service_directory(
         configs=ServiceConfigHelper.get_configs,
-        modules=lambda module_type: ModuleManager().get_running_type_modules(module_type),
+        modules=lambda module_type: ModuleManager().get_running_type_modules(
+            module_type
+        ),
     )
-
-
-def reset_runtime_data_providers() -> None:
-    """按发布逆序撤销模块、服务目录和配置读取 Provider。"""
-    reset_service_directory()
-    reset_module_runtime()
-    reset_service_config_reader()
-
-
-def reset_event_services() -> None:
-    """撤销启动组合根登记的事件通知、监听器和宿主 resolver。"""
-    event_manager = EventManager.get_existing_instance()
-    if event_manager is None:
-        return
-    event_manager.remove_event_listener(
-        EventType.NoticeMessage,
-        dispatch_web_agent_message_event,
-    )
-    event_manager.unregister_handler_instance_resolver("host")
-    event_manager.reset_error_notifier()
-
-
-def reset_tool_services() -> None:
-    """撤销工具管理器持有的 Agent 数据上下文与目录快照。"""
-    from app.agent.tools.manager import moviepilot_tool_manager
-
-    moviepilot_tool_manager.reset_data_context()
-
-
-def _module_provider_reset_steps() -> tuple[tuple[str, Callable[[], object]], ...]:
-    """返回当前模块 lifespan 的完整 Provider 逆序撤销清单。"""
-    return (
-        ("事件服务", reset_event_services),
-        ("资源版本 Provider", reset_site_resource_composition),
-        ("认证访问服务", reset_security_access),
-        ("Chain 服务", reset_chain_services),
-        ("托管资源引用", reset_managed_resources),
-        ("调度器绑定", reset_scheduler_bindings),
-        ("Agent 工具服务", reset_tool_services),
-        (
-            "Agent 服务",
-            lambda: reset_agent_services(
-                data_context_resetter=reset_agent_data_context,
+    configure_server_application_services(
+        report_service=ServerReportService(
+            config_reader=lambda key: get_configured_system_config().get(key),
+            config_writer=lambda key, value: get_configured_system_config().set(key, value),
+            async_config_writer=lambda key, value: get_configured_system_config().async_set(
+                key, value
+            ),
+            installed_plugins_provider=lambda: get_configured_system_config().get(
+                SystemConfigKey.UserInstalledPlugins
+            ) or [],
+            subscribes_provider=lambda: SubscribeOper().list(),
+            async_subscribes_provider=lambda: SubscribeOper().async_list(),
+            plugin_report_sender=MoviePilotServerHelper.plugin_install_report,
+            async_plugin_report_sender=(
+                MoviePilotServerHelper.async_plugin_install_report
+            ),
+            subscribe_report_sender=MoviePilotServerHelper.subscribe_report,
+            async_subscribe_report_sender=MoviePilotServerHelper.async_subscribe_report,
+            repo_url_sanitizer=MoviePilotServerHelper.sanitize_plugin_repo_url,
+        ),
+        sharing_service=ServerSharingService(
+            subscribe_provider=lambda subscribe_id: SubscribeOper().get(
+                subscribe_id
+            ),
+            async_subscribe_provider=_async_get_subscribe,
+            workflow_provider=lambda workflow_id: WorkflowOper().get(workflow_id),
+            async_workflow_provider=_async_get_workflow,
+            user_uuid_provider=MoviePilotServerHelper.get_user_uuid,
+            subscribe_sender=MoviePilotServerHelper.subscribe_share,
+            async_subscribe_sender=MoviePilotServerHelper.async_subscribe_share,
+            workflow_sender=MoviePilotServerHelper.workflow_share,
+            async_workflow_sender=MoviePilotServerHelper.async_workflow_share,
+            response_handler=MoviePilotServerHelper._handle_response,
+            subscribe_cache_clearer=(
+                MoviePilotServerHelper._clear_subscribe_share_cache
+            ),
+            workflow_cache_clearer=(
+                MoviePilotServerHelper._clear_workflow_share_cache
             ),
         ),
-        ("传输重试配置", reset_transfer_retry_config),
-        ("Outbox 服务", reset_outbox_services),
-        ("工作流执行服务", reset_workflow_execution_composition),
-        ("中心服务", reset_server_services),
-        ("运行时数据 Provider", reset_runtime_data_providers),
-        ("HostRuntime 投影", reset_runtime),
-        ("数据库服务", reset_database_services),
-        ("认证服务", reset_security_services),
-        ("应用网络端口", reset_application_network_ports),
-        ("配置服务", reset_configuration),
     )
 
 
-def reset_module_providers() -> bool:
-    """逐项撤销模块 Provider；单项失败不跳过后续 owner，并返回整体结果。"""
-    converged = True
-    for name, callback in _module_provider_reset_steps():
-        try:
-            callback()
-        except Exception as error:
-            logger.error("撤销%s失败：%s", name, error)
-            converged = False
-    return converged
+def _build_outbox_dispatcher() -> OutboxDispatcher:
+    """创建一次恢复批次独占的 Session、Repository 和事件 handler。"""
+    def dispatch_subscribe_deleted_report(message) -> None:
+        """重放订阅删除统计；未确认时抛错以进入有限重试。"""
+        if not MoviePilotServerHelper.sub_done_durable(
+            message.payload.get("subscribe_info") or {}
+        ):
+            raise RuntimeError("订阅删除统计上报未确认")
+
+    def dispatch_subscribe_added_report(message) -> None:
+        """重放订阅新增统计；未确认时抛错以进入有限重试。"""
+        if not MoviePilotServerHelper.sub_reg_durable(
+            message.payload.get("subscribe_info") or {}
+        ):
+            raise RuntimeError("订阅新增统计上报未确认")
+
+    def dispatch_subscribe_complete_report(message) -> None:
+        """重放订阅完成统计；未确认时抛错以进入有限重试。"""
+        if not MoviePilotServerHelper.sub_done_durable(
+            message.payload.get("subscribe_info") or {}
+        ):
+            raise RuntimeError("订阅完成统计上报未确认")
+
+    def dispatch_subscribe_notification(message) -> None:
+        """恢复订阅完成通知；消息快照无需重建领域对象。"""
+        snapshot = message.payload.get("message") or {}
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("订阅完成通知快照格式无效")
+        CommandChain().post_message(Message.model_validate(snapshot))
+
+    def dispatch_subscribe_added_notification(message) -> None:
+        """恢复订阅新增通知；恢复使用提交前冻结的渲染消息快照。"""
+        snapshot = message.payload.get("message") or {}
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("订阅新增通知快照格式无效")
+        CommandChain().post_message(Message.model_validate(snapshot))
+
+    handlers = {
+        durable_event_topic(
+            EventType.SubscribeAdded
+        ): lambda message: EventManager().send_event(
+            EventType.SubscribeAdded,
+            message.payload,
+        ),
+        "subscribe.added.report": dispatch_subscribe_added_report,
+        "subscribe.added.notification": dispatch_subscribe_added_notification,
+        durable_event_topic(
+            EventType.SubscribeModified
+        ): lambda message: EventManager().send_event(
+            EventType.SubscribeModified,
+            message.payload,
+        ),
+        durable_event_topic(
+            EventType.SubscribeDeleted
+        ): lambda message: EventManager().send_event(
+            EventType.SubscribeDeleted,
+            message.payload,
+        ),
+        "subscribe.deleted.report": dispatch_subscribe_deleted_report,
+        durable_event_topic(
+            EventType.SubscribeComplete
+        ): lambda message: EventManager().send_event(
+            EventType.SubscribeComplete,
+            message.payload,
+        ),
+        "subscribe.complete.report": dispatch_subscribe_complete_report,
+        "subscribe.complete.notification": dispatch_subscribe_notification,
+        durable_event_topic(
+            EventType.DownloadAdded
+        ): lambda message: EventManager().send_event(
+            EventType.DownloadAdded,
+            restore_download_added(message.payload),
+        ),
+        durable_event_topic(
+            EventType.TransferComplete
+        ): lambda message: EventManager().send_event(
+            EventType.TransferComplete,
+            restore_transfer_result(message.payload),
+        ),
+        durable_event_topic(
+            EventType.TransferFailed
+        ): lambda message: EventManager().send_event(
+            EventType.TransferFailed,
+            restore_transfer_result(message.payload),
+        ),
+        durable_event_topic(
+            EventType.SubtitleTransferComplete
+        ): lambda message: EventManager().send_event(
+            EventType.SubtitleTransferComplete,
+            restore_transfer_result(message.payload),
+        ),
+        durable_event_topic(
+            EventType.SubtitleTransferFailed
+        ): lambda message: EventManager().send_event(
+            EventType.SubtitleTransferFailed,
+            restore_transfer_result(message.payload),
+        ),
+        durable_event_topic(
+            EventType.AudioTransferComplete
+        ): lambda message: EventManager().send_event(
+            EventType.AudioTransferComplete,
+            restore_transfer_result(message.payload),
+        ),
+        durable_event_topic(
+            EventType.AudioTransferFailed
+        ): lambda message: EventManager().send_event(
+            EventType.AudioTransferFailed,
+            restore_transfer_result(message.payload),
+        ),
+    }
+    validate_durable_event_handlers(handlers)
+    session = SessionFactory()
+    return OutboxDispatcher(
+        repository=SqlAlchemyOutboxRepository(session),
+        handlers=handlers,
+        close=session.close,
+        failure_observer=lambda dead: record_metric(
+            "scheduler.job.dead_letter" if dead else "scheduler.job.retry",
+            owner="outbox",
+        ),
+    )
 
 
-def _existing_singleton(instance_type: type) -> object | None:
-    """读取已经物化的 Singleton，启动失败回滚时禁止反向创建新 owner。"""
-    getter = getattr(instance_type, "get_existing_instance", None)
-    return getter() if callable(getter) else None
-
-
-def _call_existing_singleton(instance_type: type, method_name: str) -> object:
-    """调用已存在 Singleton 的关闭方法；owner 未创建时视为已经收敛。"""
-    instance = _existing_singleton(instance_type)
-    if instance is None:
-        return True
-    return getattr(instance, method_name)()
+def configure_wallpaper_services() -> None:
+    """把需要 Chain 编排的壁纸来源注入图片服务。"""
+    configure_wallpaper_providers(
+        tmdb_wallpaper=lambda: TmdbChain().get_random_wallpager(),
+        tmdb_wallpapers=lambda count: TmdbChain().get_trending_wallpapers(count),
+        mediaserver_wallpaper=lambda: MediaServerChain().get_latest_wallpaper(),
+        mediaserver_wallpapers=lambda count: MediaServerChain().get_latest_wallpapers(
+            count=count
+        ),
+    )
 
 
 def notify_event_error(title: str, message: str) -> None:
@@ -233,12 +472,12 @@ def get_host_event_handler_factories() -> dict[type, Callable[[], object]]:
     """返回所有使用事件装饰器的宿主类及其明确实例工厂。"""
     from app.chain.download import DownloadChain
     from app.chain.scraping import ScrapingChain
-    from app.chain.search.facade import SearchChain
+    from app.chain.search import SearchChain
     from app.chain.site import SiteChain
-    from app.chain.subscribe.facade import SubscribeChain
+    from app.chain.subscribe import SubscribeChain
     from app.chain.workflow import WorkflowChain
     from app.command import Command
-    from app.scheduler.facade import Scheduler
+    from app.scheduler import Scheduler
 
     return {
         Command: Command,
@@ -278,31 +517,33 @@ def start_frontend():
     启动前端服务
     """
     # 仅Windows可执行文件支持内嵌nginx
-    if not SystemUtils.is_frozen() or not SystemUtils.is_windows():
+    if not SystemUtils.is_frozen() \
+            or not SystemUtils.is_windows():
         return
     # 临时Nginx目录
-    nginx_path = get_runtime_setting("ROOT_PATH") / "nginx"
+    nginx_path = get_runtime_setting("ROOT_PATH") / 'nginx'
     if not nginx_path.exists():
         return
     # 配置目录下的Nginx目录
-    run_nginx_dir = get_runtime_setting("CONFIG_PATH").with_name("nginx")
+    run_nginx_dir = get_runtime_setting("CONFIG_PATH").with_name('nginx')
     if not run_nginx_dir.exists():
         # 移动到配置目录
         SystemUtils.move(nginx_path, run_nginx_dir)
     # 启动Nginx
     import subprocess
-
-    subprocess.Popen("start nginx.exe", cwd=run_nginx_dir, shell=True)
+    subprocess.Popen("start nginx.exe",
+                     cwd=run_nginx_dir,
+                     shell=True)
 
 
 def stop_frontend():
     """
     停止前端服务
     """
-    if not SystemUtils.is_frozen() or not SystemUtils.is_windows():
+    if not SystemUtils.is_frozen() \
+            or not SystemUtils.is_windows():
         return
     import subprocess
-
     subprocess.Popen("taskkill /f /im nginx.exe", shell=True)
 
 
@@ -355,29 +596,23 @@ def user_auth():
         logger.info(f"用户认证失败，{msg}")
 
 
-def check_auth():
+def check_auth() -> None:
     """
-    检查认证状态
+    启动认证检查。
+
+    站点功能已全开，认证状态不再限制功能，故不再推送受限告警。
+    本方法保持为无害的空操作以兼容既有调用方。
     """
-    if SitesHelper().auth_level < 2:
-        err_msg = "用户认证失败，站点相关功能将无法使用！"
-        MessageHelper().put(f"注意：{err_msg}", title="用户认证", role="system")
-        CommandChain().post_message(
-            Message(
-                mtype=MessageType.Manual,
-                title="MoviePilot用户认证",
-                text=err_msg,
-                link=get_runtime_setting("MP_DOMAIN")("#/site"),
-            )
-        )
+    return
 
 
 def update_resources() -> None:
     """安装可用资源更新，并由组合根统一决定是否重启进程。"""
     sites_helper = SitesHelper()
-    if not install_site_resources(
+    configure_resource_version_provider(
         lambda: (sites_helper.auth_version, sites_helper.indexer_version)
-    ):
+    )
+    if ResourceHelper().check() is not True:
         return
     restarted, message = SystemHelper.restart()
     if not restarted:
@@ -443,36 +678,15 @@ async def stop_modules() -> bool:
         return converged
 
     await run_step("图片代理安全日志合并器", close_image_proxy_block_log_coalescer)
-    await run_step(
-        "模块",
-        lambda: _call_existing_singleton(ModuleManager, "shutdown"),
-        offload=True,
-    )
-    await run_step(
-        "事件消费",
-        lambda: _call_existing_singleton(EventManager, "stop_async"),
-    )
+    await run_step("模块", lambda: ModuleManager().shutdown(), offload=True)
+    await run_step("事件消费", lambda: EventManager().stop_async())
     await run_step("浏览器会话", close_browser_sessions, offload=True)
     await run_step("托管资源", stop_managed_resources)
-    await run_step(
-        "DoH服务",
-        stop_doh_composition,
-        offload=True,
-    )
-    await run_step(
-        "线程池",
-        lambda: _call_existing_singleton(ThreadHelper, "shutdown"),
-        offload=True,
-    )
-    await run_step(
-        "Redis缓存连接",
-        lambda: _call_existing_singleton(RedisHelper, "close"),
-        offload=True,
-    )
-    await run_step(
-        "异步Redis缓存连接",
-        lambda: _call_existing_singleton(AsyncRedisHelper, "close"),
-    )
+    await run_step("DoH服务", lambda: DohHelper().shutdown(), offload=True)
+    await run_step("线程池", lambda: ThreadHelper().shutdown(), offload=True)
+    await run_step("消息服务", stop_message, offload=True)
+    await run_step("Redis缓存连接", lambda: RedisHelper().close(), offload=True)
+    await run_step("异步Redis缓存连接", lambda: AsyncRedisHelper().close())
     # Web Agent 的取消 finally 可能还要写入最终展示快照，必须先完成任务收尾，再关闭写入准入。
     web_agent_drained = await run_step(
         "Web Agent后台任务",
@@ -480,121 +694,245 @@ async def stop_modules() -> bool:
         record_failure=False,
     )
     if not web_agent_drained:
-        web_agent_drained = await run_step("Web Agent后台任务收尾", wait_web_agent_background_tasks)
+        web_agent_drained = await run_step(
+            "Web Agent后台任务收尾", wait_web_agent_background_tasks
+        )
     if web_agent_drained:
-        try:
-            persistence = get_configured_agent_chat_persistence()
-        except RuntimeError:
-            persistence = None
-        if persistence is None:
-            persistence_drained = True
-        else:
-            await run_step(
-                "Agent会话持久化准入",
-                persistence.begin_shutdown,
-            )
-            persistence_drained = await run_step(
-                "Agent会话持久化",
-                persistence.shutdown,
-            )
+        await run_step(
+            "Agent会话持久化准入",
+            lambda: get_configured_agent_chat_persistence().begin_shutdown(),
+        )
+        persistence_drained = await run_step(
+            "Agent会话持久化",
+            lambda: get_configured_agent_chat_persistence().shutdown(),
+        )
     else:
         persistence_drained = False
         all_converged = False
         logger.error("Web Agent任务未完成收尾，跳过持久化和数据库关闭以保护活动事务")
     if persistence_drained:
-        await run_step("数据库任务", stop_database_runtime)
-    await run_step("前端服务", stop_frontend, offload=True)
-    await run_step("临时文件", clear_temp, offload=True)
-    if persistence_drained:
-        if not database_runtime_active():
-            await run_step("模块 Provider", reset_module_providers)
+        await run_step("数据库任务", stop_database_worker)
+        if _database_worker is None:
             await run_step("数据库连接", close_database)
         else:
             all_converged = False
-            logger.error(
-                "数据库任务未收敛，保留全部 Provider 和数据库连接以供诊断与重试"
-            )
+            logger.error("数据库任务未收敛，跳过数据库连接关闭以避免运行中事务使用已释放连接")
+    await run_step("前端服务", stop_frontend, offload=True)
+    await run_step("临时文件", clear_temp, offload=True)
     return all_converged
 
 
-async def _initialize_modules() -> HostRuntime:
+async def init_modules() -> HostRuntime:
     """
-    构造模块服务并返回本次 lifespan 唯一的类型化 HostRuntime。
+    启动模块并返回本次 lifespan 唯一的类型化 HostRuntime。
     """
-    if not ThreadHelper().reopen():
-        raise RuntimeError("上一应用生命周期的共享线程池尚未收敛")
-    configure_application_network_ports()
-    database_runtime = await start_database_runtime()
+    global _database_worker
+    # 兼容 Oper 的无 Session 写入口仍由组合根持有事务，避免模型恢复自动提交。
+    transaction_runner = TransactionalWriteRunner(
+        sync_session=SessionFactory,
+        async_session=async_session_scope,
+    )
+    configure_transaction_runners(
+        sync=transaction_runner.sync,
+        async_=transaction_runner.async_,
+    )
+    database_worker = DatabaseWorker()
+    await database_worker.start()
+    _database_worker = database_worker
     try:
-        configuration = await compose_configuration(
-            executor=database_runtime.worker,
-            settings=legacy_settings,
-        )
+        system_config = await _initialize_configuration_services(database_worker)
     except BaseException:
         try:
-            await stop_database_runtime()
+            await stop_database_worker()
         except Exception as cleanup_error:  # noqa: BLE001  保留原始启动异常
             logger.error(f"启动失败后的数据库任务清理失败：{cleanup_error}")
         raise
-    publish_configuration(configuration, legacy_settings)
-    database_services = compose_database_services(
-        runtime=database_runtime,
-        system_config=configuration.system_config,
-    )
-    system_config = configuration.system_config
-    workflow_query = database_services.workflow_query
-    runtime_dependencies = compose_runtime_dependencies()
-    agent_composition = compose_agent(
-        runtime=database_runtime,
-        system_config=system_config,
-        dependencies=runtime_dependencies,
-    )
-    security_composition = configure_security_services()
-    runtime_composition = compose_runtime(
-        RuntimeInputs(
-            configuration=configuration,
-            database=database_services,
-            agent=agent_composition,
-            authentication=security_composition,
-            dependencies=runtime_dependencies,
-            tasks=get_task_registry(),
+    configure_plugin_persistence(
+        PluginPersistenceService(
+            executor=database_worker,
+            identities=TransactionalPluginIdentityStore(SessionFactory),
+            installations=TransactionalPluginInstallationStore(
+                SessionFactory,
+                system_config.update_atomically,
+            ),
         )
     )
-    host_runtime = runtime_composition.runtime
-    publish_database_services(database_services)
-    publish_runtime(runtime_composition)
+    # 数据访问能力统一在启动组合根注入，Runtime 和 Adapter 不再直接依赖 Oper。
+    api_data = ApiDataPorts(
+        sync_session=get_db,
+        async_session=get_async_db,
+        repositories={
+            "download_history": DownloadHistoryOper,
+            "media_server": MediaServerOper,
+            "message": MessageOper,
+            "passkey": PassKeyOper,
+            "site": SiteOper,
+            "subscribe": SubscribeOper,
+            "subscribe_history": SubscribeHistoryOper,
+            "transfer_history": TransferHistoryOper,
+            "user": UserOper,
+            "workflow": WorkflowOper,
+        },
+        standalone={
+            "passkey": PassKeyOper,
+            "system_config": SystemConfigOper,
+            "user": UserOper,
+        },
+        unit_of_work={
+            "async": SqlAlchemyAsyncUnitOfWork,
+            "sync": SqlAlchemyUnitOfWork,
+        },
+    )
+    runtime_configuration = RuntimeConfiguration(
+        api=lambda: build_api_runtime_config(legacy_settings),
+        scheduler=lambda: build_scheduler_runtime_config(legacy_settings),
+        chain=lambda: build_chain_runtime_config(legacy_settings),
+    )
+    runtime_settings = _build_runtime_settings_service()
+    agent_chat_persistence = AgentChatPersistenceService(
+        repository=lambda session: AgentChatOper(session),
+        async_executor=database_worker,
+        sync_transaction=transaction_runner.sync,
+        capacity=database_worker.snapshot().capacity,
+    )
+    host_runtime = HostRuntime(
+        agent_chat=AgentChatRuntime(
+            async_session=get_async_db,
+            repository=AgentChatOper,
+            transaction=SqlAlchemyAsyncUnitOfWork,
+            persistence=agent_chat_persistence,
+        ),
+        persistence=PersistenceRuntime(
+            sync_session=get_db,
+            async_session=get_async_db,
+            sync_transaction=SqlAlchemyUnitOfWork,
+            async_transaction=SqlAlchemyAsyncUnitOfWork,
+        ),
+        authentication=AuthenticationRuntime(
+            user_repository=UserOper,
+            standalone_user=UserOper,
+            system_config=SystemConfigOper,
+            passkey=PassKeyOper,
+        ),
+        messaging=MessagingRuntime(repository=MessageOper),
+        history=HistoryRuntime(
+            download_repository=DownloadHistoryOper,
+            transfer_repository=TransferHistoryOper,
+            media_server_repository=MediaServerOper,
+        ),
+        site=SiteRuntime(repository=SiteOper),
+        subscription=SubscriptionRuntime(
+            async_session=get_async_db,
+            repository=SubscribeOper,
+            history_repository=SubscribeHistoryOper,
+            transaction=SqlAlchemyAsyncUnitOfWork,
+            outbox=SqlAlchemyAsyncOutboxStager,
+        ),
+        workflow=WorkflowRuntime(
+            repository=WorkflowOper,
+            system_config=get_configured_system_config,
+        ),
+        configuration=runtime_configuration,
+        settings=runtime_settings,
+        tasks=get_task_registry(),
+    )
+    configure_runtime_configuration(host_runtime.configuration)
+    configure_runtime_settings(host_runtime.settings)
+    configure_runtime_setting_provider(lambda key: getattr(legacy_settings, key))
+    configure_runtime_setting_updater(host_runtime.settings.update)
+    configure_token_runtime_config(lambda: build_token_runtime_config(legacy_settings))
+    # 旧 app.api.data 导入只保留 ABI 转发，正式 API 依赖全部读取 HostRuntime。
+    configure_api_data_runtime(api_data)
     configure_runtime_data_providers()
-    configure_server_services(workflow_query, runtime_dependencies.subscription)
-    configure_workflow_execution_composition()
-    configure_outbox_dispatcher(build_outbox_dispatcher)
+    workflow_execution = TransactionalWorkflowExecutionService(SessionFactory)
+    configure_workflow_legacy_writer(workflow_execution)
+    configure_chain_data_ports(
+        site=lambda: TransactionalSiteRepository(
+            sync_session=SessionFactory,
+            async_session=async_session_scope,
+        ),
+        subscribe=lambda: SubscribeOper(),
+        workflow=lambda: WorkflowOper(),
+        download_history=lambda: DownloadHistoryOper(),
+        transfer_history=lambda: TransferHistoryOper(),
+        transfer_pending=lambda: TransactionalTransferAdmissionRepository(
+            SessionFactory
+        ),
+        media_server=lambda: MediaServerOper(),
+        download_failure=lambda: TransactionalDownloadFailureRepository(
+            SessionFactory
+        ),
+        user=lambda: UserOper(),
+    )
+    configure_outbox_dispatcher(_build_outbox_dispatcher)
     configure_transfer_retry_config(
         lambda: TransferRetryConfig(
             max_failed_retries=get_runtime_setting("TRANSFER_MAX_FAILED_RETRIES"),
         )
     )
-    configure_database()
-    publish_agent_services(
-        agent_composition,
-        data_context_registrar=configure_agent_data_context,
+    configure_database_governance(build_database_governance())
+    configure_agent_chat_service(AgentChatService(repository=AgentChatOper()))
+    configure_agent_chat_persistence(agent_chat_persistence)
+    configure_user_lookups(
+        by_id=lambda user_id: UserOper().get_by_id(user_id),
+        by_name=lambda username: UserOper().get_by_name(username),
+        by_channel=lambda **bindings: UserOper().get_name(**bindings),
     )
-    from app.agent.tools.manager import moviepilot_tool_manager
-
-    moviepilot_tool_manager.set_data_context(agent_composition.data)
-    configure_scheduler_agent_tasks(agent_composition.tasks)
+    configure_auth_service(
+        AuthService(
+            users=UserOper(),
+            config=get_configured_system_config(),
+            passkeys=PassKeyOper(),
+        )
+    )
+    configure_passkey_service(PasskeyService(repository=PassKeyOper()))
+    configure_transfer_history_provider(lambda: TransferHistoryOper())
+    configure_site_query_service(SiteQueryService(repository=TransactionalSiteRepository(
+        sync_session=SessionFactory,
+        async_session=async_session_scope,
+    )))
+    configure_site_health_service(SiteHealthService(repository=TransactionalSiteRepository(
+        sync_session=SessionFactory,
+        async_session=async_session_scope,
+    )))
+    configure_workflow_query(WorkflowQueryService(repository=WorkflowOper()))
+    configure_agent_data_ports(
+        agent_chat=lambda: AgentChatOper(),
+        agent_task=lambda: AgentTaskOper(),
+        user=lambda: UserOper(),
+        site=lambda: TransactionalSiteRepository(
+            sync_session=SessionFactory,
+            async_session=async_session_scope,
+        ),
+        subscribe=lambda: SubscribeOper(),
+        subscribe_history=lambda: SubscribeHistoryOper(),
+        transfer_history=lambda: TransferHistoryOper(),
+        download_history=lambda: DownloadHistoryOper(),
+        workflow=lambda: WorkflowOper(),
+        plugin_data=lambda: PluginDataOper(),
+    )
+    configure_agent_task_execution(AgentTaskExecutionService(
+        repository=lambda session: AgentTaskOper(session),
+        async_executor=database_worker,
+        sync_transaction=transaction_runner.sync,
+    ))
+    configure_subscribe_writer(
+        lambda: TransactionalSubscribeWriter(
+            sync_session=SessionFactory,
+            async_session=async_session_scope,
+        )
+    )
+    configure_transactional_subscription_scopes()
     # 托管资源只在这里装配声明与 adapter，具体资源仍由首个消费者显式激活。
     init_managed_resources()
     # 应用服务不反向依赖 Chain，由启动组合层注入壁纸来源。
     configure_wallpaper_services()
     # Chain 无参兼容入口由组合根明确提供依赖上下文；测试和新代码可直接注入替代上下文。
-    configure_chain_runtime_context(
-        dependencies=runtime_dependencies,
-        system_config=system_config,
-        configuration=configuration.runtime.chain,
-    )
+    configure_chain_runtime_context_provider(_build_chain_runtime_context)
     # 认证访问层不反向依赖数据库实现，由启动组合层注入载荷提供器。
-    configure_security_access()
+    set_superuser_token_payload_provider(build_superuser_token_payload)
     # DoH
-    configure_doh_composition()
+    DohHelper()
     # 站点管理
     SitesHelper()
     # 资源适配器只负责下载安装，是否重启由启动组合层决定。
@@ -626,21 +964,3 @@ async def _initialize_modules() -> HostRuntime:
     # 检查认证状态
     check_auth()
     return host_runtime
-
-
-async def init_modules() -> HostRuntime:
-    """启动模块服务，并在构造中途失败时回收尚未发布的资源 owner。"""
-    try:
-        return await _initialize_modules()
-    except BaseException:
-        try:
-            if stop_message() is False:
-                logger.error("模块启动失败后的消息资源未完全收敛")
-        except Exception as cleanup_error:  # noqa: BLE001  保留原始启动异常
-            logger.error(f"模块启动失败后的消息资源清理失败：{cleanup_error}")
-        try:
-            if await stop_modules() is False:
-                logger.error("模块启动失败后的资源 owner 未完全收敛")
-        except Exception as cleanup_error:  # noqa: BLE001  保留原始启动异常
-            logger.error(f"模块启动失败后的统一资源清理失败：{cleanup_error}")
-        raise

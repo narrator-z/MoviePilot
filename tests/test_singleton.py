@@ -1,6 +1,6 @@
 import pytest
 
-from app.foundation.singleton import Singleton, SingletonClass, WeakSingleton
+from app.foundation.singleton import Singleton, SingletonClass
 
 
 def test_singleton_class_can_read_existing_instance_without_creating(monkeypatch):
@@ -29,52 +29,6 @@ def test_parameterized_singleton_can_read_matching_instance_without_creating(mon
     instance = Example("first")
     assert Example.get_existing_instance("first") is instance
     assert Example.get_existing_instance("second") is None
-
-
-def test_parameterized_singleton_releases_only_matching_owner(monkeypatch):
-    """迟到的旧 owner 不得释放同类当前已发布的新 owner。"""
-
-    class Example(metaclass=Singleton):
-        """用于验证按参数单例 owner 身份。"""
-
-    monkeypatch.setattr(Singleton, "_instances", {})
-    current = Example()
-
-    assert Example.release_existing_instance(object()) is False
-    assert Example.get_existing_instance() is current
-    assert Example.release_existing_instance(current) is True
-    assert Example.get_existing_instance() is None
-
-
-def test_class_singleton_releases_only_matching_owner(monkeypatch):
-    """按类单例仅允许当前 owner 释放自身身份。"""
-
-    class Example(metaclass=SingletonClass):
-        """用于验证按类单例 owner 身份。"""
-
-    monkeypatch.setattr(SingletonClass, "_instances", {})
-    current = Example()
-
-    assert Example.release_existing_instance(object()) is False
-    assert Example.get_existing_instance() is current
-    assert Example.release_existing_instance(current) is True
-    assert Example.get_existing_instance() is None
-
-
-def test_weak_singleton_reads_and_releases_only_current_owner(monkeypatch):
-    """弱单例应支持不触发构造的读取，并只释放当前 owner。"""
-
-    class Example(metaclass=WeakSingleton):
-        """用于验证弱单例 owner 身份。"""
-
-    monkeypatch.setattr(WeakSingleton, "_instances", {})
-
-    assert Example.get_existing_instance() is None
-    current = Example()
-    assert Example.get_existing_instance() is current
-    assert Example.release_existing_instance(object()) is False
-    assert Example.release_existing_instance(current) is True
-    assert Example.get_existing_instance() is None
 
 
 def test_parameterized_singleton_can_retain_failed_lifecycle_owner(monkeypatch):

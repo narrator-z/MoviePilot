@@ -1,29 +1,27 @@
+import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent.contracts import ReplyMode
-from app.agent.manager import AgentManager
+from app.agent import (
+    HEARTBEAT_SESSION_PREFIX,
+    MoviePilotAgent,
+    AgentManager,
+    ReplyMode,
+    UNSUPPORTED_IMAGE_INPUT_MESSAGE,
+    _MessageTask,
+)
 from app.agent.memory import memory_manager
-from app.agent.middleware.activity import QUERY_ACTIVITY_LOG_TOOL_NAME
+from app.agent.middleware.activity_log import QUERY_ACTIVITY_LOG_TOOL_NAME
 from app.agent.middleware.skills import SKILL_TOOL_NAME
 from app.agent.middleware.subagents import (
     SUBAGENT_CONTROL_TOOL_NAME,
     SUBAGENT_TASK_TOOL_NAME,
 )
-from app.agent.orchestrator import (
-    HEARTBEAT_SESSION_PREFIX,
-    UNSUPPORTED_IMAGE_INPUT_MESSAGE,
-    MoviePilotAgent,
-)
-from app.agent.session import _MessageTask
 from app.agent.tools.factory import MoviePilotToolFactory
-from app.foundation.identity import SYSTEM_INTERNAL_USER_ID
 from app.runtime.config import settings
-
-pytestmark = pytest.mark.anyio
+from app.foundation.identity import SYSTEM_INTERNAL_USER_ID
 
 
 class _FakeGraphState:
@@ -55,15 +53,16 @@ class _FakeFailingAgent:
 
 class _FakeStreamingFailingAgent(_FakeFailingAgent):
     async def astream(self, _messages, **_kwargs):
-        if _kwargs.get("__keep_async_generator__"):
-            yield None
         raise self._error
+        # 保持 async generator 形态，避免测试替身变成普通 coroutine。
+        yield None
 
 
 class _FakeStreamingAgent(_FakeAgent):
     async def astream(self, _messages, **_kwargs):
-        if _kwargs.get("__keep_async_generator__"):
-            yield None
+        return
+        # 保持 async generator 形态，当前用例不需要实际 token。
+        yield None
 
 
 class StreamChunkTimeoutError(RuntimeError):
@@ -80,7 +79,7 @@ def _fake_activity_log_middleware(tool=None):
     return SimpleNamespace(name="activity", tools=[] if tool is None else [tool])
 
 
-class TestAgentBackgroundOutput:
+class AgentBackgroundOutputTest(unittest.IsolatedAsyncioTestCase):
     async def test_background_non_streaming_does_not_send_by_default(self):
         agent = MoviePilotAgent(session_id="bg-test", user_id="system")
         agent.channel = None
@@ -102,7 +101,7 @@ class TestAgentBackgroundOutput:
 
         agent.send_agent_message.assert_not_awaited()
         save_messages.assert_not_called()
-        assert agent._streamed_output == "后台结果"
+        self.assertEqual("后台结果", agent._streamed_output)
 
     async def test_non_streaming_image_unsupported_error_sends_friendly_notice(self):
         agent = MoviePilotAgent(session_id="image-test", user_id="user-1")
@@ -132,11 +131,11 @@ class TestAgentBackgroundOutput:
             ]
         )
 
-        assert result == UNSUPPORTED_IMAGE_INPUT_MESSAGE
+        self.assertEqual(UNSUPPORTED_IMAGE_INPUT_MESSAGE, result)
         agent.send_agent_message.assert_awaited_once_with(
             UNSUPPORTED_IMAGE_INPUT_MESSAGE, title=""
         )
-        assert agent._streamed_output == UNSUPPORTED_IMAGE_INPUT_MESSAGE
+        self.assertEqual(UNSUPPORTED_IMAGE_INPUT_MESSAGE, agent._streamed_output)
 
     async def test_streaming_image_unsupported_error_sends_friendly_notice(self):
         agent = MoviePilotAgent(session_id="image-test", user_id="user-1")
@@ -169,7 +168,7 @@ class TestAgentBackgroundOutput:
             ]
         )
 
-        assert result == UNSUPPORTED_IMAGE_INPUT_MESSAGE
+        self.assertEqual(UNSUPPORTED_IMAGE_INPUT_MESSAGE, result)
         agent.send_agent_message.assert_awaited_once_with(
             UNSUPPORTED_IMAGE_INPUT_MESSAGE, title=""
         )
@@ -204,12 +203,12 @@ class TestAgentBackgroundOutput:
             "智能助手执行失败: No streaming chunk received for 120.0s "
             "(model=mimo-v2.5-pro, chunks_received=1)."
         )
-        assert result == expected
+        self.assertEqual(expected, result)
         agent.send_agent_message.assert_awaited_once_with(expected, title="")
         sent_message = agent.send_agent_message.await_args.args[0]
-        assert "No streaming chunk received for 120.0s" in sent_message
-        assert "Tune or disable" not in sent_message
-        assert agent._streamed_output == expected
+        self.assertIn("No streaming chunk received for 120.0s", sent_message)
+        self.assertNotIn("Tune or disable", sent_message)
+        self.assertEqual(expected, agent._streamed_output)
 
     async def test_streaming_success_stops_streaming_once(self):
         """流式正常完成时不应在 finally 中重复停止流式输出。"""
@@ -259,9 +258,9 @@ class TestAgentBackgroundOutput:
 
         save_messages.assert_called_once()
         _, kwargs = save_messages.call_args
-        assert kwargs["session_id"] == "tool-reply"
-        assert kwargs["user_id"] == "user-1"
-        assert kwargs["messages"][0].content == "消息已发送"
+        self.assertEqual("tool-reply", kwargs["session_id"])
+        self.assertEqual("user-1", kwargs["user_id"])
+        self.assertEqual("消息已发送", kwargs["messages"][0].content)
 
     async def test_process_does_not_mutate_cached_agent_messages(self):
         """处理新消息时不应直接修改记忆缓存中的历史消息列表。"""
@@ -291,10 +290,10 @@ class TestAgentBackgroundOutput:
         ):
             result = await agent.process("继续")
 
-        assert result == "消息已发送"
-        assert len(cached_messages) == 1
-        assert cached_messages is not captured["messages"]
-        assert len(captured["messages"]) == 2
+        self.assertEqual("消息已发送", result)
+        self.assertEqual(1, len(cached_messages))
+        self.assertIsNot(cached_messages, captured["messages"])
+        self.assertEqual(2, len(captured["messages"]))
 
     async def test_background_non_streaming_sends_when_reply_mode_dispatch(self):
         agent = MoviePilotAgent(session_id="bg-test", user_id="system")
@@ -323,7 +322,7 @@ class TestAgentBackgroundOutput:
             "后台结果", title="MoviePilot助手"
         )
         save_messages.assert_not_called()
-        assert agent._streamed_output == "后台结果"
+        self.assertEqual("后台结果", agent._streamed_output)
 
     async def test_background_non_streaming_captures_without_sending_when_capture_only(self):
         agent = MoviePilotAgent(session_id="bg-test", user_id="system")
@@ -346,13 +345,13 @@ class TestAgentBackgroundOutput:
 
         agent.send_agent_message.assert_not_awaited()
         save_messages.assert_not_called()
-        assert agent._streamed_output == "后台结果"
+        self.assertEqual("后台结果", agent._streamed_output)
 
     async def test_heartbeat_check_jobs_captures_final_reply_and_keeps_message_tools(self):
         manager = AgentManager()
 
         with (
-            patch("app.agent.tasks.load_jobs_metadata", new=AsyncMock(return_value=[{
+            patch("app.agent.orchestrator.load_jobs_metadata", new=AsyncMock(return_value=[{
                 "id": "job-1",
                 "name": "测试任务",
                 "description": "desc",
@@ -368,14 +367,14 @@ class TestAgentBackgroundOutput:
 
         process_message.assert_awaited_once()
         kwargs = process_message.await_args.kwargs
-        assert kwargs["reply_mode"] == ReplyMode.CAPTURE_ONLY
-        assert kwargs["allow_message_tools"] is True
+        self.assertEqual(ReplyMode.CAPTURE_ONLY, kwargs["reply_mode"])
+        self.assertTrue(kwargs["allow_message_tools"])
 
     async def test_heartbeat_check_jobs_skips_when_no_active_jobs(self):
         manager = AgentManager()
 
         with (
-            patch("app.agent.tasks.load_jobs_metadata", new=AsyncMock(return_value=[])),
+            patch("app.agent.orchestrator.load_jobs_metadata", new=AsyncMock(return_value=[])),
             patch.object(manager, "process_message", new=AsyncMock()) as process_message,
         ):
             await manager.heartbeat_check_jobs()
@@ -440,7 +439,8 @@ class TestAgentBackgroundOutput:
         ):
             created = await agent._create_agent(streaming=False)
 
-        assert [getattr(item, "name", item) for item in created["middleware"]] == [
+        self.assertEqual(
+            [
                 "AgentPolicyMiddleware",
                 "skills",
                 "jobs",
@@ -449,7 +449,9 @@ class TestAgentBackgroundOutput:
                 "patch",
                 "FinalRequestCompactionMiddleware",
                 "usage",
-        ]
+            ],
+            [getattr(item, "name", item) for item in created["middleware"]],
+        )
 
     async def test_create_agent_registers_skill_tool_from_middleware(self):
         """SkillsMiddleware 暴露的 skill 工具应进入 Agent 工具和筛选候选。"""
@@ -502,9 +504,9 @@ class TestAgentBackgroundOutput:
         ):
             created = await agent._create_agent(streaming=False)
 
-        assert skill_tool in created["tools"]
-        assert skill_tool in captured["selection_tools"]
-        assert SKILL_TOOL_NAME in captured["always_include"]
+        self.assertIn(skill_tool, created["tools"])
+        self.assertIn(skill_tool, captured["selection_tools"])
+        self.assertIn(SKILL_TOOL_NAME, captured["always_include"])
 
     async def test_create_agent_excludes_activity_log_without_message_context(self):
         """无渠道信息的后台捕获任务不应注入活动日志。"""
@@ -553,7 +555,8 @@ class TestAgentBackgroundOutput:
         ):
             created = await agent._create_agent(streaming=False)
 
-        assert [getattr(item, "name", item) for item in created["middleware"]] == [
+        self.assertEqual(
+            [
                 "AgentPolicyMiddleware",
                 "skills",
                 "jobs",
@@ -562,7 +565,9 @@ class TestAgentBackgroundOutput:
                 "patch",
                 "FinalRequestCompactionMiddleware",
                 "usage",
-        ]
+            ],
+            [getattr(item, "name", item) for item in created["middleware"]],
+        )
 
     def test_message_tool_is_not_always_included_by_tool_selector(self):
         """消息发送工具不应绕过工具筛选。"""
@@ -572,7 +577,7 @@ class TestAgentBackgroundOutput:
             [send_message_tool]
         )
 
-        assert "send_message" not in always_include
+        self.assertNotIn("send_message", always_include)
 
     def test_activity_log_tool_is_not_registered_by_tool_factory(self):
         """活动日志查询工具不应再由全局工具工厂保留。"""
@@ -582,7 +587,7 @@ class TestAgentBackgroundOutput:
             [activity_log_tool]
         )
 
-        assert QUERY_ACTIVITY_LOG_TOOL_NAME not in always_include
+        self.assertNotIn(QUERY_ACTIVITY_LOG_TOOL_NAME, always_include)
 
     async def test_create_agent_registers_activity_log_tool_from_middleware(self):
         """ActivityLogMiddleware 暴露的工具应进入 Agent 工具和筛选候选。"""
@@ -642,9 +647,9 @@ class TestAgentBackgroundOutput:
         ):
             created = await agent._create_agent(streaming=False)
 
-        assert activity_tool in created["tools"]
-        assert activity_tool in captured["selection_tools"]
-        assert QUERY_ACTIVITY_LOG_TOOL_NAME in captured["always_include"]
+        self.assertIn(activity_tool, created["tools"])
+        self.assertIn(activity_tool, captured["selection_tools"])
+        self.assertIn(QUERY_ACTIVITY_LOG_TOOL_NAME, captured["always_include"])
 
     async def test_create_agent_always_includes_subagent_tools(self):
         """工具筛选开启时应保留同步和异步子代理入口。"""
@@ -704,8 +709,8 @@ class TestAgentBackgroundOutput:
         ):
             await agent._create_agent(streaming=False)
 
-        assert SUBAGENT_TASK_TOOL_NAME in captured["always_include"]
-        assert SUBAGENT_CONTROL_TOOL_NAME in captured["always_include"]
+        self.assertIn(SUBAGENT_TASK_TOOL_NAME, captured["always_include"])
+        self.assertIn(SUBAGENT_CONTROL_TOOL_NAME, captured["always_include"])
 
     async def test_create_agent_keeps_activity_log_for_normal_session(self):
         agent = MoviePilotAgent(
@@ -754,7 +759,8 @@ class TestAgentBackgroundOutput:
         ):
             created = await agent._create_agent(streaming=False)
 
-        assert [getattr(item, "name", item) for item in created["middleware"]] == [
+        self.assertEqual(
+            [
                 "AgentPolicyMiddleware",
                 "skills",
                 "jobs",
@@ -764,7 +770,9 @@ class TestAgentBackgroundOutput:
                 "patch",
                 "FinalRequestCompactionMiddleware",
                 "usage",
-        ]
+            ],
+            [getattr(item, "name", item) for item in created["middleware"]],
+        )
 
     async def test_run_background_prompt_forces_disable_message_tools_when_capture_only(self):
         captured = {}
@@ -787,7 +795,7 @@ class TestAgentBackgroundOutput:
         finally:
             await manager.close()
 
-        assert captured["message"] == "background task"
-        assert captured["reply_mode"] == ReplyMode.CAPTURE_ONLY
-        assert captured["allow_message_tools"] is False
-        assert captured["user_id"] == SYSTEM_INTERNAL_USER_ID
+        self.assertEqual("background task", captured["message"])
+        self.assertEqual(ReplyMode.CAPTURE_ONLY, captured["reply_mode"])
+        self.assertFalse(captured["allow_message_tools"])
+        self.assertEqual(SYSTEM_INTERNAL_USER_ID, captured["user_id"])

@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app.application.subscription.contract import SubscriptionIdentity
 from app.application.subscription.query import SubscriptionQueryService
 from app.chain.subscribe import SubscribeChain
 from app.domain.context import MediaInfo
@@ -23,12 +22,11 @@ def test_subscription_query_service_builds_complete_exists_identity() -> None:
 
     assert service.exists(media, SimpleNamespace(begin_season=2)) is True
     repository.exists.assert_called_once_with(
-        SubscriptionIdentity(
-            media_source=MediaSource.TMDB,
-            media_id="123",
-            season=2,
-            episode_group="group-1",
-        )
+        media_source=MediaSource.TMDB,
+        media_id="123",
+        music_type=None,
+        season=2,
+        episode_group="group-1",
     )
 
 
@@ -55,12 +53,11 @@ def test_subscription_query_service_filters_source_and_music_state() -> None:
 
     assert result is expected
     repository.get_by.assert_called_once_with(
-        SubscriptionIdentity(
-            media_source=MediaSource.TMDB,
-            media_id="123",
-            type=MediaType.TV.value,
-            season=1,
-        )
+        type=MediaType.TV.value,
+        season=1,
+        media_source=MediaSource.TMDB,
+        media_id="123",
+        music_type=None,
     )
     assert service.has_music("R,P") is True
     repository.list.assert_called_once_with("R,P")
@@ -85,12 +82,10 @@ def test_get_by_source_upgrades_legacy_tmdbid_identity() -> None:
 
     assert result is expected
     repository.get_by.assert_called_once_with(
-        SubscriptionIdentity(
-            media_source=MediaSource.TMDB,
-            media_id="12143",
-            type=MediaType.TV.value,
-            season=1,
-        )
+        type=MediaType.TV.value,
+        season=1,
+        media_source=MediaSource.TMDB,
+        media_id="12143",
     )
 
 

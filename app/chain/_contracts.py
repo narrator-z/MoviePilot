@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    from app.application.history import TransferHistoryRepository
-    from app.application.transfer.execution import TransferExecutionRepository
+from typing import Any, Protocol
 
 
 class ChainRuntimeMixinHost(Protocol):
@@ -19,10 +15,6 @@ class ChainRuntimeMixinHost(Protocol):
 
     def run_module(self, method: str, **kwargs: Any) -> Any:
         """调用同步模块能力。"""
-        ...
-
-    def run_module_strict(self, method: str, **kwargs: Any) -> Any:
-        """同步调用模块能力，并向调用方传播 provider 失败。"""
         ...
 
     async def async_run_module(self, method: str, **kwargs: Any) -> Any:
@@ -102,5 +94,3 @@ class TransferMixinHost(ChainRuntimeMixinHost, Protocol):
     def obtain_images(self, *args: Any, **kwargs: Any) -> Any: ...
 
     def do_transfer(self, *args: Any, **kwargs: Any) -> Any: ...
-    transfer_history_repository: TransferHistoryRepository
-    transfer_execution_repository: TransferExecutionRepository

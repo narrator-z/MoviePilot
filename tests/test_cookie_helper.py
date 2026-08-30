@@ -1,10 +1,8 @@
+from unittest.mock import patch
+
 from lxml import etree
 
-from app.application.security.cookie import (
-    CookieHelper,
-    configure_cookie_ports,
-    reset_cookie_ports,
-)
+from app.application.security.cookie import CookieHelper
 
 
 class _CookieContext:
@@ -76,33 +74,19 @@ def test_cookie_login_follows_same_origin_login_link():
     """首页仅提供登录链接时应进入同源登录页后完成 Cookie 获取。"""
     page = _CookiePage()
 
-    class FakeBrowserPort:
-        """把 Application 登录回调运行在测试页面上。"""
+    def run_action(**kwargs):
+        return kwargs["callback"](page)
 
-        @staticmethod
-        def action(**kwargs):
-            """执行登录回调。"""
-            return kwargs["callback"](page)
-
-    class UnusedPort:
-        """标记当前无验证码流程不得触达的端口。"""
-
-        def __getattr__(self, _name):
-            """拒绝任何意外调用。"""
-            raise AssertionError("无验证码登录不应使用该端口")
-
-    configure_cookie_ports(
-        browser=FakeBrowserPort(), http=UnusedPort(), ocr=UnusedPort()
-    )
-    try:
+    with patch(
+        "app.application.security.cookie.PlaywrightHelper.action",
+        side_effect=run_action,
+    ):
         cookie, ua, message = CookieHelper().get_site_cookie_ua(
             url="https://dicmusic.example/",
             username="moviepilot",
             password="secret-password",
             timeout=30,
         )
-    finally:
-        reset_cookie_ports()
 
     assert cookie == "session=authenticated; "
     assert ua == "Browser UA"

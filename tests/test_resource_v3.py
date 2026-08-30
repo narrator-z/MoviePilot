@@ -2,13 +2,13 @@ from pathlib import Path
 
 import pytest
 
+from app.runtime.config import settings
 from app.adapters.system.resource import (
     ResourceHelper,
     configure_resource_version_provider,
 )
-from app.runtime.config import settings
-from app.startup.composition import resource as resource_composition
 from app.startup.initializers import modules as modules_initializer
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
@@ -75,7 +75,7 @@ def test_startup_owns_restart_after_resource_update(monkeypatch):
     """资源适配器只返回更新结果，进程重启必须由启动组合层触发。"""
     restart_calls = []
     monkeypatch.setattr(
-        resource_composition,
+        modules_initializer,
         "ResourceHelper",
         lambda: type(
             "ResourceStub",
@@ -97,7 +97,7 @@ def test_startup_owns_restart_after_resource_update(monkeypatch):
 def test_startup_does_not_restart_without_resource_update(monkeypatch):
     """没有成功安装新资源时启动层不得请求重启。"""
     monkeypatch.setattr(
-        resource_composition,
+        modules_initializer,
         "ResourceHelper",
         lambda: type(
             "ResourceStub",
@@ -139,7 +139,7 @@ def test_docker_entrypoint_does_not_sync_updater_as_a_special_case():
 
 
 def test_v3_release_workflows_use_main_wiki_and_isolated_images():
-    """V3 正式版和 Beta 构建应读取主 Wiki 分支并保持镜像仓库隔离。"""
+    """V3 正式版和 Beta 构建应读取主 Wiki 分支，推送默认镜像与 v3 专属镜像，且不与 v2 镜像混淆。"""
     build_workflow = (ROOT_DIR / ".github" / "workflows" / "build-v3.yml").read_text(encoding="utf-8")
     beta_workflow = (ROOT_DIR / ".github" / "workflows" / "beta.yml").read_text(encoding="utf-8")
 
@@ -148,8 +148,9 @@ def test_v3_release_workflows_use_main_wiki_and_isolated_images():
     assert "          repository: jxxghp/MoviePilot-Wiki\n          ref: main" in build_workflow
     assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v3" in build_workflow
     assert "ghcr.io/${{ github.repository }}-v3" in build_workflow
+    # V3 构建同时推送默认镜像（latest 指向 v3）与 v3 专属镜像，但不碰 v2 镜像
+    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot\n" in build_workflow
     assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v2" not in build_workflow
-    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot\n" not in build_workflow
     assert "git tag -l 'v3.*'" in build_workflow
 
     assert "          repository: jxxghp/MoviePilot-Wiki\n          ref: main" in beta_workflow

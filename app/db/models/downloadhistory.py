@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.db.base import Base, execute_dml, get_id_column
+from app.db.decorators import async_db_query, db_query, db_update
 from app.db.models._constraints import media_identity_constraint
 from app.schemas.types import MediaSource
 
@@ -76,6 +77,7 @@ class DownloadHistory(Base):
     )
 
     @classmethod
+    @db_query
     def get_by_hash(cls, db: Session, download_hash: str):
         return db.execute(
             select(DownloadHistory)
@@ -84,6 +86,7 @@ class DownloadHistory(Base):
         ).scalars().first()
 
     @classmethod
+    @db_query
     def get_by_hashes(cls, db: Session, download_hashes: List[str]):
         """
         批量查询多个下载任务的最新历史记录，避免在上层形成 N+1 查询。
@@ -116,11 +119,19 @@ class DownloadHistory(Base):
         ]
 
     @classmethod
+    @db_query
     def get_by_media_identity(
             cls, db: Session, media_source: MediaSource, media_id: str,
             music_type: Optional[str] = None,
+            title: Optional[str] = None, year: Optional[str] = None,
     ):
-        """按规范媒体身份查询下载历史。"""
+        """
+        按统一媒体身份或兼容 ID 查询下载历史。
+
+        当身份（media_source+media_id）查询无结果、且同时传入
+        ``title`` 与 ``year`` 时，按标题+年份回退匹配历史。历史表的 title/year 必定
+        有值，因此该回退可作为订阅详情关联兜底层，使 tmdbid 为空的订阅也能命中历史。
+        """
         if not media_source or media_id is None or not str(media_id).strip():
             return []
         statement = select(DownloadHistory).where(
@@ -129,9 +140,76 @@ class DownloadHistory(Base):
         )
         if music_type:
             statement = statement.where(DownloadHistory.music_type == music_type)
-        return list(db.execute(statement).scalars().all())
+        histories = list(db.execute(statement).scalars().all())
+        # 身份查询无结果且提供了标题/年份时，按标题+年份回退匹配历史
+        if not histories and title and year:
+            histories = list(db.execute(
+                select(DownloadHistory).where(
+                    DownloadHistory.title == title,
+                    DownloadHistory.year == year,
+                )
+            ).scalars().all())
+        return histories
 
     @classmethod
+    @db_query
+    def get_by_mediaid(
+            cls, db: Session, tmdbid: Optional[int] = None,
+            doubanid: Optional[str] = None, bangumiid: Optional[int] = None,
+            anilistid: Optional[int] = None, media_source: Optional[str] = None,
+            media_id: Optional[str] = None,
+            music_type: Optional[str] = None,
+            title: Optional[str] = None, year: Optional[str] = None,
+    ):
+        """
+        按统一媒体身份或兼容 ID 查询下载历史（兼容 tmdbid/doubanid 等旧接口）。
+
+        当身份（tmdbid/doubanid/media_source+media_id 等）查询无结果、且同时传入
+        ``title`` 与 ``year`` 时，按标题+年份回退匹配历史。历史表的 title/year 必定
+        有值，因此该回退可作为订阅详情关联兜底层，使 tmdbid 为空的订阅也能命中历史。
+        """
+        query = select(DownloadHistory)
+        if media_source and media_id:
+            q = query.where(
+                DownloadHistory.media_source == media_source,
+                DownloadHistory.media_id == str(media_id),
+            )
+            if music_type:
+                q = q.where(DownloadHistory.music_type == music_type)
+            histories = list(db.execute(q).scalars().all())
+        else:
+            # v3 统一媒体身份（无 tmdbid/doubanid 分列）：旧兼容 ID 映射到统一列查询
+            resolved_source = resolved_id = None
+            if tmdbid is not None:
+                resolved_source, resolved_id = "themoviedb", str(tmdbid)
+            elif doubanid:
+                resolved_source, resolved_id = "douban", str(doubanid)
+            elif bangumiid is not None:
+                resolved_source, resolved_id = "bangumi", str(bangumiid)
+            elif anilistid is not None:
+                resolved_source, resolved_id = "anilist", str(anilistid)
+            if resolved_source and resolved_id:
+                q = query.where(
+                    DownloadHistory.media_source == resolved_source,
+                    DownloadHistory.media_id == resolved_id,
+                )
+                if music_type:
+                    q = q.where(DownloadHistory.music_type == music_type)
+                histories = list(db.execute(q).scalars().all())
+            else:
+                histories = []
+        # 身份查询无结果且提供了标题/年份时，按标题+年份回退匹配历史
+        if not histories and title and year:
+            histories = list(db.execute(
+                query.where(
+                    DownloadHistory.title == title,
+                    DownloadHistory.year == year,
+                )
+            ).scalars().all())
+        return histories
+
+    @classmethod
+    @db_query
     def list_by_page(
         cls, db: Session, page: int = 1, count: int = 30
     ):
@@ -143,6 +221,7 @@ class DownloadHistory(Base):
         ).scalars().all())
 
     @classmethod
+    @async_db_query
     async def async_list_by_page(
         cls, db: AsyncSession, page: int = 1, count: int = 30
     ):
@@ -155,6 +234,7 @@ class DownloadHistory(Base):
         return list(result.scalars().all())
 
     @classmethod
+    @async_db_query
     async def async_list_by_title(
         cls,
         db: AsyncSession,
@@ -170,11 +250,13 @@ class DownloadHistory(Base):
         return list(result.scalars().all())
 
     @classmethod
+    @async_db_query
     async def async_count(cls, db: AsyncSession):
         result = await db.execute(select(func.count(cls.id)))
         return result.scalar()
 
     @classmethod
+    @async_db_query
     async def async_count_by_title(cls, db: AsyncSession, title: str):
         result = await db.execute(
             select(func.count(cls.id)).filter(_title_like(cls.title, title))
@@ -182,12 +264,14 @@ class DownloadHistory(Base):
         return result.scalar()
 
     @classmethod
+    @db_query
     def get_by_path(cls, db: Session, path: str):
         return db.execute(
             select(DownloadHistory).where(DownloadHistory.path == path)
         ).scalars().first()
 
     @classmethod
+    @db_query
     def get_last_by(
         cls,
         db: Session,
@@ -226,6 +310,7 @@ class DownloadHistory(Base):
 
 
     @classmethod
+    @db_query
     def list_by_user_date(cls, db: Session, date: str, username: Optional[str] = None):
         """
         查询某用户某时间之前的下载历史。
@@ -244,6 +329,7 @@ class DownloadHistory(Base):
         ).scalars().all())
 
     @classmethod
+    @db_query
     def list_by_date(
         cls,
         db: Session,
@@ -269,18 +355,20 @@ class DownloadHistory(Base):
         ).scalars().all())
 
     @classmethod
+    @db_query
     def list_by_type(cls, db: Session, mtype: str, days: int):
         return list(db.execute(
             select(DownloadHistory).where(
                 DownloadHistory.type == mtype,
                 DownloadHistory.date
                 >= time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 86400 * int(days))
+                    "%Y-%m-%d %H:%M:%S", time.localtime(max(0, time.time() - 86400 * int(days)))
                 ),
             )
         ).scalars().all())
 
     @classmethod
+    @db_update
     def delete_before(
         cls,
         db: Session,
@@ -331,6 +419,7 @@ class DownloadFiles(Base):
     )
 
     @classmethod
+    @db_query
     def get_by_hash(cls, db: Session, download_hash: str, state: Optional[int] = None):
         statement = select(cls).where(cls.download_hash == download_hash)
         if state is not None:
@@ -338,6 +427,7 @@ class DownloadFiles(Base):
         return list(db.execute(statement).scalars().all())
 
     @classmethod
+    @db_query
     def get_by_fullpath(cls, db: Session, fullpath: str, all_files: bool = False):
         result = db.execute(
             select(cls).where(cls.fullpath == fullpath).order_by(cls.id.desc())
@@ -345,16 +435,19 @@ class DownloadFiles(Base):
         return list(result.all()) if all_files else result.first()
 
     @classmethod
+    @db_query
     def get_by_savepath(cls, db: Session, savepath: str):
         return list(db.execute(select(cls).where(cls.savepath == savepath)).scalars().all())
 
     @classmethod
+    @db_update
     def delete_by_fullpath(cls, db: Session, fullpath: str):
         db.execute(
             update(cls).where(cls.fullpath == fullpath, cls.state == 1).values(state=0)
         )
 
     @classmethod
+    @db_update
     def delete_orphans(
         cls,
         db: Session,
@@ -382,3 +475,73 @@ class DownloadFiles(Base):
             db, delete(cls).where(cls.id.in_(ids)),
             execution_options={"synchronize_session": False},
         )
+
+
+    # ==================== 旧身份字段兼容 ====================
+    # v3 将 tmdbid/doubanid/bangumiid/anilistid 收敛为统一的 media_source/media_id，
+    # fork 链路与测试仍会读写旧字段名；property 读从统一身份派生，写回映射到统一列。
+    @property
+    def tmdbid(self):
+        if self.media_source == MediaSource.TMDB.value:
+            try:
+                return int(str(self.media_id).strip())
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @tmdbid.setter
+    def tmdbid(self, value):
+        if value is None:
+            return
+        self.media_source = MediaSource.TMDB.value
+        self.media_id = str(value)
+
+    @property
+    def doubanid(self):
+        if self.media_source == MediaSource.Douban.value:
+            return self.media_id
+        return None
+
+    @doubanid.setter
+    def doubanid(self, value):
+        if value is None:
+            return
+        self.media_source = MediaSource.Douban.value
+        self.media_id = str(value)
+
+    @property
+    def bangumiid(self):
+        if self.media_source == MediaSource.Bangumi.value:
+            return self.media_id
+        return None
+
+    @bangumiid.setter
+    def bangumiid(self, value):
+        if value is None:
+            return
+        self.media_source = MediaSource.Bangumi.value
+        self.media_id = str(value)
+
+    @property
+    def anilistid(self):
+        if self.media_source == MediaSource.AniList.value:
+            return self.media_id
+        return None
+
+    @anilistid.setter
+    def anilistid(self, value):
+        if value is None:
+            return
+        self.media_source = MediaSource.AniList.value
+        self.media_id = str(value)
+
+    @property
+    def mediaid(self):
+        return self.media_id
+
+    @mediaid.setter
+    def mediaid(self, value):
+        if value is None:
+            return
+        self.media_id = str(value)
+

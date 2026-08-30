@@ -1,14 +1,12 @@
 import asyncio
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import nullcontext
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 from app import schemas
 from app.api.endpoints import plugin as plugin_endpoint
 from app.api.endpoints.plugin import (
+    _prepare_update_candidates,
     plugin_history,
     plugin_releases,
     plugin_static_file,
@@ -18,8 +16,6 @@ from app.api.endpoints.plugin import (
     uninstall_plugin,
 )
 from app.api.endpoints.system import sync_plugin_market_from_wiki
-from app.application.plugin import release as release_module
-from app.application.plugin.catalog import PluginCatalogQuery
 from app.application.plugin.config import PluginConfigCommand
 from app.application.plugin.declaration import PluginDeclaredMetadata
 from app.application.plugin.identity import (
@@ -28,11 +24,10 @@ from app.application.plugin.identity import (
     PluginPayloadSourceType,
     TrustedPluginSourceType,
 )
-from app.application.plugin.release import PluginReleaseService
 from app.foundation.singleton import Singleton
 from app.runtime.config import settings
 from app.runtime.extensions.plugin.admission import PluginMutationAdmission
-from app.runtime.extensions.plugin.manager import PluginManager
+from app.runtime.extensions.plugin_manager import PluginManager
 from app.runtime.tasks import TaskRegistry
 from app.schemas.event import PluginDataResetEventData
 from app.schemas.plugin import PluginInstance, PluginRuntimeStatus
@@ -77,20 +72,6 @@ def _plugin_identity(
         updated_at=NOW,
         bound_at=NOW,
         payload_applied_at=NOW if has_payload else None,
-    )
-
-
-def _catalog_query(
-    plugin_manager: MagicMock, persistence: MagicMock
-) -> PluginCatalogQuery:
-    """用运行态和身份端口替身构造插件目录查询。"""
-    return PluginCatalogQuery(
-        installed_plugins=plugin_manager.get_installed_plugins,
-        local_plugins=plugin_manager.get_local_plugins,
-        local_repo_plugins=plugin_manager.get_local_repo_plugins,
-        online_candidates=plugin_manager.async_get_online_plugin_candidates,
-        process_plugins=plugin_manager.process_plugins_list,
-        identities=persistence.list_identities,
     )
 
 
@@ -143,13 +124,18 @@ def test_update_candidates_report_source_and_binding_relationship():
     plugin_manager = MagicMock()
     plugin_manager.process_plugins_list.side_effect = lambda higher, _base: higher
 
-    result = asyncio.run(
-        _catalog_query(plugin_manager, persistence).project_update_candidates(
-            plugins,
-            plugins,
-            [plugin.id for plugin in plugins],
+    with patch(
+        "app.api.endpoints.plugin.get_plugin_persistence",
+        return_value=persistence,
+    ):
+        result = asyncio.run(
+            _prepare_update_candidates(
+                plugin_manager,
+                plugins,
+                plugins,
+                [plugin.id for plugin in plugins],
+            )
         )
-    )
 
     assert result[0].update_candidate is not None
     assert result[0].update_candidate.source_type == "official"
@@ -182,15 +168,20 @@ def test_bound_repository_update_precedes_a_higher_alternative():
     plugin_manager = MagicMock()
     plugin_manager.process_plugins_list.return_value = [bound_update]
 
-    result = asyncio.run(
-        _catalog_query(plugin_manager, persistence).project_update_candidates(
-            [bound_update, alternative_update],
-            [alternative_update],
-            ["DemoPlugin"],
+    with patch(
+        "app.api.endpoints.plugin.get_plugin_persistence",
+        return_value=persistence,
+    ):
+        result = asyncio.run(
+            _prepare_update_candidates(
+                plugin_manager,
+                [bound_update, alternative_update],
+                [alternative_update],
+                ["DemoPlugin"],
+            )
         )
-    )
 
-    assert [plugin.id for plugin in result] == ["DemoPlugin"]
+    assert result == [bound_update]
     assert result[0].update_candidate is not None
     assert result[0].update_candidate.version == "2.0.0"
     assert result[0].update_candidate.is_bound is True
@@ -235,14 +226,13 @@ def test_market_endpoint_reads_source_preserving_candidates_for_bound_update():
     persistence = MagicMock()
     persistence.list_identities = AsyncMock(return_value=[_plugin_identity()])
 
-    query = _catalog_query(plugin_manager, persistence)
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_catalog_query",
-        return_value=query,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.get_plugin_persistence", return_value=persistence),
     ):
         result = asyncio.run(plugin_endpoint.all_plugins(None, "market", False))
 
-    assert [plugin.id for plugin in result] == ["DemoPlugin"]
+    assert result == [bound_update]
     assert result[0].update_candidate is not None
     assert result[0].update_candidate.version == "2.0.0"
     assert result[0].update_candidate.is_bound is True
@@ -254,46 +244,6 @@ def _persistence(identity: PluginIdentity) -> MagicMock:
     persistence = MagicMock()
     persistence.get_identity = AsyncMock(return_value=identity)
     return persistence
-
-
-def _release_service(
-    plugin_manager: MagicMock,
-    *,
-    persistence: MagicMock | None = None,
-    plugin_helper: MagicMock | None = None,
-) -> PluginReleaseService:
-    """用端口替身构造与启动组合根等价的 Release 查询服务。"""
-    if persistence is None:
-        persistence = MagicMock()
-        persistence.get_identity = AsyncMock(return_value=None)
-    if plugin_helper is None:
-        plugin_helper = MagicMock()
-        plugin_helper.async_has_plugin_release_cache = AsyncMock(return_value=False)
-        plugin_helper.async_get_plugin_release_versions = AsyncMock(return_value=[])
-    return PluginReleaseService(
-        installed_plugins=plugin_manager.get_installed_plugins,
-        local_repo_plugins=plugin_manager.get_local_repo_plugins,
-        market_plugins=plugin_manager.async_get_plugins_from_market,
-        local_version=plugin_manager.get_local_plugin_version,
-        identity=persistence.get_identity,
-        version_flag=lambda: settings.VERSION_FLAG,
-        compatible_flags=lambda flag: ["v2"] if flag == "v3" else [],
-        has_release_cache=plugin_helper.async_has_plugin_release_cache,
-        releases=plugin_helper.async_get_plugin_release_versions,
-        refresh_releases=plugin_helper.async_get_plugin_release_versions,
-    )
-
-
-def test_plugin_release_service_reset_isolates_lifespans(monkeypatch):
-    """停机清理后不得继续复用上一 lifespan 的 Release 端口。"""
-    manager = MagicMock()
-    service = _release_service(manager)
-    monkeypatch.setattr(release_module, "_release_service", service)
-
-    release_module.reset_plugin_release_service()
-
-    with pytest.raises(RuntimeError, match="尚未完成初始化"):
-        release_module.get_plugin_release_service()
 
 
 def test_plugin_history_merges_remote_metadata():
@@ -320,11 +270,10 @@ def test_plugin_history_merges_remote_metadata():
     plugin_manager.get_local_repo_plugins.return_value = []
     plugin_manager.async_get_plugins_from_market = AsyncMock(return_value=[market_plugin])
     persistence = _persistence(_plugin_identity())
-    release_service = _release_service(plugin_manager, persistence=persistence)
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.get_plugin_persistence", return_value=persistence),
     ):
         result = asyncio.run(plugin_history("DemoPlugin", None, True))
 
@@ -335,42 +284,6 @@ def test_plugin_history_merges_remote_metadata():
     plugin_manager.async_get_plugins_from_market.assert_awaited_once_with(
         SOURCE_URL, settings.VERSION_FLAG, True
     )
-
-
-def test_plugin_history_falls_back_to_backward_compatible_package():
-    """已绑定来源的插件在当前索引缺失时仍读取向后兼容代际的历史。"""
-    installed_plugin = schemas.Plugin(
-        id="DemoPlugin",
-        plugin_name="Demo Plugin",
-        plugin_version="1.0.0",
-        installed=True,
-        history={},
-    )
-    market_plugin = schemas.Plugin(
-        id="DemoPlugin",
-        repo_url=SOURCE_URL,
-        history={"v2.0.0": "兼容代际更新说明"},
-    )
-    plugin_manager = MagicMock()
-    plugin_manager.get_installed_plugins.return_value = [installed_plugin]
-    plugin_manager.get_local_repo_plugins.return_value = []
-    plugin_manager.async_get_plugins_from_market = AsyncMock(
-        side_effect=[[], [market_plugin]]
-    )
-    persistence = _persistence(_plugin_identity())
-    release_service = _release_service(plugin_manager, persistence=persistence)
-
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
-    ):
-        result = asyncio.run(plugin_history("DemoPlugin", None, True))
-
-    assert result.history == {"v2.0.0": "兼容代际更新说明"}
-    assert plugin_manager.async_get_plugins_from_market.await_args_list == [
-        ((SOURCE_URL, settings.VERSION_FLAG, True), {}),
-        ((SOURCE_URL, "v2", True), {}),
-    ]
 
 
 def test_runtime_status_reports_pending_and_terminal_counts():
@@ -384,27 +297,14 @@ def test_runtime_status_reports_pending_and_terminal_counts():
     }
     plugin_manager.is_plugin_settling.return_value = True
     plugin_manager.get_plugin_runtime_generation.return_value = 7
-    plugin_manager.get_plugin_restart_requirements.return_value = {
-        "NativePlugin": ("native-demo",),
-        "RemovedPlugin": ("native-removed",),
-    }
-    config = MagicMock()
-    config.get.return_value = ["NativePlugin"]
 
-    with (
-        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
-        patch(
-            "app.api.endpoints.plugin.get_configured_system_config",
-            return_value=config,
-        ),
-    ):
+    with patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager):
         result = asyncio.run(runtime_status(None))
 
     assert result.ready is False
     assert result.generation == 7
     assert result.pending_count == 2
     assert result.failed_count == 1
-    assert result.restart_required_plugin_ids == ["NativePlugin"]
 
 
 def test_reload_endpoint_reports_load_failure(monkeypatch):
@@ -437,11 +337,10 @@ def test_plugin_history_returns_installed_plugin_when_remote_missing():
     plugin_manager.get_local_repo_plugins.return_value = []
     plugin_manager.async_get_plugins_from_market = AsyncMock(return_value=[])
     persistence = _persistence(_plugin_identity())
-    release_service = _release_service(plugin_manager, persistence=persistence)
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.get_plugin_persistence", return_value=persistence),
     ):
         result = asyncio.run(plugin_history("DemoPlugin", None, True))
 
@@ -471,11 +370,10 @@ def test_plugin_history_uses_bound_repo_without_refreshing_all_markets():
     plugin_manager.async_get_plugins_from_market = AsyncMock(return_value=[market_plugin])
     plugin_manager.async_get_online_plugins = AsyncMock(return_value=[])
     persistence = _persistence(_plugin_identity())
-    release_service = _release_service(plugin_manager, persistence=persistence)
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.get_plugin_persistence", return_value=persistence),
     ):
         result = asyncio.run(plugin_history("DemoPlugin", None, True))
 
@@ -509,11 +407,10 @@ def test_plugin_history_uses_declared_metadata_when_bound_market_is_unavailable(
     plugin_manager.get_local_repo_plugins.return_value = []
     plugin_manager.async_get_plugins_from_market = AsyncMock(return_value=[])
     persistence = _persistence(_plugin_identity(metadata=metadata))
-    release_service = _release_service(plugin_manager, persistence=persistence)
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.get_plugin_persistence", return_value=persistence),
     ):
         result = asyncio.run(plugin_history("DemoPlugin", None, True))
 
@@ -543,13 +440,10 @@ def test_plugin_releases_returns_supported_versions_with_latest_and_current(monk
         {"version": "1.2.3", "tag_name": "DemoPlugin_v1.2.3", "asset_name": "demoplugin_v1.2.3.zip"},
         {"version": "1.2.0", "tag_name": "DemoPlugin_v1.2.0", "asset_name": "demoplugin_v1.2.0.zip"},
     ])
-    release_service = _release_service(
-        plugin_manager, plugin_helper=plugin_helper
-    )
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.PluginHelper", return_value=plugin_helper),
     ):
         result = asyncio.run(plugin_releases("DemoPlugin", None, "https://github.com/demo/plugins", False))
 
@@ -584,15 +478,11 @@ def test_plugin_releases_does_not_mutate_cached_release_items(monkeypatch):
     plugin_manager.async_get_plugins_from_market = AsyncMock(return_value=[market_plugin])
     plugin_manager.get_local_plugin_version.return_value = "1.2.0"
     plugin_helper = MagicMock()
-    plugin_helper.async_has_plugin_release_cache = AsyncMock(return_value=False)
     plugin_helper.async_get_plugin_release_versions = AsyncMock(return_value=release_items)
-    release_service = _release_service(
-        plugin_manager, plugin_helper=plugin_helper
-    )
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.PluginHelper", return_value=plugin_helper),
     ):
         result = asyncio.run(plugin_releases("DemoPlugin", None, "https://github.com/demo/plugins", False))
 
@@ -603,7 +493,7 @@ def test_plugin_releases_does_not_mutate_cached_release_items(monkeypatch):
 
 def test_plugin_releases_falls_back_to_compatible_base_package(monkeypatch):
     """
-    当前版本和向后兼容 package 未包含插件时，再读取基础 package 兼容项。
+    当前版本 package 未包含插件时，再读取基础 package 兼容项，不扫描其他市场。
     """
     market_plugin = schemas.Plugin(
         id="DemoPlugin",
@@ -613,19 +503,16 @@ def test_plugin_releases_falls_back_to_compatible_base_package(monkeypatch):
     )
     plugin_manager = MagicMock()
     plugin_manager.async_get_plugins_from_market = AsyncMock(
-        side_effect=[[], [], [market_plugin]]
+        side_effect=[[], [market_plugin]]
     )
     plugin_manager.get_local_plugin_version.return_value = None
     plugin_helper = MagicMock()
     plugin_helper.async_has_plugin_release_cache = AsyncMock(return_value=False)
     plugin_helper.async_get_plugin_release_versions = AsyncMock(return_value=[])
-    release_service = _release_service(
-        plugin_manager, plugin_helper=plugin_helper
-    )
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.PluginHelper", return_value=plugin_helper),
     ):
         result = asyncio.run(
             plugin_releases("DemoPlugin", None, "https://github.com/demo/plugins", False)
@@ -634,7 +521,6 @@ def test_plugin_releases_falls_back_to_compatible_base_package(monkeypatch):
     assert result["latest_version"] == "1.2.3"
     assert plugin_manager.async_get_plugins_from_market.await_args_list == [
         (("https://github.com/demo/plugins", settings.VERSION_FLAG, False), {}),
-        (("https://github.com/demo/plugins", "v2", False), {}),
         (("https://github.com/demo/plugins", None, False), {}),
     ]
 
@@ -655,13 +541,10 @@ def test_plugin_releases_uses_force_refresh_for_market_metadata(monkeypatch):
     plugin_helper = MagicMock()
     plugin_helper.async_has_plugin_release_cache = AsyncMock(return_value=False)
     plugin_helper.async_get_plugin_release_versions = AsyncMock(return_value=[])
-    release_service = _release_service(
-        plugin_manager, plugin_helper=plugin_helper
-    )
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.PluginHelper", return_value=plugin_helper),
     ):
         result = asyncio.run(plugin_releases("DemoPlugin", None, "https://github.com/demo/plugins", True))
 
@@ -705,19 +588,14 @@ def test_plugin_releases_force_uses_cached_release_response_and_schedules_refres
         ]
 
     plugin_helper.async_get_plugin_release_versions = fake_releases
-    release_service = _release_service(
-        plugin_manager, plugin_helper=plugin_helper
-    )
     scheduled = []
 
     def fake_schedule(plugin_id, repo_url, task_registry):
         scheduled.append((plugin_id, repo_url, task_registry))
 
     with (
-        patch(
-            "app.api.endpoints.plugin.get_plugin_release_service",
-            return_value=release_service,
-        ),
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.PluginHelper", return_value=plugin_helper),
         patch.object(plugin_endpoint, "_schedule_plugin_release_refresh", fake_schedule),
     ):
         result = asyncio.run(plugin_releases("DemoPlugin", None, "https://github.com/demo/plugins", True))
@@ -760,19 +638,14 @@ def test_plugin_releases_force_skips_background_refresh_without_release_cache(mo
             "asset_name": "demoplugin_v1.2.3.zip",
         }
     ])
-    release_service = _release_service(
-        plugin_manager, plugin_helper=plugin_helper
-    )
     scheduled = []
 
     def fake_schedule(plugin_id, repo_url):
         scheduled.append((plugin_id, repo_url))
 
     with (
-        patch(
-            "app.api.endpoints.plugin.get_plugin_release_service",
-            return_value=release_service,
-        ),
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.PluginHelper", return_value=plugin_helper),
         patch.object(plugin_endpoint, "_schedule_plugin_release_refresh", fake_schedule),
     ):
         result = asyncio.run(plugin_releases("DemoPlugin", None, "https://github.com/demo/plugins", True))
@@ -798,17 +671,13 @@ def test_plugin_releases_hides_items_when_market_plugin_does_not_enable_release(
     plugin_manager.async_get_plugins_from_market = AsyncMock(return_value=[market_plugin])
     plugin_manager.get_local_plugin_version.return_value = None
     plugin_helper = MagicMock()
-    plugin_helper.async_has_plugin_release_cache = AsyncMock(return_value=False)
     plugin_helper.async_get_plugin_release_versions = AsyncMock(return_value=[
         {"version": "1.2.3", "tag_name": "DemoPlugin_v1.2.3", "asset_name": "demoplugin_v1.2.3.zip"},
     ])
-    release_service = _release_service(
-        plugin_manager, plugin_helper=plugin_helper
-    )
 
-    with patch(
-        "app.api.endpoints.plugin.get_plugin_release_service",
-        return_value=release_service,
+    with (
+        patch("app.api.endpoints.plugin.get_plugin_manager", return_value=plugin_manager),
+        patch("app.api.endpoints.plugin.PluginHelper", return_value=plugin_helper),
     ):
         result = asyncio.run(plugin_releases("DemoPlugin", None, "https://github.com/demo/plugins", False))
 
@@ -835,32 +704,15 @@ def test_sync_plugin_market_from_wiki_merges_and_deduplicates_repos():
     runtime_settings = MagicMock()
     runtime_settings.get.return_value = "https://github.com/local/existing"
     runtime_settings.update.return_value = (True, "")
-
-    @asynccontextmanager
-    async def rule_group_mutation():
-        """提供本用例不会进入的规则组事务替身。"""
-        yield SimpleNamespace()
-
-    from app.startup.composition.system import compose_system_service
-
-    runtime = SimpleNamespace(
-        system=compose_system_service(
-            settings=runtime_settings,
-            system_config=MagicMock(),
-            rule_group_mutation=rule_group_mutation,
-        )
-    )
     with (
+        patch("app.api.endpoints.system.AsyncRequestUtils", return_value=request_utils),
         patch(
-            "app.startup.composition.system.AsyncRequestUtils",
-            return_value=request_utils,
+            "app.api.endpoints.system.get_runtime_settings",
+            return_value=runtime_settings,
         ),
-        patch(
-            "app.startup.composition.system.eventmanager.async_send_event",
-            new=AsyncMock(),
-        ) as send_event,
+        patch("app.api.endpoints.system.eventmanager.async_send_event", new=AsyncMock()) as send_event,
     ):
-        result = asyncio.run(sync_plugin_market_from_wiki(None, None, runtime))
+        result = asyncio.run(sync_plugin_market_from_wiki(None, None))
 
     assert result.success
     assert result.data["repos"] == [
@@ -950,7 +802,7 @@ def test_delete_plugin_config_can_force_delete_after_plugin_is_stopped():
 
     storage = MagicMock()
     storage.delete.return_value = True
-    with patch("app.runtime.extensions.plugin.storage._plugin_storage", storage):
+    with patch("app.runtime.extensions.plugin_manager.get_plugin_storage", return_value=storage):
         assert manager.delete_plugin_config("DemoPlugin", force=True) is True
     storage.delete.assert_called_once_with("plugin.DemoPlugin")
     Singleton._instances.pop((PluginManager, (), frozenset()), None)
@@ -1016,29 +868,6 @@ def test_uninstall_virtual_instance_never_removes_source_package(monkeypatch):
     )
     plugin_manager.delete_plugin_instance.assert_called_once_with("DemoPluginwork")
     plugin_manager.remove_plugin.assert_called_once_with("DemoPluginwork")
-    plugin_manager.remove_plugin_package.assert_not_called()
-
-
-def test_uninstall_clone_delegates_physical_removal_to_package_owner(monkeypatch):
-    """HTTP 分身卸载不得自行拼接路径或直接删除目录。"""
-    plugin_manager = MagicMock()
-    plugin_manager.get_plugin_instance.return_value = None
-    plugin_manager.get_plugin_source_instances.return_value = []
-    plugin_manager.plugins = {"DemoPluginwork": MagicMock(is_clone=True)}
-    plugin_manager.remove_plugin_package.return_value = True
-    config = MagicMock()
-    config.get.return_value = ["DemoPluginwork"]
-    monkeypatch.setattr(plugin_endpoint, "get_plugin_manager", lambda: plugin_manager)
-    monkeypatch.setattr(plugin_endpoint, "get_configured_system_config", lambda: config)
-    monkeypatch.setattr(plugin_endpoint, "remove_plugin_api", MagicMock())
-    monkeypatch.setattr(plugin_endpoint, "remove_plugin_job", MagicMock())
-    monkeypatch.setattr(plugin_endpoint, "remove_plugin_from_folders", MagicMock())
-
-    result = uninstall_plugin("DemoPluginwork", None)
-
-    assert result.success is True
-    plugin_manager.remove_plugin_package.assert_called_once_with("DemoPluginwork")
-    assert "DemoPluginwork" not in plugin_manager.plugins
 
 
 def test_sealed_http_uninstall_rejects_before_first_side_effect(monkeypatch):
@@ -1079,7 +908,7 @@ def test_sealed_http_clone_rejects_before_runtime_and_registration(monkeypatch):
     add_to_folder = MagicMock()
     monkeypatch.setattr(plugin_endpoint, "get_plugin_manager", lambda: plugin_manager)
     monkeypatch.setattr(plugin_endpoint, "register_plugin", register)
-    monkeypatch.setattr(plugin_endpoint, "add_clone_to_plugin_folder", add_to_folder)
+    monkeypatch.setattr(plugin_endpoint, "_add_clone_to_plugin_folder", add_to_folder)
 
     result = plugin_endpoint.clone_plugin(
         "DemoPlugin",
@@ -1101,12 +930,10 @@ def test_sealed_http_folder_update_rejects_before_config_access(monkeypatch):
     plugin_manager = MagicMock()
     plugin_manager.mutation.side_effect = admission.hold
     config_provider = MagicMock()
+    monkeypatch.setattr(plugin_endpoint, "get_plugin_manager", lambda: plugin_manager)
     monkeypatch.setattr(
-        "app.application.plugin.folders.get_plugin_manager",
-        lambda: plugin_manager,
-    )
-    monkeypatch.setattr(
-        "app.application.plugin.folders.get_configured_system_config",
+        plugin_endpoint,
+        "get_configured_system_config",
         config_provider,
     )
 
@@ -1129,7 +956,7 @@ def test_delete_plugin_data_can_force_delete_after_plugin_is_stopped():
 
     storage = MagicMock()
     storage.delete_data.side_effect = lambda pid: calls.append(pid)
-    with patch("app.runtime.extensions.plugin.storage._plugin_storage", storage):
+    with patch("app.runtime.extensions.plugin_manager.get_plugin_storage", return_value=storage):
         assert manager.delete_plugin_data("DemoPlugin", force=True) is True
 
     assert calls == ["DemoPlugin"]

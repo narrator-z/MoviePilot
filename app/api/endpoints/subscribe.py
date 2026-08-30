@@ -7,7 +7,6 @@ from app.adapters.external.server import MoviePilotServerHelper
 from app.adapters.web.security.access import verify_apitoken, verify_token
 from app.api.context import (
     get_background_task_registry,
-    get_subscription_repository,
     resolve_background_task_registry,
 )
 from app.api.dependencies.auth import (
@@ -20,6 +19,7 @@ from app.api.dependencies.subscription import (
     get_search_subscriptions_command,
     get_subscription_mutation_service,
     get_subscription_query_service,
+    get_subscription_sync_mutation_service,
 )
 from app.api.principal import ApiPrincipal
 from app.api.response import ResponseAPIRouter
@@ -28,7 +28,6 @@ from app.application.configuration import (
     get_configured_system_config,
 )
 from app.application.scheduling import get_scheduler
-from app.application.subscription.contract import SubscriptionQueryPort
 from app.application.subscription.delete import (
     DeleteSubscribeCommand,
     SubscribeDeletionActor,
@@ -45,11 +44,13 @@ from app.application.subscription.search import (
     SearchSubscriptionsCommand,
     SubscribeSearchActor,
 )
-from app.chain.subscribe.facade import SubscribeChain
+from app.chain.subscribe import SubscribeChain
 from app.domain.context import MediaInfo
 from app.domain.metainfo import MetaInfo
+from app.runtime.events import eventmanager
 from app.runtime.tasks import TaskRegistry
 from app.schemas.common import IdData as _SchemaIdData
+from app.schemas.event import SubscribeModifiedEventData
 from app.schemas.media import normalize_media_source, resolve_media_identity
 from app.schemas.response import Response as _SchemaResponse
 from app.schemas.subscribe import SubscrbieInfo as _SchemaSubscrbieInfo
@@ -59,6 +60,7 @@ from app.schemas.token import TokenPayload as _SchemaTokenPayload
 from app.schemas.types import (
     MUSIC_ENTITY_ALBUM,
     MUSIC_ENTITY_RECORDING,
+    EventType,
     MediaSource,
     MediaType,
     SystemConfigKey,
@@ -194,8 +196,11 @@ async def create_subscribe(
         subscribe_in.name = meta.name
         if subscribe_in.season is None:
             subscribe_in.season = meta.begin_season
-    # 空标题由订阅识别链按显式媒体身份补全，但调用契约始终使用字符串。
-    title = subscribe_in.name or ""
+    # 标题转换
+    if subscribe_in.name:
+        title = subscribe_in.name
+    else:
+        title = None
     subscribe_dict = subscribe_in.to_public_write_payload()
     identity_fields = {"media_source", "media_id"}.intersection(
         subscribe_in.model_fields_set
@@ -245,6 +250,7 @@ async def update_subscribe(
     subscribe = await mutation.get_accessible(subscribe_in.id, actor)
     if not subscribe:
         return _SchemaResponse(success=False, message="订阅不存在")
+    old_subscribe_dict = subscribe.to_dict()
     subscribe_dict = subscribe_in.to_public_write_payload(exclude_unset=True)
     identity_fields = {"media_source", "media_id"}.intersection(
         subscribe_in.model_fields_set
@@ -295,6 +301,16 @@ async def update_subscribe(
     )
     if not change:
         return _SchemaResponse(success=False, message="订阅不存在")
+    if not change.event_published:
+        await eventmanager.async_send_event(
+            EventType.SubscribeModified,
+            SubscribeModifiedEventData(
+                subscribe_id=subscribe_in.id,
+                old_subscribe_info=change.old,
+                subscribe_info=change.new,
+                scene="update",
+            ).to_dict(),
+        )
     return _SchemaResponse(success=True)
 
 
@@ -318,6 +334,16 @@ async def update_subscribe_status(
     change = await mutation.update_status(subid, state, actor)
     if not change:
         return _SchemaResponse(success=False, message="订阅不存在")
+    if not change.event_published:
+        await eventmanager.async_send_event(
+            EventType.SubscribeModified,
+            SubscribeModifiedEventData(
+                subscribe_id=subid,
+                old_subscribe_info=change.old,
+                subscribe_info=change.new,
+                scene="status",
+            ).to_dict(),
+        )
     return _SchemaResponse(success=True)
 
 
@@ -369,6 +395,16 @@ async def reset_subscribes(
     )
     change = await mutation.reset(subid, actor)
     if change:
+        if not change.event_published:
+            await eventmanager.async_send_event(
+                EventType.SubscribeModified,
+                SubscribeModifiedEventData(
+                    subscribe_id=subid,
+                    old_subscribe_info=change.old,
+                    subscribe_info=change.new,
+                    scene="reset",
+                ).to_dict(),
+            )
         return _SchemaResponse(success=True)
     return _SchemaResponse(success=False, message="订阅不存在")
 
@@ -650,7 +686,7 @@ async def user_subscribes(
 )
 def subscribe_files(
     subscribe_id: int,
-    repository: SubscriptionQueryPort = Depends(get_subscription_repository),
+    mutation: SubscriptionMutationService = Depends(get_subscription_sync_mutation_service),
     current_user: ApiPrincipal = Depends(get_current_active_user),
 ) -> Any:
     """
@@ -660,8 +696,8 @@ def subscribe_files(
         name=current_user.name,
         is_superuser=current_user.is_superuser,
     )
-    subscribe = repository.get(subscribe_id)
-    if subscribe is not None and SubscriptionMutationService.can_access(subscribe, actor):
+    subscribe = mutation.get_accessible_sync(subscribe_id, actor)
+    if subscribe:
         return SubscribeChain().subscribe_files_info(subscribe)
     return _SchemaSubscrbieInfo()
 

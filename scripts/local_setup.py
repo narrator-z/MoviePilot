@@ -9,8 +9,8 @@ import importlib.util
 import json
 import os
 import platform
-import re
 import secrets
+import re
 import shlex
 import shutil
 import subprocess
@@ -36,8 +36,7 @@ NODE_DIR = RUNTIME_DIR / "node"
 INSTALL_ENV_FILE = ROOT / ".moviepilot.env"
 MIN_PYTHON_VERSION = (3, 14)
 SUPPORTED_PYTHON_TEXT = "Python 3.14+"
-MIN_UV_VERSION = (0, 12, 5)
-MIN_UV_VERSION_TEXT = ".".join(str(part) for part in MIN_UV_VERSION)
+UV_VERSION = "0.12.5"
 
 CONFIG_DIR = LEGACY_CONFIG_DIR
 LOG_DIR = CONFIG_DIR / "logs"
@@ -619,27 +618,18 @@ def get_venv_bin_dir(venv_dir: Path) -> Path:
     return venv_dir / "bin"
 
 
-def parse_uv_version(output: str) -> tuple[int, int, int] | None:
-    """从 uv 版本输出中提取稳定版三段版本号。"""
-    match = re.match(r"^uv\s+(\d+)\.(\d+)\.(\d+)(?:\s|$)", output.strip())
-    if not match:
-        return None
-    return tuple(int(part) for part in match.groups())
-
-
 def require_uv() -> Path:
-    """返回满足仓库最低版本要求的 uv。"""
+    """返回仓库要求版本的 uv，避免不同安装入口使用不同解析器。"""
     uv_command = shutil.which("uv")
     if not uv_command:
         raise RuntimeError(
-            f"未找到 uv {MIN_UV_VERSION_TEXT}+，请先安装后重新执行。"
+            f"未找到 uv {UV_VERSION}，请先安装后重新执行。"
         )
     uv_bin = Path(uv_command).expanduser().resolve()
     version = capture([str(uv_bin), "--version"])
-    parsed_version = parse_uv_version(version)
-    if parsed_version is None or parsed_version < MIN_UV_VERSION:
+    if version.split()[:2] != ["uv", UV_VERSION]:
         raise RuntimeError(
-            f"MoviePilot 需要 uv {MIN_UV_VERSION_TEXT}+，当前为 {version or '未知版本'}。"
+            f"MoviePilot 需要 uv {UV_VERSION}，当前为 {version or '未知版本'}。"
         )
     return uv_bin
 
@@ -2573,6 +2563,7 @@ def _apply_local_system_config_inner(config_payload: dict[str, Any]) -> None:
         except Exception as exc:
             print_step(f"已保存站点认证配置，当前未完成校验：{exc}")
 
+    system_config.set(SystemConfigKey.SetupWizardState, True)
     print_step("已写入本地系统配置")
 
 
@@ -3813,7 +3804,7 @@ def run_agent_request(
 
     try:
         from app.startup.initializers.database import prepare_database
-        from app.agent.orchestrator import MoviePilotAgent
+        from app.agent import MoviePilotAgent
         from app.runtime.config import settings
     except ModuleNotFoundError as exc:
         raise RuntimeError(

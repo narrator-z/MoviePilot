@@ -138,6 +138,21 @@ def resolve_media_identity(
         normalized_id = str(object_media_id).strip()
         if normalized_id and normalized_id != "0":
             return normalized_source, normalized_id
+    # fork 增强：统一身份缺省时从兼容 ID 字段回退（MediaInfo.tmdb_id / douban_id 等），
+    # 保证未识别来源但带 ID 的媒体对象也能解析出主身份（fork 链路依赖此行为）。
+    # 枚举化来源 + 字符串 ID 与显式字段分支返回类型一致。
+    if not isinstance(media, dict):
+        id_fields = (
+            ("themoviedb", ("tmdb_id", "tmdbid")),
+            ("douban", ("douban_id", "doubanid")),
+            ("bangumi", ("bangumi_id", "bangumiid")),
+            ("anilist", ("anilist_id", "anilistid")),
+        )
+        for source_name, fields in id_fields:
+            for field in fields:
+                value = getattr(media, field, None)
+                if value is not None and str(value).strip():
+                    return normalize_media_source(source_name), str(value).strip()
     return None, None
 
 

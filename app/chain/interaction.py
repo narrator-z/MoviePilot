@@ -2,17 +2,18 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from app.application.chain.data import get_chain_user_port
 from app.application.directory import DirectoryHelper
 from app.application.messaging.media import (
     PendingMediaInteraction,
     media_interaction_manager,
 )
-from app.application.torrent.download import TorrentHelper
-from app.chain.base import ChainBase
+from app.application.torrent import TorrentHelper
+from app.chain import ChainBase
 from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
-from app.chain.search.facade import SearchChain
-from app.chain.subscribe.facade import SubscribeChain
+from app.chain.search import SearchChain
+from app.chain.subscribe import SubscribeChain
 from app.domain import episode as episode_rules
 from app.domain import title as title_rules
 from app.domain.context import Context, MediaInfo
@@ -668,8 +669,8 @@ class MediaInteractionChain(ChainBase):
                 return
 
         mp_name = (
-            self.user_repository.find_name_by_bindings(
-                {f"{channel.name.lower()}_userid": userid}
+            get_chain_user_port().get_name(
+                **{f"{channel.name.lower()}_userid": userid}
             )
             if channel
             else None
@@ -683,7 +684,7 @@ class MediaInteractionChain(ChainBase):
             season=request.meta.begin_season,
             channel=channel,
             source=source,
-            userid=str(userid),
+            userid=userid,
             username=mp_name or username,
             best_version=best_version,
         )
@@ -981,8 +982,8 @@ class MediaInteractionChain(ChainBase):
             note = None
 
         mp_name = (
-            self.user_repository.find_name_by_bindings(
-                {f"{channel.name.lower()}_userid": userid}
+            get_chain_user_port().get_name(
+                **{f"{channel.name.lower()}_userid": userid}
             )
             if channel
             else None
@@ -996,7 +997,7 @@ class MediaInteractionChain(ChainBase):
             season=request.meta.begin_season,
             channel=channel,
             source=source,
-            userid=str(userid),
+            userid=userid,
             username=mp_name or username,
             state="R",
             note=note,

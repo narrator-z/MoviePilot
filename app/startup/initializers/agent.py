@@ -1,32 +1,21 @@
 from typing import Any
 
 from app.agent.llm.gateway import register_llm_provider_runtime
-from app.agent.loader import (
+from app.agent.runtime_loader import (
     activate_agent_service,
     begin_agent_shutdown,
     close_materialized_terminal_sessions,
     is_tool_factory_materialized,
     reconcile_agent_service,
 )
-from app.agent.loader import (
+from app.agent.runtime_loader import (
     get_agent_manager as get_runtime_agent_manager,
 )
-from app.agent.loader import (
+from app.agent.runtime_loader import (
     get_running_agent_manager as get_runtime_running_agent_manager,
 )
-from app.application.agent import (
-    AgentDataContext,
-    register_agent_service_providers,
-    reset_agent_service_providers,
-)
-from app.application.messaging.agent import (
-    configure_web_agent_message_runtime,
-    reset_web_agent_message_runtime,
-)
-from app.application.messaging.skill import (
-    register_skill_catalog_provider,
-    reset_skill_catalog_provider,
-)
+from app.application.agent import register_agent_service_providers
+from app.application.messaging.skill import register_skill_catalog_provider
 from app.runtime.events import Event, eventmanager
 from app.runtime.log import logger
 from app.runtime.settings import get_runtime_setting
@@ -51,41 +40,6 @@ def _get_llm_provider_runtime() -> Any:
 
 # 嵌入式启动器可显式注入 manager；常规进程使用 Capability Runtime。
 agent_manager: Any = None
-_agent_data_context: AgentDataContext | None = None
-_injected_agent_manager: Any = None
-
-
-def configure_agent_data_context(context: AgentDataContext) -> None:
-    """登记组合根数据上下文，并丢弃未运行的旧 manager 缓存。"""
-    global _agent_data_context, _injected_agent_manager
-    if _agent_data_context is context:
-        return
-    manager = _injected_agent_manager
-    if manager is not None and (
-        getattr(manager, "_accepting_tasks", False) or bool(getattr(manager, "active_agents", {}))
-    ):
-        raise RuntimeError("AgentManager 已运行，不能替换数据上下文")
-    _agent_data_context = context
-    _injected_agent_manager = None
-
-
-def reset_agent_data_context() -> None:
-    """清除当前 lifespan 的 Agent 数据上下文和未运行 manager 缓存。"""
-    global _agent_data_context, _injected_agent_manager
-    _agent_data_context = None
-    _injected_agent_manager = None
-
-
-def _get_injected_agent_manager() -> Any:
-    """按需构造并缓存显式注入数据上下文的 AgentManager。"""
-    global _injected_agent_manager
-    if _agent_data_context is None:
-        raise RuntimeError("Agent 数据上下文尚未由启动组合根装配")
-    if _injected_agent_manager is None:
-        from app.agent.manager import AgentManager
-
-        _injected_agent_manager = AgentManager(data=_agent_data_context)
-    return _injected_agent_manager
 
 
 def _event_changed_keys(event: Event | None) -> set[str]:
@@ -104,11 +58,7 @@ def _event_changed_keys(event: Event | None) -> set[str]:
 
 def _get_agent_manager() -> Any:
     """兼容显式注入对象，否则按需解析 canonical manager。"""
-    if agent_manager is not None:
-        return agent_manager
-    if _agent_data_context is not None:
-        return _get_injected_agent_manager()
-    return get_runtime_agent_manager()
+    return agent_manager if agent_manager is not None else get_runtime_agent_manager()
 
 
 def _get_running_agent_manager() -> Any | None:
@@ -141,31 +91,9 @@ def _get_llm_helper() -> Any:
 
 def _get_manual_redo_prompt_builder() -> Any:
     """首个整理接管请求才导入对应提示词构建器。"""
-    from app.agent.prompt.transfer import build_manual_redo_prompt
+    from app.agent.prompt.transfer_redo import build_manual_redo_prompt
 
     return build_manual_redo_prompt
-
-
-def _get_web_agent_type() -> type:
-    """首个 Web 对话请求才解析 WebAgent 运行时类型。"""
-    from app.agent.web import _get_web_agent_type as get_web_agent_type
-
-    return get_web_agent_type()
-
-
-def _handle_web_agent_message(**kwargs: Any) -> object:
-    """按请求构造消息链并执行传统 WebAgent 输入。"""
-    from app.chain.message import MessageChain
-
-    MessageChain().handle_message(**kwargs)
-    return None
-
-
-def _bind_web_agent_user_session(user_id: str, session_id: str) -> None:
-    """把 Web 用户绑定到消息链的 Agent 会话。"""
-    from app.chain.message import MessageChain
-
-    MessageChain().bind_user_session(user_id, session_id)
 
 
 async def _handle_agent_config_changed(event: Event) -> None:
@@ -196,13 +124,13 @@ class AgentInitializer:
         try:
             self._shutdown_started = False
             self._shutdown_complete = False
-            if agent_manager is not None or _agent_data_context is not None:
-                if not get_runtime_setting("AI_AGENT_ENABLE"):
+            if agent_manager is not None:
+                if not get_runtime_setting('AI_AGENT_ENABLE'):
                     logger.info("AI智能体功能未启用")
                     return True
-                self._manager = agent_manager if agent_manager is not None else _get_injected_agent_manager()
+                self._manager = agent_manager
                 self._compat_injected = True
-                await self._manager.initialize()
+                await agent_manager.initialize()
             else:
                 self._manager = await activate_agent_service()
                 self._compat_injected = False
@@ -220,7 +148,12 @@ class AgentInitializer:
     async def handle_config_changed(self, event: Event) -> None:
         """仅在 manifest watch 命中时协调 service，关闭态保持 fail closed。"""
         changed_keys = _event_changed_keys(event)
-        if not changed_keys or self._compat_injected or self._shutdown_started or self._shutdown_complete:
+        if (
+            not changed_keys
+            or self._compat_injected
+            or self._shutdown_started
+            or self._shutdown_complete
+        ):
             return
         try:
             self._manager = await reconcile_agent_service(
@@ -258,52 +191,27 @@ class AgentInitializer:
 # 全局AI智能体初始化器实例
 agent_initializer = AgentInitializer()
 
-
-def configure_agent_ports() -> None:
-    """在 Agent 启动阶段原子登记全部 Application provider。"""
-    reset_agent_ports()
-    try:
-        register_agent_service_providers(
-            agent_manager_provider=_get_agent_manager,
-            running_agent_manager_provider=_get_running_agent_manager,
-            prompt_manager_provider=_get_prompt_manager,
-            capability_manager_provider=_get_capability_manager,
-            llm_helper_provider=_get_llm_helper,
-            manual_redo_prompt_builder_provider=_get_manual_redo_prompt_builder,
-            web_agent_type_provider=_get_web_agent_type,
-        )
-        register_skill_catalog_provider(_get_skill_catalog)
-        register_llm_provider_runtime(_get_llm_provider_runtime)
-        configure_web_agent_message_runtime(
-            message_handler=_handle_web_agent_message,
-            session_binder=_bind_web_agent_user_session,
-        )
-    except Exception:
-        reset_agent_ports()
-        raise
-
-
-def reset_agent_ports() -> None:
-    """清除 Agent、技能和 LLM provider，支持失败回滚与重复 lifespan。"""
-    register_llm_provider_runtime(None)
-    reset_skill_catalog_provider()
-    reset_web_agent_message_runtime()
-    reset_agent_service_providers()
+# application 门面仅保存 provider；下列注册不会导入 Agent 实现。
+register_agent_service_providers(
+    agent_manager_provider=_get_agent_manager,
+    running_agent_manager_provider=_get_running_agent_manager,
+    prompt_manager_provider=_get_prompt_manager,
+    capability_manager_provider=_get_capability_manager,
+    llm_helper_provider=_get_llm_helper,
+    manual_redo_prompt_builder_provider=_get_manual_redo_prompt_builder,
+)
+register_skill_catalog_provider(_get_skill_catalog)
+register_llm_provider_runtime(_get_llm_provider_runtime)
 
 
 async def init_agent() -> bool:
     """
     在应用事件循环中初始化AI智能体。
     """
-    configure_agent_ports()
     try:
-        initialized = await agent_initializer.initialize()
-        if not initialized:
-            reset_agent_ports()
-        return initialized
+        return await agent_initializer.initialize()
 
     except Exception as e:
-        reset_agent_ports()
         logger.error(f"初始化AI智能体时发生错误: {e}")
         return False
 
@@ -361,7 +269,5 @@ async def stop_agent() -> bool:
         except Exception as e:
             logger.error(f"关闭AI智能体终端会话时发生错误: {e}")
             converged = False
-    if converged:
-        reset_agent_ports()
     agent_initializer._shutdown_complete = converged
     return converged

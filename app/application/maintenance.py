@@ -453,3 +453,21 @@ def _normalize_days(retention_days: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(normalized_days, 0)
+
+# --- fork 兼容：本地 scheduler 依赖的清理服务组合根入口 ---
+_configured_cleanup_service_factory: "Callable[[], DataCleanupService] | None" = None
+
+
+def build_cleanup_service() -> "DataCleanupService":
+    """返回启动组合根登记的清理服务。"""
+    if _configured_cleanup_service_factory is None:
+        raise RuntimeError("数据清理服务尚未配置")
+    return _configured_cleanup_service_factory()
+
+
+def configure_cleanup_service_factory(
+    factory: "Callable[[], DataCleanupService]",
+) -> None:
+    """由启动组合根登记数据清理服务工厂。"""
+    global _configured_cleanup_service_factory
+    _configured_cleanup_service_factory = factory

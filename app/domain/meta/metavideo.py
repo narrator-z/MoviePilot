@@ -664,6 +664,9 @@ class MetaVideo(MetaBase):
                 and state.last_kind == _VideoTokenKind.SOURCE \
                 and state.last_token == "BLU":
             state.replace_last_source("BLU", "BluRay")
+            # 若前一个源类型为 UHD，合并为 UHD BluRay（fork 自定义逻辑，v3 合并时保留）
+            if len(state.sources) >= 2 and state.sources[-2].casefold() == "uhd":
+                state.replace_last_source("UHD", "UHD BluRay")
             return True
         elif token.upper() == "WEBDL":
             state.append_source("WEB-DL")

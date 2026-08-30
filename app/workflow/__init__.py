@@ -4,23 +4,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 
-from app.application.workflow import (
-    WorkflowExecutionOwner,
-    WorkflowSnapshot,
-    get_configured_workflow_query,
-)
+from app.application.chain.data import get_chain_workflow_port
+from app.application.workflow import WorkflowExecutionOwner
 from app.foundation.reflection import ModuleHelper
 from app.foundation.singleton import Singleton
+from app.runtime.config import global_vars
 from app.runtime.events import Event, eventmanager
 from app.runtime.log import logger
 from app.runtime.stop import runtime_stop_state
 from app.schemas.types import EventType
-from app.schemas.workflow import Action, ActionContext, ActionResult
+from app.schemas.workflow import Action, ActionContext, ActionResult, Workflow
 
 _WORKFLOW_STOP_TIMEOUT_SECONDS = 10.0
 
 
-class WorkflowManager(metaclass=Singleton):
+class WorkFlowManager(metaclass=Singleton):
     """
     工作流管理器
     """
@@ -292,6 +290,26 @@ class WorkflowManager(metaclass=Singleton):
                 return
             sleep(min(0.1, deadline - monotonic()))
 
+    @staticmethod
+    def _resolve_action_class_attr(action: Any, attr: str) -> Any:
+        """
+        解析动作类上的类级属性值。
+
+        动作类的 name/description/data 采用 ``@classmethod @property`` 形式定义，
+        在类上直接访问会得到绑定方法而非真实取值，这里统一取出 property 背后的真实值。
+        """
+        member = getattr(action, attr)
+        # @classmethod @property 叠加后，类/实例访问均为绑定方法，其底层是 property 描述符
+        func = getattr(member, "__func__", None)
+        if isinstance(func, property):
+            return func.fget(action)
+        if callable(member) and not isinstance(member, property):
+            try:
+                return member()
+            except TypeError:
+                return member
+        return member
+
     def list_actions(self) -> List[dict]:
         """
         获取所有动作
@@ -299,12 +317,12 @@ class WorkflowManager(metaclass=Singleton):
         return [
             {
                 "type": key,
-                "name": action.name,
-                "description": action.description,
+                "name": self._resolve_action_class_attr(action, "name"),
+                "description": self._resolve_action_class_attr(action, "description"),
                 "contract": action.get_contract(),
                 "data": {
-                    "label": action.name,
-                    **action.data
+                    "label": self._resolve_action_class_attr(action, "name"),
+                    **(self._resolve_action_class_attr(action, "data") or {})
                 }
             } for key, action in self._actions.items()
         ]
@@ -318,7 +336,7 @@ class WorkflowManager(metaclass=Singleton):
             return {}
         return action.get_contract()
 
-    def update_workflow_event(self, workflow: WorkflowSnapshot):
+    def update_workflow_event(self, workflow: Workflow):
         """
         更新工作流事件触发器
         """
@@ -335,11 +353,11 @@ class WorkflowManager(metaclass=Singleton):
         """
         workflows = []
         if workflow_id:
-            workflow = get_configured_workflow_query().get_sync(workflow_id)
+            workflow = get_chain_workflow_port().get(workflow_id)
             if workflow:
                 workflows = [workflow]
         else:
-            workflows = get_configured_workflow_query().list_event_enabled()
+            workflows = get_chain_workflow_port().get_event_triggered_workflows()
         try:
             for workflow in workflows:
                 self.update_workflow_event(workflow)
@@ -412,7 +430,7 @@ class WorkflowManager(metaclass=Singleton):
         """
         try:
             # 检查工作流是否存在且启用
-            workflow = get_configured_workflow_query().get_sync(workflow_id)
+            workflow = get_chain_workflow_port().get(workflow_id)
             if not workflow or workflow.state == 'P':
                 return
 

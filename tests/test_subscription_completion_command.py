@@ -4,9 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from app.application.outbox import ClaimedOutboxMessage
 from app.application.subscription.complete import CompleteSubscriptionCommand
-from app.application.subscription.contract import SubscriptionHistoryPatch
 
 
 class _Repository:
@@ -16,11 +14,11 @@ class _Repository:
         """保存共享调用序列。"""
         self.calls = calls
 
-    def stage_history(self, payload: SubscriptionHistoryPatch) -> None:
+    def add_history(self, **payload) -> None:
         """记录历史快照。"""
-        self.calls.append(("history", payload.to_payload()))
+        self.calls.append(("history", payload))
 
-    def stage_delete_sync(self, subscribe_id: int) -> None:
+    def delete(self, subscribe_id: int) -> None:
         """记录待删除订阅。"""
         self.calls.append(("delete", subscribe_id))
 
@@ -56,29 +54,14 @@ class _Outbox:
         """记录 durable intent。"""
         self.calls.append(("stage", intent))
 
-    def claim_by_event_key(self, event_key: str, _now: datetime, _lease_until: datetime):
+    def claim_by_event_key(self, event_key: str, _now: datetime, _lease_until: datetime) -> bool:
         """记录同步投递认领结果。"""
         self.calls.append(("claim", event_key))
-        if not self.claim_result:
-            return None
-        return ClaimedOutboxMessage(
-            message_id=len(self.calls),
-            event_key=event_key,
-            topic="test",
-            payload={},
-            payload_version=1,
-            attempt=1,
-        )
+        return self.claim_result
 
-    def complete(self, message_id: int, attempt: int, _now: datetime) -> bool:
+    def complete_by_event_key(self, event_key: str, _now: datetime) -> None:
         """记录成功副作用对应的 intent 收口。"""
-        self.calls.append(("complete", message_id, attempt))
-        return True
-
-    def retry(self, message_id: int, attempt: int, **_kwargs) -> bool:
-        """记录失败副作用对应的 intent 释放。"""
-        self.calls.append(("retry", message_id, attempt))
-        return True
+        self.calls.append(("complete", event_key))
 
 
 def _command(
@@ -91,7 +74,6 @@ def _command(
     report_error=None,
 ):
     """构造可注入失败的完成命令。"""
-
     def notify() -> None:
         """记录通知。"""
         calls.append(("notify",))
@@ -111,18 +93,12 @@ def _command(
             raise report_error
         return report_result
 
-    outbox = _Outbox(calls, claim_result)
-    return (
-        CompleteSubscriptionCommand(
-            repository=_Repository(calls),
-            unit_of_work=_UnitOfWork(calls),
-            outbox=outbox,
-            dispatch_store=outbox,
-            publish=publish,
-        ),
-        notify,
-        report,
-    )
+    return CompleteSubscriptionCommand(
+        repository=_Repository(calls),
+        unit_of_work=_UnitOfWork(calls),
+        outbox=_Outbox(calls, claim_result),
+        publish=publish,
+    ), notify, report
 
 
 @pytest.mark.parametrize("failure", ["event", "notify"])
@@ -145,23 +121,14 @@ def test_completion_stages_business_and_independent_intents_before_commit(failur
         )
 
     assert [call[0] for call in calls[:5]] == [
-        "history",
-        "delete",
-        "stage",
-        "stage",
-        "commit",
+        "history", "delete", "stage", "stage", "commit",
     ]
     assert calls[2][1].topic == "subscribe.complete"
     assert calls[3][1].topic == "subscribe.complete.report"
     if failure == "notify":
         assert [call[0] for call in calls[5:]] == ["notify"]
     elif failure == "event":
-        assert [call[0] for call in calls[5:]] == [
-            "notify",
-            "claim",
-            "event",
-            "retry",
-        ]
+        assert [call[0] for call in calls[5:]] == ["notify", "claim", "event"]
 
 
 def test_completion_report_failure_returns_success_and_keeps_intent_pending():
@@ -178,18 +145,8 @@ def test_completion_report_failure_returns_success_and_keeps_intent_pending():
     )
 
     assert [call[0] for call in calls] == [
-        "history",
-        "delete",
-        "stage",
-        "stage",
-        "commit",
-        "notify",
-        "claim",
-        "event",
-        "complete",
-        "claim",
-        "report",
-        "retry",
+        "history", "delete", "stage", "stage", "commit",
+        "notify", "claim", "event", "complete", "claim", "report",
     ]
 
 
@@ -210,18 +167,8 @@ def test_completion_report_error_returns_success_and_keeps_intent_pending():
     )
 
     assert [call[0] for call in calls] == [
-        "history",
-        "delete",
-        "stage",
-        "stage",
-        "commit",
-        "notify",
-        "claim",
-        "event",
-        "complete",
-        "claim",
-        "report",
-        "retry",
+        "history", "delete", "stage", "stage", "commit",
+        "notify", "claim", "event", "complete", "claim", "report",
     ]
 
 
@@ -239,18 +186,9 @@ def test_completion_success_closes_event_then_report_intent():
     )
 
     assert [call[0] for call in calls] == [
-        "history",
-        "delete",
-        "stage",
-        "stage",
-        "commit",
-        "notify",
-        "claim",
-        "event",
-        "complete",
-        "claim",
-        "report",
-        "complete",
+        "history", "delete", "stage", "stage", "commit",
+        "notify", "claim", "event", "complete",
+        "claim", "report", "complete",
     ]
     assert calls[7][1]["idempotency_key"] == calls[2][1].event_key
     assert calls[10][1]["idempotency_key"] == calls[3][1].event_key
@@ -277,10 +215,8 @@ def test_completion_stages_and_closes_notification_snapshot() -> None:
         "subscribe.complete.report",
     ]
     assert staged[1].payload["message"]["title"] == "完成"
-    completed = [call for call in calls if call[0] == "complete"]
-    notification_claim = next(call for call in calls if call[0] == "claim" and call[1].endswith(":notification"))
-    assert completed[0][1] > 0
-    assert notification_claim[1].endswith(":notification")
+    completed = [call[1] for call in calls if call[0] == "complete"]
+    assert completed[0].endswith(":notification")
 
 
 def test_completion_skips_sync_delivery_owned_by_outbox_dispatcher() -> None:
@@ -298,13 +234,6 @@ def test_completion_skips_sync_delivery_owned_by_outbox_dispatcher() -> None:
     )
 
     assert [call[0] for call in calls] == [
-        "history",
-        "delete",
-        "stage",
-        "stage",
-        "stage",
-        "commit",
-        "claim",
-        "claim",
-        "claim",
+        "history", "delete", "stage", "stage", "stage", "commit",
+        "claim", "claim", "claim",
     ]

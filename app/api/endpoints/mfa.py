@@ -24,6 +24,8 @@ from app.application.security.passkey import (
     PassKeyHelper,
     PassKeyRegistrationOriginMismatchError,
     PassKeyRegistrationVerificationError,
+)
+from app.application.security.passkeys import (
     PasskeyService,
 )
 from app.application.security.token import verify_password
@@ -101,11 +103,7 @@ def _verify_passkey_and_update(
     )
 
     if success:
-        success = service.compare_and_update_sign_count(
-            passkey_id=passkey.id,
-            expected_sign_count=int(passkey.sign_count or 0),
-            sign_count=new_sign_count,
-        )
+        service.update_last_used(passkey, new_sign_count)
 
     return success, new_sign_count
 
@@ -146,11 +144,16 @@ async def mfa_status(
     service: UserService = Depends(get_user_service),
 ) -> Any:
     """
-    检查指定启用用户是否开启 OTP，并隐藏账号不存在或禁用状态。
+    检查指定用户是否启用了二次验证
     """
     user = await service.get_by_name(username)
-    has_otp = bool(user and user.is_active and user.is_otp)
-    return _SchemaResponse(success=True, data={"enabled": has_otp})
+    if not user:
+        return _SchemaResponse(success=False, message="用户不存在")
+
+    # 检查是否启用了OTP
+    has_otp = user.is_otp
+
+    return _SchemaResponse(success=True, data={"enabled": bool(has_otp)})
 
 
 # ==================== OTP 相关接口 ====================

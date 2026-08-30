@@ -1,8 +1,11 @@
 import re
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple, Union, cast
+from typing import Any, List, Optional, Tuple, Union
 
 import cn2an
+
+from app.modules._base.media_auxiliary import MediaAuxiliaryProviderMixin
+from app.runtime.settings import get_runtime_setting
+from app.schemas.context import MediaPerson as _SchemaMediaPerson
 
 from app.adapters.network.http import RequestUtils
 from app.domain.context import (
@@ -16,15 +19,12 @@ from app.domain.meta.metamusic import MetaMusic
 from app.domain.metainfo import MetaInfo
 from app.foundation.text import convert as zhconv_convert
 from app.modules import _ModuleBase
-from app.modules._base.media import MediaAuxiliaryProviderMixin
 from app.modules.douban.apiv2 import DoubanApi
 from app.modules.douban.scraper import DoubanScraper
 from app.runtime.execution import retry
 from app.runtime.log import logger
 from app.runtime.rate import rate_limit_exponential
-from app.runtime.settings import get_runtime_setting
 from app.schemas.context import MediaPerson
-from app.schemas.context import MediaPerson as _SchemaMediaPerson
 from app.schemas.exception import APIRateLimitException
 from app.schemas.types import (
     MUSIC_ENTITY_ALBUM,
@@ -35,60 +35,6 @@ from app.schemas.types import (
     MediaType,
     ModuleType,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _DoubanMusicRecognitionPlan:
-    """描述豆瓣音乐识别的显式身份或候选搜索范围。"""
-
-    meta: Optional[MetaMusic]
-    media_id: Optional[str]
-    album_id: Optional[str]
-    track_id: Optional[str]
-    music_type: Optional[str]
-    keyword: Optional[str]
-
-    def require_meta(self) -> MetaMusic:
-        """返回候选搜索计划必有的音乐元数据。"""
-        if self.meta is None:
-            raise RuntimeError("豆瓣音乐候选识别计划缺少音乐元数据")
-        return self.meta
-
-    def require_album_id(self) -> str:
-        """返回详情识别计划必有的专辑 ID。"""
-        if self.album_id is None:
-            raise RuntimeError("豆瓣音乐详情识别计划缺少专辑 ID")
-        return self.album_id
-
-    def require_keyword(self) -> str:
-        """返回候选识别计划必有的搜索词。"""
-        if self.keyword is None:
-            raise RuntimeError("豆瓣音乐候选识别计划缺少搜索词")
-        return self.keyword
-
-
-@dataclass(frozen=True, slots=True)
-class _DoubanVideoRecognitionPlan:
-    """描述豆瓣影视识别的原生 ID 或有序标题候选。"""
-
-    meta: Optional[MetaBase]
-    media_type: Optional[MediaType]
-    douban_id: Optional[str]
-    search_names: tuple[str, ...]
-
-    def require_meta(self) -> MetaBase:
-        """返回标题识别计划必有的影视元数据。"""
-        if self.meta is None:
-            raise RuntimeError("豆瓣影视标题识别计划缺少元数据")
-        return self.meta
-
-
-@dataclass(frozen=True, slots=True)
-class _DoubanSearchPlan:
-    """保存豆瓣搜索来源准入结果和有效查询文本。"""
-
-    enabled: bool
-    query: Optional[str]
 
 
 class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
@@ -273,33 +219,40 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
             music_type: Optional[str] = None,
     ) -> Optional[MusicInfo]:
         """执行豆瓣音乐详情识别或按专辑名称匹配。"""
-        plan = self._music_recognition_plan(
-            meta, media_source, media_id, music_type
-        )
-        if not plan:
+        if media_source != self._music_source:
             return None
-        if plan.media_id:
-            info = self.doubanapi.music_detail(
-                subject_id=plan.require_album_id()
+        resolved_media_id = media_id or (meta.media_id if meta else None)
+        if resolved_media_id:
+            detail_kwargs = (
+                {"music_type": music_type} if music_type is not None else {}
             )
-            return self._project_music_detail(plan, info)
-        meta = plan.require_meta()
-        result = self.doubanapi.music_search(
-            keyword=plan.require_keyword(), count=20
-        )
-        candidates = self._matching_music_candidates(
-            meta, self._build_music_search_results(result)
-        )
+            return self.recognize_music(
+                media_source, str(resolved_media_id), **detail_kwargs
+            )
+        if not meta:
+            return None
+        candidates = self.search_music(meta=meta, limit=20, media_source=media_source) or []
+        expected_title = meta.album or meta.title
         for candidate in candidates:
-            direct_result = self._direct_music_candidate(plan, candidate)
-            if direct_result is not None:
-                return direct_result
+            if not self._same_music_text(expected_title, candidate.title):
+                continue
+            if meta.artists and candidate.artists and not any(
+                self._same_music_text(expected, actual)
+                for expected in meta.artists
+                for actual in candidate.artists
+            ):
+                continue
+            if music_type == MUSIC_ENTITY_ALBUM:
+                return candidate
             if meta.album and meta.title:
-                info = self.doubanapi.music_detail(subject_id=str(candidate.media_id))
-                album = self._douban_music_to_album(info) if info else None
+                album = self.music_album(media_source, candidate.media_id)
                 matched_track = self._select_douban_music_track(meta, album)
                 if matched_track:
                     return matched_track
+                continue
+            if music_type == MUSIC_ENTITY_RECORDING:
+                continue
+            return candidate
         return None
 
     async def _async_recognize_music_media(
@@ -310,27 +263,48 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
             music_type: Optional[str] = None,
     ) -> Optional[MusicInfo]:
         """异步执行豆瓣音乐详情识别或按专辑名称匹配。"""
-        plan = self._music_recognition_plan(
-            meta, media_source, media_id, music_type
-        )
-        if not plan:
+        if media_source != self._music_source:
             return None
-        if plan.media_id:
-            info = await self.doubanapi.async_music_detail(
-                subject_id=plan.require_album_id()
-            )
-            return self._project_music_detail(plan, info)
-        meta = plan.require_meta()
-        result = await self.doubanapi.async_music_search(
-            keyword=plan.require_keyword(), count=20
-        )
-        candidates = self._matching_music_candidates(
-            meta, self._build_music_search_results(result)
-        )
+        resolved_media_id = media_id or (meta.media_id if meta else None)
+        if resolved_media_id:
+            album_id, separator, track_id = str(resolved_media_id).partition(":")
+            if music_type == MUSIC_ENTITY_RECORDING and not separator:
+                return None
+            if music_type == MUSIC_ENTITY_ALBUM and separator:
+                return None
+            info = await self.doubanapi.async_music_detail(subject_id=album_id)
+            album = self._douban_music_to_album(info) if info else None
+            if not album:
+                return None
+            if separator and track_id:
+                return next(
+                    (
+                        track for track in album.tracks
+                        if track.media_id == resolved_media_id
+                        or str(track.track_number or "") == track_id
+                    ),
+                    None,
+                )
+            return album.to_music_info()
+        if not meta:
+            return None
+        keyword = meta.album or meta.title
+        if not keyword:
+            return None
+        result = await self.doubanapi.async_music_search(keyword=keyword, count=20)
+        candidates = self._build_music_search_results(result)
+        expected_title = meta.album or meta.title
         for candidate in candidates:
-            direct_result = self._direct_music_candidate(plan, candidate)
-            if direct_result is not None:
-                return direct_result
+            if not self._same_music_text(expected_title, candidate.title):
+                continue
+            if meta.artists and candidate.artists and not any(
+                self._same_music_text(expected, actual)
+                for expected in meta.artists
+                for actual in candidate.artists
+            ):
+                continue
+            if music_type == MUSIC_ENTITY_ALBUM:
+                return candidate
             if meta.album and meta.title:
                 info = await self.doubanapi.async_music_detail(
                     subject_id=str(candidate.media_id)
@@ -339,106 +313,11 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
                 matched_track = self._select_douban_music_track(meta, album)
                 if matched_track:
                     return matched_track
-        return None
-
-    @classmethod
-    def _music_recognition_plan(
-            cls,
-            meta: Optional[MetaMusic],
-            media_source: Optional[MediaSource],
-            media_id: Optional[str],
-            music_type: Optional[str],
-    ) -> Optional[_DoubanMusicRecognitionPlan]:
-        """统一完成豆瓣音乐来源、实体类型、ID 和搜索词准入。"""
-        if media_source != cls._music_source:
-            return None
-        resolved_media_id = media_id or (meta.media_id if meta else None)
-        if resolved_media_id:
-            normalized_id = str(resolved_media_id)
-            album_id, separator, track_id = normalized_id.partition(":")
-            if music_type == MUSIC_ENTITY_RECORDING and not separator:
-                return None
-            if music_type == MUSIC_ENTITY_ALBUM and separator:
-                return None
-            return _DoubanMusicRecognitionPlan(
-                meta=meta,
-                media_id=normalized_id,
-                album_id=album_id,
-                track_id=track_id if separator else None,
-                music_type=music_type,
-                keyword=None,
-            )
-        keyword = (meta.album or meta.title) if meta else None
-        if not meta or not keyword:
-            return None
-        return _DoubanMusicRecognitionPlan(
-            meta=meta,
-            media_id=None,
-            album_id=None,
-            track_id=None,
-            music_type=music_type,
-            keyword=keyword,
-        )
-
-    @classmethod
-    def _project_music_detail(
-            cls,
-            plan: _DoubanMusicRecognitionPlan,
-            info: Optional[dict[str, Any]],
-    ) -> Optional[MusicInfo]:
-        """把豆瓣音乐详情按计划投影为专辑或指定曲目。"""
-        album = cls._douban_music_to_album(info) if info else None
-        if not album:
-            return None
-        if plan.track_id:
-            return next(
-                (
-                    track
-                    for track in album.tracks
-                    if track.media_id == plan.media_id
-                    or str(track.track_number or "") == plan.track_id
-                ),
-                None,
-            )
-        return album.to_music_info()
-
-    @classmethod
-    def _matching_music_candidates(
-            cls,
-            meta: MetaMusic,
-            candidates: List[MusicInfo],
-    ) -> List[MusicInfo]:
-        """按专辑标题和可用艺术家线索过滤豆瓣音乐候选。"""
-        expected_title = meta.album or meta.title
-        return [
-            candidate
-            for candidate in candidates
-            if cls._same_music_text(expected_title, candidate.title)
-            and (
-                not meta.artists
-                or not candidate.artists
-                or any(
-                    cls._same_music_text(expected, actual)
-                    for expected in meta.artists
-                    for actual in candidate.artists
-                )
-            )
-        ]
-
-    @staticmethod
-    def _direct_music_candidate(
-            plan: _DoubanMusicRecognitionPlan,
-            candidate: MusicInfo,
-    ) -> Optional[MusicInfo]:
-        """决定候选可直接返回，还是必须继续读取专辑曲目。"""
-        meta = plan.require_meta()
-        if plan.music_type == MUSIC_ENTITY_ALBUM:
+                continue
+            if music_type == MUSIC_ENTITY_RECORDING:
+                continue
             return candidate
-        if meta.album and meta.title:
-            return None
-        if plan.music_type == MUSIC_ENTITY_RECORDING:
-            return None
-        return candidate
+        return None
 
     @classmethod
     def _select_douban_music_track(
@@ -548,10 +427,7 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         title = cls._douban_music_text(info.get("title") or info.get("name"))
         if not media_id or not title:
             return None
-        attrs = cast(
-            dict[str, Any],
-            info.get("attrs") if isinstance(info.get("attrs"), dict) else {},
-        )
+        attrs = info.get("attrs") if isinstance(info.get("attrs"), dict) else {}
         artists = cls._douban_music_artists(info)
         release_date = cls._douban_music_date(info)
         tags = [
@@ -559,10 +435,7 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
             for item in (info.get("tags") or [])
         ]
         genres = [str(item) for item in info.get("genres") or [] if item]
-        rating = cast(
-            dict[str, Any],
-            info.get("rating") if isinstance(info.get("rating"), dict) else {},
-        )
+        rating = info.get("rating") if isinstance(info.get("rating"), dict) else {}
         album = MusicAlbumInfo(
             media_source=cls._music_source,
             media_id=media_id,
@@ -597,10 +470,7 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
             album: MusicAlbumInfo,
     ) -> List[MusicInfo]:
         """从豆瓣新旧响应结构中提取专辑曲目。"""
-        attrs = cast(
-            dict[str, Any],
-            info.get("attrs") if isinstance(info.get("attrs"), dict) else {},
-        )
+        attrs = info.get("attrs") if isinstance(info.get("attrs"), dict) else {}
         # Frodo 当前音乐详情使用 songs；tracks/attrs.tracks 兼容旧接口响应。
         tracks = info.get("songs") or info.get("tracks") or attrs.get("tracks") or []
         if isinstance(tracks, str):
@@ -668,10 +538,7 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
     @classmethod
     def _douban_music_artists(cls, info: dict[str, Any]) -> List[str]:
         """从豆瓣新旧响应结构中提取艺术家名称。"""
-        attrs = cast(
-            dict[str, Any],
-            info.get("attrs") if isinstance(info.get("attrs"), dict) else {},
-        )
+        attrs = info.get("attrs") if isinstance(info.get("attrs"), dict) else {}
         values = (
             info.get("artists")
             or info.get("artist_names")
@@ -733,10 +600,7 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
     @classmethod
     def _douban_music_date(cls, info: dict[str, Any]) -> Optional[str]:
         """从豆瓣新旧响应结构中提取首个发行日期。"""
-        attrs = cast(
-            dict[str, Any],
-            info.get("attrs") if isinstance(info.get("attrs"), dict) else {},
-        )
+        attrs = info.get("attrs") if isinstance(info.get("attrs"), dict) else {}
         return cls._douban_music_first(info.get("pubdate") or attrs.get("pubdate"))
 
     @staticmethod
@@ -836,46 +700,61 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param match_doubaninfo_func: 匹配豆瓣信息的函数
         :return: 识别的媒体信息，包括剧集信息
         """
-        plan = self._video_recognition_plan(
-            meta=meta,
-            mtype=mtype,
-            douban_id=doubanid,
-            effective_source=(
-                kwargs.get("media_source")
-                or get_runtime_setting('RECOGNIZE_SOURCE')
-            ),
-        )
-        if not plan:
+        if not doubanid and not meta:
             return None
-        if not self._prepare_video_plan(plan):
+
+        if (
+            meta
+            and not doubanid
+            and (kwargs.get("media_source") or get_runtime_setting('RECOGNIZE_SOURCE')) != "douban"
+        ):
             return None
-        if plan.douban_id:
+
+        if doubanid:
             info = douban_info_func(
-                doubanid=plan.douban_id,
-                mtype=plan.media_type,
+                doubanid=doubanid,
+                mtype=mtype or (meta.type if meta else None),
             )
+        elif not meta.name:
+            logger.error("识别媒体信息时未提供元数据名称")
+            return None
         else:
+            if mtype:
+                meta.type = mtype
             info = {}
-            plan_meta = plan.require_meta()
-            for name in plan.search_names:
-                if plan_meta.begin_season is not None:
-                    logger.info(f"正在识别 {name} 第{plan_meta.begin_season}季 ...")
+            for name in self._prepare_search_names(meta):
+                if meta.begin_season is not None:
+                    logger.info(f"正在识别 {name} 第{meta.begin_season}季 ...")
                 else:
                     logger.info(f"正在识别 {name} ...")
                 match_info = match_doubaninfo_func(
                     name=name,
-                    mtype=plan.media_type,
-                    year=plan_meta.year,
-                    season=plan_meta.begin_season,
+                    mtype=mtype or meta.type,
+                    year=meta.year,
+                    season=meta.begin_season,
                 )
                 if match_info:
                     info = douban_info_func(
                         doubanid=match_info.get("id"),
-                        mtype=plan.media_type,
+                        mtype=mtype or meta.type,
                     )
                     if info:
                         break
-        return self._project_video_recognition(plan, info)
+
+        if info:
+            mediainfo = MediaInfo(douban_info=info)
+            if meta:
+                logger.info(f"{meta.name} 豆瓣识别结果：{mediainfo.type.value} "
+                            f"{mediainfo.title_year} "
+                            f"{mediainfo.douban_id}")
+            else:
+                logger.info(f"{doubanid} 豆瓣识别结果：{mediainfo.type.value} "
+                            f"{mediainfo.title_year}")
+            return mediainfo
+        else:
+            logger.info(f"{meta.name if meta else doubanid} 未匹配到豆瓣媒体信息")
+
+        return None
 
     async def _async_recognize_media_core(self, meta: MetaBase = None,
                                           mtype: MediaType = None,
@@ -892,115 +771,61 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param async_match_doubaninfo_func: 匹配豆瓣信息的异步函数
         :return: 识别的媒体信息，包括剧集信息
         """
-        plan = self._video_recognition_plan(
-            meta=meta,
-            mtype=mtype,
-            douban_id=doubanid,
-            effective_source=(
-                kwargs.get("media_source")
-                or get_runtime_setting('RECOGNIZE_SOURCE')
-            ),
-        )
-        if not plan:
+        if not doubanid and not meta:
             return None
-        if not self._prepare_video_plan(plan):
+
+        if (
+            meta
+            and not doubanid
+            and (kwargs.get("media_source") or get_runtime_setting('RECOGNIZE_SOURCE')) != "douban"
+        ):
             return None
-        if plan.douban_id:
+
+        if doubanid:
             info = await async_douban_info_func(
-                doubanid=plan.douban_id,
-                mtype=plan.media_type,
+                doubanid=doubanid,
+                mtype=mtype or (meta.type if meta else None),
             )
+        elif not meta.name:
+            logger.error("识别媒体信息时未提供元数据名称")
+            return None
         else:
+            if mtype:
+                meta.type = mtype
             info = {}
-            plan_meta = plan.require_meta()
-            for name in plan.search_names:
-                if plan_meta.begin_season is not None:
-                    logger.info(f"正在识别 {name} 第{plan_meta.begin_season}季 ...")
+            for name in self._prepare_search_names(meta):
+                if meta.begin_season is not None:
+                    logger.info(f"正在识别 {name} 第{meta.begin_season}季 ...")
                 else:
                     logger.info(f"正在识别 {name} ...")
                 match_info = await async_match_doubaninfo_func(
                     name=name,
-                    mtype=plan.media_type,
-                    year=plan_meta.year,
-                    season=plan_meta.begin_season,
+                    mtype=mtype or meta.type,
+                    year=meta.year,
+                    season=meta.begin_season,
                 )
                 if match_info:
                     info = await async_douban_info_func(
                         doubanid=match_info.get("id"),
-                        mtype=plan.media_type,
+                        mtype=mtype or meta.type,
                     )
                     if info:
                         break
-        return self._project_video_recognition(plan, info)
 
-    @classmethod
-    def _video_recognition_plan(
-            cls,
-            meta: Optional[MetaBase],
-            mtype: Optional[MediaType],
-            douban_id: Optional[str],
-            effective_source: Optional[Union[MediaSource, str]],
-    ) -> Optional[_DoubanVideoRecognitionPlan]:
-        """统一完成豆瓣影视来源、类型、原生 ID 和搜索名称准入。"""
-        if not douban_id and not meta:
-            return None
-        if meta and not douban_id and effective_source != MediaSource.Douban:
-            return None
-        media_type = mtype or (meta.type if meta else None)
-        if douban_id:
-            return _DoubanVideoRecognitionPlan(
-                meta=meta,
-                media_type=media_type,
-                douban_id=str(douban_id),
-                search_names=(),
-            )
-        plan_meta = meta
-        if plan_meta is None:
-            raise RuntimeError("豆瓣影视标题识别计划缺少元数据")
-        return _DoubanVideoRecognitionPlan(
-            meta=plan_meta,
-            media_type=media_type,
-            douban_id=None,
-            search_names=(
-                tuple(cls._prepare_search_names(plan_meta)) if plan_meta.name else ()
-            ),
-        )
-
-    @staticmethod
-    def _prepare_video_plan(plan: _DoubanVideoRecognitionPlan) -> bool:
-        """应用豆瓣影视识别的旧 ABI 元数据回写并报告缺失标题。"""
-        if plan.douban_id:
-            return True
-        if not plan.search_names:
-            logger.error("识别媒体信息时未提供元数据名称")
-            return False
-        if plan.meta and plan.media_type and plan.meta.type != plan.media_type:
-            # 显式类型历史上会回写解析元数据，保留该可观察行为。
-            plan.meta.type = plan.media_type
-        return True
-
-    @staticmethod
-    def _project_video_recognition(
-            plan: _DoubanVideoRecognitionPlan,
-            info: Optional[dict[str, Any]],
-    ) -> Optional[MediaInfo]:
-        """把豆瓣影视详情统一投影为媒体信息并记录识别结论。"""
-        label = plan.meta.name if plan.meta else plan.douban_id
-        if not info:
-            logger.info(f"{label} 未匹配到豆瓣媒体信息")
-            return None
-        mediainfo = MediaInfo(douban_info=info)
-        if plan.meta:
-            logger.info(
-                f"{plan.meta.name} 豆瓣识别结果：{mediainfo.type.value} "
-                f"{mediainfo.title_year} {mediainfo.douban_id}"
-            )
+        if info:
+            mediainfo = MediaInfo(douban_info=info)
+            if meta:
+                logger.info(f"{meta.name} 豆瓣识别结果：{mediainfo.type.value} "
+                            f"{mediainfo.title_year} "
+                            f"{mediainfo.douban_id}")
+            else:
+                logger.info(f"{doubanid} 豆瓣识别结果：{mediainfo.type.value} "
+                            f"{mediainfo.title_year}")
+            return mediainfo
         else:
-            logger.info(
-                f"{plan.douban_id} 豆瓣识别结果：{mediainfo.type.value} "
-                f"{mediainfo.title_year}"
-            )
-        return mediainfo
+            logger.info(f"{meta.name if meta else doubanid} 未匹配到豆瓣媒体信息")
+
+        return None
 
     def recognize_media(self, meta: MetaBase = None,
                         mtype: MediaType = None,
@@ -1072,83 +897,6 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
             async_match_doubaninfo_func=self.async_match_doubaninfo,
             media_source=media_source,
             **kwargs
-        )
-
-    @staticmethod
-    def _douban_detail_order(mtype: Optional[MediaType]) -> Tuple[MediaType, ...]:
-        """返回详情查询的唯一类型顺序，未知类型保持电影优先回退电视剧。"""
-        if mtype == MediaType.TV:
-            return (MediaType.TV,)
-        if mtype == MediaType.MOVIE:
-            return (MediaType.MOVIE,)
-        return MediaType.MOVIE, MediaType.TV
-
-    @staticmethod
-    def _classify_douban_detail(
-            info: Optional[dict[str, Any]]
-    ) -> str:
-        """纯函数分类详情响应为未命中、速率限制或有效详情。"""
-        if not info:
-            return "missing"
-        if "subject_ip_rate_limit" in info.get("msg", ""):
-            return "rate_limited"
-        return "matched"
-
-    @classmethod
-    def _accept_douban_detail(
-            cls, info: Optional[dict[str, Any]]
-    ) -> bool:
-        """应用共享响应分类，并把豆瓣速率限制转换为既有领域异常。"""
-        state = cls._classify_douban_detail(info)
-        if state == "rate_limited":
-            msg = f"触发豆瓣IP速率限制，错误信息：{info} ..."
-            logger.warning(msg)
-            raise APIRateLimitException(msg)
-        return state == "matched"
-
-    @staticmethod
-    def _merge_douban_celebrities(
-            info: dict[str, Any],
-            celebrities: Optional[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """把人物详情合并回原响应，保持现有对象身份和字段覆盖语义。"""
-        if celebrities:
-            info["directors"] = celebrities.get("directors")
-            info["actors"] = celebrities.get("actors")
-        return info
-
-    def _douban_detail(
-            self, doubanid: str, mtype: MediaType
-    ) -> Optional[dict[str, Any]]:
-        """执行一次同步详情及人物查询，业务分类由共享状态机负责。"""
-        if mtype == MediaType.TV:
-            info = self.doubanapi.tv_detail(doubanid)
-            celebrity_loader = self.doubanapi.tv_celebrities
-        else:
-            info = self.doubanapi.movie_detail(doubanid)
-            celebrity_loader = self.doubanapi.movie_celebrities
-        if not self._accept_douban_detail(info):
-            return None
-        detail = cast(dict[str, Any], info)
-        return self._merge_douban_celebrities(
-            detail, celebrity_loader(doubanid)
-        )
-
-    async def _async_douban_detail(
-            self, doubanid: str, mtype: MediaType
-    ) -> Optional[dict[str, Any]]:
-        """执行一次异步详情及人物查询，业务分类由共享状态机负责。"""
-        if mtype == MediaType.TV:
-            info = await self.doubanapi.async_tv_detail(doubanid)
-            celebrity_loader = self.doubanapi.async_tv_celebrities
-        else:
-            info = await self.doubanapi.async_movie_detail(doubanid)
-            celebrity_loader = self.doubanapi.async_movie_celebrities
-        if not self._accept_douban_detail(info):
-            return None
-        detail = cast(dict[str, Any], info)
-        return self._merge_douban_celebrities(
-            detail, await celebrity_loader(doubanid)
         )
 
     @rate_limit_exponential(source="douban_info")
@@ -1426,13 +1174,47 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         }
         """
 
+        def __douban_tv():
+            """
+            获取豆瓣剧集信息
+            """
+            info = self.doubanapi.tv_detail(doubanid)
+            if info:
+                if "subject_ip_rate_limit" in info.get("msg", ""):
+                    msg = f"触发豆瓣IP速率限制，错误信息：{info} ..."
+                    logger.warn(msg)
+                    raise APIRateLimitException(msg)
+                celebrities = self.doubanapi.tv_celebrities(doubanid)
+                if celebrities:
+                    info["directors"] = celebrities.get("directors")
+                    info["actors"] = celebrities.get("actors")
+            return info
+
+        def __douban_movie():
+            """
+            获取豆瓣电影信息
+            """
+            info = self.doubanapi.movie_detail(doubanid)
+            if info:
+                if "subject_ip_rate_limit" in info.get("msg", ""):
+                    msg = f"触发豆瓣IP速率限制，错误信息：{info} ..."
+                    logger.warn(msg)
+                    raise APIRateLimitException(msg)
+                celebrities = self.doubanapi.movie_celebrities(doubanid)
+                if celebrities:
+                    info["directors"] = celebrities.get("directors")
+                    info["actors"] = celebrities.get("actors")
+            return info
+
         if not doubanid:
             return None
         logger.info(f"开始获取豆瓣信息：{doubanid} ...")
-        for detail_type in self._douban_detail_order(mtype):
-            if info := self._douban_detail(doubanid, detail_type):
-                return info
-        return None
+        if mtype == MediaType.TV:
+            return __douban_tv()
+        elif mtype == MediaType.MOVIE:
+            return __douban_movie()
+        else:
+            return __douban_movie() or __douban_tv()
 
     @rate_limit_exponential(source="douban_info")
     async def async_douban_info(self, doubanid: str, mtype: MediaType = None,
@@ -1445,13 +1227,50 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :return: 豆瓣信息
         """
 
+        async def __async_douban_tv():
+            """
+            获取豆瓣剧集信息（异步版本）
+            """
+            info = await self.doubanapi.async_tv_detail(doubanid)
+            if info:
+                if "subject_ip_rate_limit" in info.get("msg", ""):
+                    msg = f"触发豆瓣IP速率限制，错误信息：{info} ..."
+                    logger.warn(msg)
+                    raise APIRateLimitException(msg)
+                celebrities = await self.doubanapi.async_tv_celebrities(doubanid)
+                if celebrities:
+                    info["directors"] = celebrities.get("directors")
+                    info["actors"] = celebrities.get("actors")
+            return info
+
+        async def __async_douban_movie():
+            """
+            获取豆瓣电影信息（异步版本）
+            """
+            info = await self.doubanapi.async_movie_detail(doubanid)
+            if info:
+                if "subject_ip_rate_limit" in info.get("msg", ""):
+                    msg = f"触发豆瓣IP速率限制，错误信息：{info} ..."
+                    logger.warn(msg)
+                    raise APIRateLimitException(msg)
+                celebrities = await self.doubanapi.async_movie_celebrities(doubanid)
+                if celebrities:
+                    info["directors"] = celebrities.get("directors")
+                    info["actors"] = celebrities.get("actors")
+            return info
+
         if not doubanid:
             return None
         logger.info(f"开始获取豆瓣信息：{doubanid} ...")
-        for detail_type in self._douban_detail_order(mtype):
-            if info := await self._async_douban_detail(doubanid, detail_type):
-                return info
-        return None
+        if mtype == MediaType.TV:
+            return await __async_douban_tv()
+        elif mtype == MediaType.MOVIE:
+            return await __async_douban_movie()
+        else:
+            movie_result = await __async_douban_movie()
+            if movie_result:
+                return movie_result
+            return await __async_douban_tv()
 
     def douban_discover(self, mtype: MediaType, sort: str, tags: str,
                         page: int = 1, count: int = 30) -> Optional[List[MediaInfo]]:
@@ -1471,7 +1290,15 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         else:
             infos = self.doubanapi.tv_recommend(start=(page - 1) * count, count=count,
                                                 sort=sort, tags=tags)
-        return self._project_discover(infos)
+        if infos and infos.get("items"):
+            medias = [MediaInfo(douban_info=info) for info in infos.get("items")]
+            return [media for media in medias if media.poster_path
+                    and "movie_large.jpg" not in media.poster_path
+                    and "tv_normal.png" not in media.poster_path
+                    and "movie_large.jpg" not in media.poster_path
+                    and "tv_normal.jpg" not in media.poster_path
+                    and "tv_large.jpg" not in media.poster_path]
+        return []
 
     async def async_douban_discover(self, mtype: MediaType, sort: str, tags: str,
                                     page: int = 1, count: int = 30) -> Optional[List[MediaInfo]]:
@@ -1491,27 +1318,15 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         else:
             infos = await self.doubanapi.async_tv_recommend(start=(page - 1) * count, count=count,
                                                             sort=sort, tags=tags)
-        return self._project_discover(infos)
-
-    @staticmethod
-    def _project_discover(infos: Optional[dict[str, Any]]) -> List[MediaInfo]:
-        """过滤豆瓣发现页占位海报并投影为统一媒体列表。"""
-        medias = [
-            MediaInfo(douban_info=info)
-            for info in (infos or {}).get("items") or []
-        ]
-        invalid_posters = (
-            "movie_large.jpg",
-            "tv_normal.png",
-            "tv_normal.jpg",
-            "tv_large.jpg",
-        )
-        return [
-            media
-            for media in medias
-            if media.poster_path
-            and not any(marker in media.poster_path for marker in invalid_posters)
-        ]
+        if infos and infos.get("items"):
+            medias = [MediaInfo(douban_info=info) for info in infos.get("items")]
+            return [media for media in medias if media.poster_path
+                    and "movie_large.jpg" not in media.poster_path
+                    and "tv_normal.png" not in media.poster_path
+                    and "movie_large.jpg" not in media.poster_path
+                    and "tv_normal.jpg" not in media.poster_path
+                    and "tv_large.jpg" not in media.poster_path]
+        return []
 
     def movie_showing(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1519,7 +1334,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = self.doubanapi.movie_showing(start=(page - 1) * count,
                                              count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     async def async_movie_showing(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1527,7 +1344,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = await self.doubanapi.async_movie_showing(start=(page - 1) * count,
                                                          count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     def tv_weekly_chinese(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1535,7 +1354,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = self.doubanapi.tv_chinese_best_weekly(start=(page - 1) * count,
                                                       count=count)
-        return self._project_collection(infos)
+        if infos:
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     async def async_tv_weekly_chinese(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1543,7 +1364,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = await self.doubanapi.async_tv_chinese_best_weekly(start=(page - 1) * count,
                                                                   count=count)
-        return self._project_collection(infos)
+        if infos:
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     def tv_weekly_global(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1551,7 +1374,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = self.doubanapi.tv_global_best_weekly(start=(page - 1) * count,
                                                      count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     async def async_tv_weekly_global(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1559,7 +1384,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = await self.doubanapi.async_tv_global_best_weekly(start=(page - 1) * count,
                                                                  count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     def tv_animation(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1567,7 +1394,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = self.doubanapi.tv_animation(start=(page - 1) * count,
                                             count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     async def async_tv_animation(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1575,7 +1404,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = await self.doubanapi.async_tv_animation(start=(page - 1) * count,
                                                         count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     def movie_hot(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1583,7 +1414,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = self.doubanapi.movie_hot_gaia(start=(page - 1) * count,
                                               count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     async def async_movie_hot(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1591,7 +1424,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = await self.doubanapi.async_movie_hot_gaia(start=(page - 1) * count,
                                                           count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     def tv_hot(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1599,7 +1434,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = self.doubanapi.tv_hot(start=(page - 1) * count,
                                       count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     async def async_tv_hot(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1607,17 +1444,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = await self.doubanapi.async_tv_hot(start=(page - 1) * count,
                                                   count=count)
-        return self._project_collection(infos)
-
-    @staticmethod
-    def _project_collection(
-            infos: Optional[dict[str, Any]],
-    ) -> List[MediaInfo]:
-        """把豆瓣榜单或集合响应投影为统一媒体列表。"""
-        return [
-            MediaInfo(douban_info=info)
-            for info in (infos or {}).get("subject_collection_items") or []
-        ]
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     def search_medias(
         self, meta: MetaBase, media_source: Optional[MediaSourceSelection] = None
@@ -1628,13 +1457,15 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_source: 请求级搜索数据源
         :return: 媒体信息
         """
-        plan = self._search_plan(meta.name if meta else None, media_source)
-        if not plan.enabled:
+        if not is_media_source_enabled(media_source, MediaSource.Douban):
             return None
-        if not plan.query:
+        if not meta.name:
             return []
-        result = self.doubanapi.search(plan.query)
-        return self._project_media_search(meta, result)
+        result = self.doubanapi.search(meta.name)
+        if not result or not result.get("items"):
+            return []
+        # 返回数据
+        return self._build_search_medias_result(meta, result.get("items"))
 
     async def async_search_medias(
         self, meta: MetaBase, media_source: Optional[MediaSourceSelection] = None
@@ -1645,13 +1476,15 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_source: 请求级搜索数据源
         :return: 媒体信息
         """
-        plan = self._search_plan(meta.name if meta else None, media_source)
-        if not plan.enabled:
+        if not is_media_source_enabled(media_source, MediaSource.Douban):
             return None
-        if not plan.query:
+        if not meta.name:
             return []
-        result = await self.doubanapi.async_search(plan.query)
-        return self._project_media_search(meta, result)
+        result = await self.doubanapi.async_search(meta.name)
+        if not result or not result.get("items"):
+            return []
+        # 返回数据
+        return self._build_search_medias_result(meta, result.get("items"))
 
     def search_persons(
         self, name: str, media_source: Optional[MediaSourceSelection] = None
@@ -1662,13 +1495,21 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_source: 请求级搜索数据源
         :return: 人物信息列表
         """
-        plan = self._search_plan(name, media_source)
-        if not plan.enabled:
+        if not is_media_source_enabled(media_source, MediaSource.Douban):
             return None
-        if not plan.query:
+        if not name:
             return []
-        result = self.doubanapi.person_search(keyword=plan.query)
-        return self._project_person_search(plan.query, result)
+        result = self.doubanapi.person_search(keyword=name)
+        if result and result.get('items'):
+            return [MediaPerson(source='douban', **{
+                'id': item.get('target_id'),
+                'name': item.get('target', {}).get('title'),
+                'url': item.get('target', {}).get('url'),
+                'images': item.get('target', {}).get('cover', {}),
+                'avatar': (item.get('target', {}).get('cover_img', {}).get('url')
+                           or '').replace("/l/public/", "/s/public/"),
+            }) for item in result.get('items') if name in item.get('target', {}).get('title')]
+        return []
 
     async def async_search_persons(
         self, name: str, media_source: Optional[MediaSourceSelection] = None
@@ -1679,59 +1520,21 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_source: 请求级搜索数据源
         :return: 人物信息列表
         """
-        plan = self._search_plan(name, media_source)
-        if not plan.enabled:
+        if not is_media_source_enabled(media_source, MediaSource.Douban):
             return None
-        if not plan.query:
+        if not name:
             return []
-        result = await self.doubanapi.async_person_search(keyword=plan.query)
-        return self._project_person_search(plan.query, result)
-
-    @staticmethod
-    def _search_plan(
-            query: Optional[str],
-            media_source: Optional[MediaSourceSelection],
-    ) -> _DoubanSearchPlan:
-        """统一决定豆瓣搜索是否响应并规范化查询文本。"""
-        enabled = is_media_source_enabled(media_source, MediaSource.Douban)
-        return _DoubanSearchPlan(
-            enabled=enabled,
-            query=str(query).strip() if enabled and query else None,
-        )
-
-    @classmethod
-    def _project_media_search(
-            cls,
-            meta: MetaBase,
-            result: Optional[dict[str, Any]],
-    ) -> List[MediaInfo]:
-        """把豆瓣媒体搜索响应交给统一过滤与季信息投影。"""
-        return cls._build_search_medias_result(
-            meta, (result or {}).get("items")
-        )
-
-    @staticmethod
-    def _project_person_search(
-            name: str,
-            result: Optional[dict[str, Any]],
-    ) -> List[MediaPerson]:
-        """把豆瓣人物搜索响应过滤并投影为统一人物列表。"""
-        persons = []
-        for item in (result or {}).get("items") or []:
-            target = item.get("target") or {}
-            title = target.get("title") or ""
-            if name not in title:
-                continue
-            persons.append(MediaPerson(source="douban", **{
-                "id": item.get("target_id"),
-                "name": title,
-                "url": target.get("url"),
-                "images": target.get("cover", {}),
-                "avatar": (target.get("cover_img", {}).get("url") or "").replace(
-                    "/l/public/", "/s/public/"
-                ),
-            }))
-        return persons
+        result = await self.doubanapi.async_person_search(keyword=name)
+        if result and result.get('items'):
+            return [MediaPerson(source='douban', **{
+                'id': item.get('target_id'),
+                'name': item.get('target', {}).get('title'),
+                'url': item.get('target', {}).get('url'),
+                'images': item.get('target', {}).get('cover', {}),
+                'avatar': (item.get('target', {}).get('cover_img', {}).get('url')
+                           or '').replace("/l/public/", "/s/public/"),
+            }) for item in result.get('items') if name in item.get('target', {}).get('title')]
+        return []
 
     @staticmethod
     def _process_imdbid_result(result: dict, imdbid: str) -> Optional[dict]:
@@ -1861,7 +1664,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = self.doubanapi.movie_top250(start=(page - 1) * count,
                                             count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     async def async_movie_top250(self, page: int = 1, count: int = 30) -> List[MediaInfo]:
         """
@@ -1869,7 +1674,9 @@ class DoubanModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         infos = await self.doubanapi.async_movie_top250(start=(page - 1) * count,
                                                         count=count)
-        return self._project_collection(infos)
+        if infos and infos.get("subject_collection_items"):
+            return [MediaInfo(douban_info=info) for info in infos.get("subject_collection_items")]
+        return []
 
     def metadata_nfo(self, mediainfo: MediaInfo, season: int = None, **kwargs) -> Optional[str]:
         """

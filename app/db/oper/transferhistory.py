@@ -1,27 +1,11 @@
 import time
-from typing import Any, List, Optional, cast
+from typing import Any, List, Optional
 
 from sqlalchemy import delete as sqlalchemy_delete
-from sqlalchemy import func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.db.base import DbOper
 from app.db.models.transferhistory import TransferHistory
-from app.db.oper.query import (
-    descending,
-    enum_values,
-    execute_page,
-    literal_contains,
-    media_identity_conditions,
-    music_type_condition,
-    required_media_identity_conditions,
-)
-from app.schemas.query import (
-    QueryPageRequest,
-    QuerySortField,
-    TransferHistoryFilter,
-)
 from app.schemas.types import MediaSource
 
 
@@ -35,110 +19,9 @@ class TransferHistoryOper(DbOper):
         获取转移历史
         :param historyid: 转移历史id
         """
-        return self.get_by_id(historyid)
-
-    def get_by_id(self, record_id: int) -> Optional[TransferHistory]:
-        """按稳定记录 ID 读取单条整理历史。"""
-        return cast(
-            Optional[TransferHistory],
-            self._execute_sync_query(
-                lambda session: session.execute(
-                    select(TransferHistory).where(TransferHistory.id == record_id)
-                ).scalars().first()
-            ),
+        return self._execute_sync_query(
+            lambda session: TransferHistory.get(session, historyid)
         )
-
-    def query(
-        self,
-        filters: TransferHistoryFilter,
-        page: QueryPageRequest,
-    ) -> tuple[list[TransferHistory], int]:
-        """按稳定筛选和分页合同读取整理历史记录及总数。"""
-        def execute(session: Session) -> tuple[list[TransferHistory], int]:
-            """在同一会话中构造并执行整理历史 count/page 查询。"""
-            conditions = media_identity_conditions(TransferHistory, filters)
-            ids = enum_values(filters.ids)
-            media_types = enum_values(filters.media_types)
-            media_sources = enum_values(filters.media_sources)
-            if ids:
-                conditions.append(TransferHistory.id.in_(ids))
-            if media_types:
-                conditions.append(TransferHistory.type.in_(media_types))
-            if media_sources:
-                conditions.append(TransferHistory.media_source.in_(media_sources))
-            if filters.require_media_identity:
-                conditions.extend(required_media_identity_conditions(TransferHistory))
-            if filters.title:
-                conditions.append(TransferHistory.title == filters.title)
-            if filters.text:
-                conditions.append(
-                    literal_contains(TransferHistory.title, filters.text)
-                    | literal_contains(TransferHistory.src, filters.text)
-                    | literal_contains(TransferHistory.dest, filters.text)
-                )
-            for column, value in (
-                (TransferHistory.year, filters.year),
-                (TransferHistory.seasons, filters.seasons),
-                (TransferHistory.episodes, filters.episodes),
-                (TransferHistory.src, filters.src),
-                (TransferHistory.dest, filters.dest),
-                (TransferHistory.download_hash, filters.download_hash),
-                (TransferHistory.episode_group, filters.episode_group),
-            ):
-                if value is not None and value != "":
-                    conditions.append(column == value)
-            if filters.status is not None:
-                if filters.status:
-                    conditions.append(TransferHistory.status.is_(True))
-                else:
-                    conditions.append(
-                        or_(
-                            TransferHistory.status.is_(False),
-                            TransferHistory.status.is_(None),
-                        )
-                    )
-            music_condition = music_type_condition(
-                TransferHistory.music_type,
-                filters.music_type,
-            )
-            if music_condition is not None:
-                conditions.append(music_condition)
-
-            count_statement = select(func.count(TransferHistory.id))
-            page_statement = select(TransferHistory)
-            if conditions:
-                count_statement = count_statement.where(*conditions)
-                page_statement = page_statement.where(*conditions)
-            descending_order = descending(page)
-            if page.sort.field == QuerySortField.ID:
-                primary = (
-                    TransferHistory.id.desc()
-                    if descending_order
-                    else TransferHistory.id.asc()
-                )
-                secondary = (
-                    TransferHistory.date.desc()
-                    if descending_order
-                    else TransferHistory.date.asc()
-                )
-            else:
-                primary = (
-                    TransferHistory.date.desc().nullslast()
-                    if descending_order
-                    else TransferHistory.date.asc().nullsfirst()
-                )
-                secondary = (
-                    TransferHistory.id.desc()
-                    if descending_order
-                    else TransferHistory.id.asc()
-                )
-            page_statement = page_statement.order_by(primary, secondary)
-            return cast(
-                tuple[list[TransferHistory], int],
-                execute_page(session, count_statement, page_statement, page),
-            )
-
-        return self._execute_sync_query(execute)
 
     async def async_get(self, historyid: int) -> Optional[TransferHistory]:
         """
@@ -231,19 +114,6 @@ class TransferHistoryOper(DbOper):
         """
         return self._execute_sync_query(
             lambda session: TransferHistory.get_by_src(session, src, storage)
-        )
-
-    def get_by_transfer_task_id(
-            self,
-            *,
-            task_id: str,
-    ) -> Optional[TransferHistory]:
-        """按稳定整理任务标识读取终态历史。"""
-        return self._execute_sync_query(
-            lambda session: TransferHistory.get_by_transfer_task_id(
-                session,
-                task_id=task_id,
-            )
         )
 
     def get_success_by_src(
@@ -394,71 +264,58 @@ class TransferHistoryOper(DbOper):
 
     def delete(self, historyid):
         """
-        删除旧转移记录，失败任务历史由状态机独占。
+        删除转移记录
         """
-        self._execute_sync_write(
-            lambda session: session.execute(
-                sqlalchemy_delete(TransferHistory).where(
-                    TransferHistory.id == historyid,
-                    TransferHistory.transfer_task_id.is_(None),
-                )
-            )
-        )
+        self._stage_delete(TransferHistory, historyid)
 
     def stage_delete(self, historyid: int) -> None:
         """暂存整理记录删除，事务由调用方统一提交。"""
         self._db.execute(
             sqlalchemy_delete(TransferHistory).where(
-                TransferHistory.id == historyid,
-                TransferHistory.transfer_task_id.is_(None),
-            )
-        )
-
-    async def async_stage_delete(self, historyid: int) -> None:
-        """在调用方异步事务内暂存旧整理记录删除。"""
-        if not isinstance(self._db, AsyncSession):
-            raise RuntimeError("整理历史异步删除需要调用方提供异步 Session")
-        await self._db.execute(
-            sqlalchemy_delete(TransferHistory).where(
-                TransferHistory.id == historyid,
-                TransferHistory.transfer_task_id.is_(None),
+                TransferHistory.id == historyid
             )
         )
 
     def stage_truncate(self) -> None:
-        """暂存旧整理记录删除，只保留当前失败任务历史。"""
-        self._db.execute(
-            sqlalchemy_delete(TransferHistory).where(
-                TransferHistory.transfer_task_id.is_(None)
-            )
-        )
+        """暂存全部整理记录删除，由请求级事务统一提交。"""
+        self._db.execute(sqlalchemy_delete(TransferHistory))
 
     async def async_delete(self, historyid):
         """
-        异步删除旧转移记录，失败任务历史由状态机独占。
+        异步删除转移记录。
         """
-        async def stage(session: AsyncSession) -> None:
-            """在异步事务内只删除没有任务回执的历史。"""
-            await session.execute(
-                sqlalchemy_delete(TransferHistory).where(
-                    TransferHistory.id == historyid,
-                    TransferHistory.transfer_task_id.is_(None),
-                )
-            )
-
-        await self._execute_async_write(stage)
+        await self._stage_async_delete(TransferHistory, historyid)
 
     def truncate(self):
         """
-        清空旧转移记录，只保留当前失败任务历史。
+        清空转移记录
         """
-        self._execute_sync_write(
-            lambda session: session.execute(
-                sqlalchemy_delete(TransferHistory).where(
-                    TransferHistory.transfer_task_id.is_(None)
-                )
+        self._stage_truncate(TransferHistory)
+
+    def add_force(self, **kwargs) -> Optional[TransferHistory]:
+        """
+        新增转移历史，并以同源存储的记录为准替换旧记录。
+        """
+        # 文件项的默认存储是 local；归一化旧调用传入的 None，确保运行时语义与
+        # (src, src_storage) 唯一索引一致。
+        kwargs["src_storage"] = kwargs.get("src_storage") or "local"
+        # 旧记录的清理交给 replace_by_src 按 (src, src_storage) 处理：
+        # 仅按 src 删除会连带删掉其他存储下同路径的记录。
+        kwargs.update({
+            "date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        })
+        def stage(session: Session) -> Optional[TransferHistory]:
+            """在同一事务替换记录并返回兼容查询投影。"""
+            TransferHistory.replace_by_src(session, **kwargs)
+            return TransferHistory.get_by_src(
+                session,
+                kwargs.get("src"),
+                kwargs["src_storage"],
             )
-        )
+
+        # 保持 add_force 的既有返回契约：返回可被调用方安全读取字段的查询结果，
+        # 而非事务提交后可能已脱离会话的新建实例。
+        return self._execute_sync_write(stage)
 
     def stage_replace_by_src(self, **kwargs) -> TransferHistory:
         """在调用方事务内按源路径替换整理历史并返回已分配 ID 的新记录。"""
@@ -466,46 +323,15 @@ class TransferHistoryOper(DbOper):
             raise RuntimeError("整理历史事务写入需要调用方提供同步 Session")
         kwargs["src_storage"] = kwargs.get("src_storage") or "local"
         kwargs["date"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        return TransferHistory.replace_by_src(self._db, **kwargs)
-
-    def stage_upsert_by_transfer_task_id(
-            self,
-            *,
-            task_id: str,
-            settlement_revision: int,
-            retain_task_mapping: bool,
-            payload: dict[str, Any],
-    ) -> TransferHistory:
-        """在调用方事务内按任务标识幂等暂存终态历史。"""
-        if not isinstance(self._db, Session):
-            raise RuntimeError("整理历史任务结算需要调用方提供同步 Session")
-        payload = dict(payload)
-        payload["src_storage"] = payload.get("src_storage") or "local"
-        payload["date"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        return TransferHistory.upsert_by_transfer_task_id(
-            self._db,
-            task_id=task_id,
-            settlement_revision=settlement_revision,
-            retain_task_mapping=retain_task_mapping,
-            payload=payload,
+        self._db.execute(
+            sqlalchemy_delete(TransferHistory).where(
+                TransferHistory.src == kwargs.get("src"),
+                TransferHistory.src_storage == kwargs["src_storage"],
+            )
         )
-
-    def stage_bind_settlement(
-            self,
-            *,
-            task_id: str,
-            settlement_revision: int,
-            src: str,
-            storage: Optional[str] = None,
-    ) -> Optional[TransferHistory]:
-        """复用已有成功历史且清除失败任务映射，不改写业务字段。"""
-        if not isinstance(self._db, Session):
-            raise RuntimeError("整理历史任务回执绑定需要调用方提供同步 Session")
-        history = TransferHistory.get_success_by_src(self._db, src, storage)
-        if history is None:
-            return None
-        history.transfer_task_id = None
-        history.transfer_settlement_revision = None
+        self._db.flush()
+        history = TransferHistory(**kwargs)
+        self._db.add(history)
         self._db.flush()
         return history
 
@@ -519,20 +345,6 @@ class TransferHistoryOper(DbOper):
                 historyid,
                 download_hash,
             )
-        )
-
-    def stage_update_download_hash(
-        self,
-        historyid: int,
-        download_hash: str,
-    ) -> None:
-        """在调用方事务内暂存整理历史下载任务 Hash 更新。"""
-        if not isinstance(self._db, Session):
-            raise RuntimeError("整理历史同步更新需要调用方提供同步 Session")
-        TransferHistory.update_download_hash(
-            self._db,
-            historyid,
-            download_hash,
         )
 
     def list_by_date(self, date: str) -> List[TransferHistory]:

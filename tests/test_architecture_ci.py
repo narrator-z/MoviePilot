@@ -92,7 +92,6 @@ def test_coverage_job_runs_full_suite_and_read_only_ratchet() -> None:
     assert workflow["on"]["push"]["branches"] == ["v3"]
     assert "workflow_dispatch" in workflow["on"]
     assert coverage_job["runs-on"] == "ubuntu-latest"
-    assert coverage_job["timeout-minutes"] == 20
     assert "if" not in coverage_job
 
     setup_step = next(step for step in steps if step.get("name") == "Set up uv")
@@ -102,7 +101,6 @@ def test_coverage_job_runs_full_suite_and_read_only_ratchet() -> None:
     generate_step = next(
         step for step in steps if step.get("name") == "Generate coverage reports"
     )
-    assert generate_step["timeout-minutes"] == 15
     upload_step = next(
         step for step in steps if step.get("name") == "Upload coverage report"
     )
@@ -172,64 +170,7 @@ def test_upload_artifact_actions_share_node24_major():
 
     assert actions_by_workflow == {
         "architecture-observe.yml": ["actions/upload-artifact@v7"],
-        "native-dependency-update.yml": ["actions/upload-artifact@v7"],
         "pylint.yml": ["actions/upload-artifact@v7"],
         "site-adapter-collector.yml": ["actions/upload-artifact@v7"],
         "test.yml": ["actions/upload-artifact@v7"],
     }
-
-
-def test_native_dependency_update_probe_has_narrow_automatic_triggers():
-    """昂贵的三平台探针只跟随生产安装边界变化，并保留手工验收入口。"""
-    workflow = _load_workflow("native-dependency-update.yml")
-    expected_paths = [
-        "app/adapters/external/market.py",
-        "app/adapters/system/host.py",
-        "app/adapters/system/package.py",
-        "app/adapters/system/plugin/package.py",
-        "app/application/plugin/install.py",
-        "app/runtime/dependencies/native.py",
-        "app/runtime/dependencies/profile.py",
-        "scripts/probe_native_dependency_update.py",
-        ".github/workflows/native-dependency-update.yml",
-    ]
-
-    assert workflow["on"]["pull_request"]["paths"] == expected_paths
-    assert workflow["on"]["push"]["paths"] == expected_paths
-    assert "workflow_dispatch" in workflow["on"]
-    assert set(workflow["jobs"]) == {"probe"}
-
-
-def test_dependency_compatibility_covers_windows_free_threaded_profile():
-    """依赖门禁必须真实安装并检查 Windows free-threaded profile。"""
-    workflow = _load_workflow("dependency-compat.yml")
-    matrix = workflow["jobs"]["install"]["strategy"]["matrix"]["include"]
-    free_threaded = next(item for item in matrix if item["expected-profile"] == "free-threaded")
-
-    assert free_threaded == {
-        "name": "Windows x64 free-threaded",
-        "runner": "windows-2025",
-        "python-version": "3.14t",
-        "runtime-group": "runtime-free-threaded",
-        "expected-profile": "free-threaded",
-        "expected-system": "Windows",
-        "expected-machine": "AMD64",
-    }
-    install = _step_commands(workflow, "install")
-    assert "--group ${{ matrix.runtime-group }}" in install
-    assert "python -m scripts.verify_runtime_profile" in install
-    assert "MOVIEPILOT_SAFE_MODE" in str(workflow["jobs"]["install"]["steps"])
-    expected_paths = {
-        "app/__init__.py",
-        "app/runtime/dependencies/profile.py",
-        "scripts/verify_runtime_profile.py",
-    }
-    assert expected_paths <= set(workflow["on"]["pull_request"]["paths"])
-    assert expected_paths <= set(workflow["on"]["push"]["paths"])
-    postgres_step = next(
-        step
-        for step in workflow["jobs"]["install"]["steps"]
-        if step.get("name") == "Expose PostgreSQL build tools"
-    )
-    assert postgres_step["if"] == "matrix.expected-profile == 'free-threaded'"
-    assert "Test-Path -LiteralPath $env:PGBIN -PathType Container" in postgres_step["run"]

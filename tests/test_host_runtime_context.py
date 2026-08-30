@@ -4,7 +4,6 @@ import ast
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -15,15 +14,6 @@ from app.api.context import (
     get_agent_chat_transaction,
 )
 from app.api.dependencies.agent import get_agent_chat_persistence
-from app.application.agent import AgentDataContext
-from app.application.configuration import (
-    ApiRuntimeConfig,
-    ChainRuntimeConfig,
-    RuntimeConfiguration,
-    RuntimeSettingsService,
-    SchedulerRuntimeConfig,
-)
-from app.runtime.tasks import TaskRegistry
 from app.startup import lifecycle
 from app.startup.composition.context import (
     AgentChatRuntime,
@@ -36,6 +26,14 @@ from app.startup.composition.context import (
     SubscriptionRuntime,
     WorkflowRuntime,
 )
+from app.application.configuration import (
+    ApiRuntimeConfig,
+    ChainRuntimeConfig,
+    RuntimeConfiguration,
+    RuntimeSettingsService,
+    SchedulerRuntimeConfig,
+)
+
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -90,21 +88,8 @@ class _Outbox:
     async def stage(self, intent, now) -> None:
         """模拟暂存 durable intent。"""
 
-
-class _DispatchStore:
-    """提供订阅即时副作用所需的独立派发存储替身。"""
-
-    async def claim_by_event_key(self, event_key, now, lease_until):
-        """模拟未取得指定消息 lease。"""
-        return None
-
-    async def complete(self, message_id, attempt, completed_at) -> bool:
-        """模拟按 attempt 完成消息。"""
-        return True
-
-    async def retry(self, message_id, attempt, **kwargs) -> bool:
-        """模拟按 attempt 释放消息。"""
-        return True
+    async def complete_by_event_key(self, event_key, completed_at) -> None:
+        """模拟收口 durable intent。"""
 
 
 class _RuntimeSettings:
@@ -125,7 +110,6 @@ class _RuntimeSettings:
 
 def _runtime() -> HostRuntime:
     """构造不加载数据库引擎或 PluginManager 的假宿主运行时。"""
-
     async def async_session():
         """生成一个可被 FastAPI 依赖缓存的会话标记。"""
         yield object()
@@ -136,22 +120,6 @@ def _runtime() -> HostRuntime:
             yield object()
 
     return HostRuntime(
-        agent=AgentDataContext(
-            chat=SimpleNamespace(),
-            chat_persistence=_AgentChatPersistence(),
-            tasks=SimpleNamespace(),
-            users=SimpleNamespace(),
-            sites=SimpleNamespace(),
-            subscriptions=SimpleNamespace(),
-            subscription_mutation_scope=SimpleNamespace(),
-            subscription_delete_scope=SimpleNamespace(),
-            async_rule_group_mutation_scope=SimpleNamespace(),
-            subscription_history=SimpleNamespace(),
-            transfer_history=SimpleNamespace(),
-            transfer_execution=SimpleNamespace(),
-            download_history=SimpleNamespace(),
-            plugin_data=SimpleNamespace(),
-        ),
         agent_chat=AgentChatRuntime(
             async_session=async_session,
             repository=_Repository,
@@ -166,71 +134,37 @@ def _runtime() -> HostRuntime:
         ),
         authentication=AuthenticationRuntime(
             user_repository=_Repository,
-            passkey_repository=_Repository,
             standalone_user=lambda: _Repository(object()),
             system_config=lambda: _Repository(object()),
             passkey=lambda: _Repository(object()),
         ),
-        messaging=MessagingRuntime(
-            repository=_Repository,
-            helper=SimpleNamespace(),
-            queue=SimpleNamespace(),
-        ),
+        messaging=MessagingRuntime(repository=_Repository),
         history=HistoryRuntime(
             download_repository=_Repository,
             transfer_repository=_Repository,
-            transfer_mutation_repository=_Repository,
             media_server_repository=_Repository,
-            transfer_execution_repository=_Repository(object()),
         ),
-        site=SiteRuntime(
-            repository=_Repository,
-            standalone=_Repository(object()),
-        ),
+        site=SiteRuntime(repository=_Repository),
         subscription=SubscriptionRuntime(
             async_session=async_session,
             repository=_Repository,
             history_repository=_Repository,
             transaction=_UnitOfWork,
             outbox=_Outbox,
-            dispatch_store=_DispatchStore(),
-            batch_writer=SimpleNamespace(),
-            rule_group_mutation_scope=SimpleNamespace(),
-            async_rule_group_mutation_scope=SimpleNamespace(),
-            site_reference_mutation_scope=SimpleNamespace(),
         ),
         workflow=WorkflowRuntime(
-            query=SimpleNamespace(),
             repository=_Repository,
             system_config=lambda: _Repository(object()),
         ),
-        system=SimpleNamespace(),
         configuration=RuntimeConfiguration(
-            api=lambda: ApiRuntimeConfig(60, False, True),
+            api=lambda: ApiRuntimeConfig(False, 60, False, True),
             scheduler=lambda: SchedulerRuntimeConfig(
-                False,
-                "Asia/Shanghai",
-                1,
-                False,
-                "",
-                None,
-                None,
-                False,
-                24,
-                "rss",
-                30,
-                False,
-                None,
-                None,
-                True,
-                1,
-                False,
-                None,
+                False, "Asia/Shanghai", 1, False, "", None, None,
+                False, 24, "rss", 30, False, None, None, True, 1, False, None,
             ),
             chain=lambda: ChainRuntimeConfig(media_extensions=(".mkv",)),
         ),
         settings=RuntimeSettingsService(_RuntimeSettings()),
-        tasks=TaskRegistry(),
     )
 
 
@@ -280,13 +214,17 @@ def test_string_api_data_locator_is_confined_to_compatibility_boundary() -> None
         if path.is_relative_to(PROJECT_ROOT / "app" / "plugins"):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        imported_modules = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+        imported_modules = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
         if imported_modules & {"app.api.data", "app.api.dependencies.data"}:
             importers.add(path.relative_to(PROJECT_ROOT).as_posix())
 
     assert importers == {
         "app/api/dependencies/data.py",
-        "app/startup/composition/runtime.py",
+        "app/startup/initializers/modules.py",
     }
 
 
@@ -305,70 +243,3 @@ async def test_lifecycle_component_attaches_init_modules_result(monkeypatch) -> 
     await lifecycle.initialize_modules_component(app)
 
     assert app.state.host_runtime is runtime
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_component_revokes_host_runtime_after_converged_stop(
-    monkeypatch,
-) -> None:
-    """模块 owner 完整关闭后 AppState 不得继续暴露上一 lifespan 的运行时。"""
-    app = FastAPI()
-    runtime = _runtime()
-    app.state.host_runtime = runtime
-    monkeypatch.setattr(lifecycle, "stop_modules", AsyncMock(return_value=True))
-
-    assert await lifecycle.stop_modules_component(app) is True
-    assert app.state.host_runtime is None
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_component_retains_host_runtime_after_failed_stop(
-    monkeypatch,
-) -> None:
-    """模块 owner 未收敛时保留 HostRuntime，供诊断与后续重试。"""
-    app = FastAPI()
-    runtime = _runtime()
-    app.state.host_runtime = runtime
-    monkeypatch.setattr(lifecycle, "stop_modules", AsyncMock(return_value=False))
-
-    assert await lifecycle.stop_modules_component(app) is False
-    assert app.state.host_runtime is runtime
-
-
-@pytest.mark.asyncio
-async def test_init_modules_cleans_partial_message_owner_on_failure(monkeypatch) -> None:
-    """直接调用模块初始化时，中途失败也不得遗留消息缓存单例。"""
-    from app.application.messaging.message import MessageHelper
-    from app.foundation.singleton import Singleton, SingletonClass
-    from app.startup.initializers import modules as modules_initializer
-
-    monkeypatch.setattr(Singleton, "_instances", {})
-    monkeypatch.setattr(SingletonClass, "_instances", {})
-    close = MagicMock()
-    startup_error = RuntimeError("module startup failed")
-
-    async def failing_initialize_modules() -> HostRuntime:
-        """构造消息 owner 后模拟组合逻辑失败。"""
-        helper = MessageHelper()
-        monkeypatch.setattr(helper._recent_notification_keys, "close", close)
-        raise startup_error
-
-    monkeypatch.setattr(
-        modules_initializer,
-        "_initialize_modules",
-        failing_initialize_modules,
-    )
-    stop_modules = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        modules_initializer,
-        "stop_modules",
-        stop_modules,
-    )
-
-    with pytest.raises(RuntimeError) as raised:
-        await modules_initializer.init_modules()
-
-    assert raised.value is startup_error
-    close.assert_called_once_with()
-    assert MessageHelper.get_existing_instance() is None
-    stop_modules.assert_awaited_once_with()

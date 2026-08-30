@@ -1,16 +1,14 @@
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from app.application.history import DownloadHistorySnapshot
-from app.application.transfer.workflow import TransferTask
 from app.chain.transfer import TransferChain
+from app.runtime.config import settings
 from app.domain.context import MediaInfo
 from app.domain.meta.metabase import MetaBase
-from app.runtime.config import settings
-from app.schemas.file import FileItem
-from app.schemas.types import MediaSource, MediaType
+from app.schemas import DownloadHistory, FileItem
+from app.application.transfer import TransferTask
+from app.schemas.types import MediaType
 
 
 def _make_chain() -> TransferChain:
@@ -60,18 +58,17 @@ def _make_file_meta(year: str = "2013") -> _FileMeta:
     return _FileMeta(year=year)
 
 
-def _make_history() -> DownloadHistorySnapshot:
+def _make_history() -> SimpleNamespace:
     """构造被合集首部电影占用的下载历史。"""
-    return DownloadHistorySnapshot(
+    return SimpleNamespace(
         id=1,
-        path="/downloads/The.Hunger.Games.Complete.4-Film.Collection",
         download_hash="collection-hash",
         downloader="qbittorrent",
         type=MediaType.MOVIE.value,
         title="饥饿游戏",
         year="2012",
-        media_source=MediaSource.TMDB,
-        media_id="70160",
+        tmdbid=70160,
+        doubanid=None,
         episode_group=None,
         media_category=None,
         username=None,
@@ -84,12 +81,12 @@ def test_movie_year_conflict_only_applies_to_movies():
     """仅电影年份冲突应触发逐文件识别，电视剧季包仍复用下载历史。"""
     file_meta = _make_file_meta()
     movie_history = _make_history()
-    tv_history = replace(movie_history, type=MediaType.TV.value)
+    tv_history = SimpleNamespace(type=MediaType.TV, year="2012")
 
     assert TransferChain._is_movie_year_conflict(file_meta, movie_history)
     assert not TransferChain._is_movie_year_conflict(file_meta, tv_history)
-    same_year_history = replace(movie_history, year="2013")
-    assert not TransferChain._is_movie_year_conflict(file_meta, same_year_history)
+    movie_history.year = "2013"
+    assert not TransferChain._is_movie_year_conflict(file_meta, movie_history)
 
 
 def test_conflicting_download_history_recognizes_movie_by_file_meta(monkeypatch):
@@ -106,11 +103,13 @@ def test_conflicting_download_history_recognizes_movie_by_file_meta(monkeypatch)
         migrate_task=lambda task: False,
         try_remove_job=lambda task: None,
     )
-    chain.transfer_history_repository = SimpleNamespace(
-        get_by_type_tmdbid=lambda **kwargs: None
-    )
     monkeypatch.setattr(
-        "app.chain.transfer.execution.MediaChain",
+        "app.chain.transfer.TransferHistoryOper",
+        lambda: SimpleNamespace(get_by_media_identity=lambda **kwargs: None),
+    )
+    monkeypatch.setattr("app.chain._transfer.TransferHistoryOper", lambda: SimpleNamespace(get_by_media_identity=lambda **kwargs: None))
+    monkeypatch.setattr(
+        "app.chain.transfer.MediaChain",
         lambda: SimpleNamespace(
             recognize_media=lambda **kwargs: pytest.fail("不应按合集历史 ID 识别"),
             recognize_by_meta=lambda meta, obtain_images: (
@@ -119,7 +118,7 @@ def test_conflicting_download_history_recognizes_movie_by_file_meta(monkeypatch)
             supplement_tmdb_info=lambda media, _meta: media,
         ),
     )
-    monkeypatch.setattr("app.chain.transfer.filter.MediaChain", lambda: SimpleNamespace(
+    monkeypatch.setattr("app.chain._transfer.MediaChain", lambda: SimpleNamespace(
             recognize_media=lambda **kwargs: pytest.fail("不应按合集历史 ID 识别"),
             recognize_by_meta=lambda meta, obtain_images: (
                 recognized_meta.append(meta) or fallback_media
@@ -136,7 +135,7 @@ def test_conflicting_download_history_recognizes_movie_by_file_meta(monkeypatch)
             size=1024,
         ),
         meta=_make_file_meta(),
-        download_history=_make_history(),
+        download_history=DownloadHistory(**vars(_make_history())),
         preview=True,
     )
 
@@ -187,18 +186,21 @@ def test_movie_collection_conflict_only_drops_automatic_media(
         return True, ""
 
     chain._TransferChain__handle_transfer = fake_handle_transfer
-    chain.transfer_history_repository = SimpleNamespace(
-        get_by_src=lambda src, storage=None: None
-    )
-    chain.download_history_repository = history_oper
     monkeypatch.setattr(
-        "app.chain.transfer.workflow.get_configured_system_config",
+        "app.chain.transfer.TransferHistoryOper",
+        lambda: SimpleNamespace(get_by_src=lambda src, storage=None: None),
+    )
+    monkeypatch.setattr("app.chain._transfer.TransferHistoryOper", lambda: SimpleNamespace(get_by_src=lambda src, storage=None: None))
+    monkeypatch.setattr("app.chain.transfer.DownloadHistoryOper", lambda: history_oper)
+    monkeypatch.setattr("app.chain._transfer.DownloadHistoryOper", lambda: history_oper)
+    monkeypatch.setattr(
+        "app.chain.transfer.get_configured_system_config",
         lambda: SimpleNamespace(get=lambda key: None),
     )
-    monkeypatch.setattr("app.chain.transfer.format.get_configured_system_config", lambda: SimpleNamespace(get=lambda key: None))
-    monkeypatch.setattr("app.chain.transfer.request.StorageChain", lambda: SimpleNamespace())
-    monkeypatch.setattr("app.chain.transfer.records.StorageChain", lambda: SimpleNamespace())
-    monkeypatch.setattr("app.chain.transfer.request.MetaInfoPath", lambda *args, **kwargs: file_meta)
+    monkeypatch.setattr("app.chain._transfer.get_configured_system_config", lambda: SimpleNamespace(get=lambda key: None))
+    monkeypatch.setattr("app.chain.transfer.StorageChain", lambda: SimpleNamespace())
+    monkeypatch.setattr("app.chain._transfer.StorageChain", lambda: SimpleNamespace())
+    monkeypatch.setattr("app.chain.transfer.MetaInfoPath", lambda *args, **kwargs: file_meta)
 
     # 用真 MediaInfo 而非 SimpleNamespace：它会被装进 TransferTask.mediainfo，
     # 那个字段已标注为 MusicInfo | MediaInfo，pydantic 会做 isinstance 校验

@@ -97,13 +97,25 @@ def configure_database_governance(governance: DatabaseGovernance) -> None:
     _DATABASE_GOVERNANCE.append(governance)
 
 
-def reset_database_governance() -> None:
-    """撤销当前 lifespan 的数据库治理门面，恢复未装配状态。"""
-    _DATABASE_GOVERNANCE.clear()
-
-
 def get_database_governance() -> DatabaseGovernance:
     """返回启动阶段登记的数据库治理门面。"""
     if not _DATABASE_GOVERNANCE:
         raise RuntimeError("数据库治理服务尚未配置")
     return _DATABASE_GOVERNANCE[0]
+
+
+# --- fork 兼容：本地 modules_initializer 依赖的旧式数据库探测登记入口 ---
+_configured_database_health: DatabaseHealthService | None = None
+
+
+def configure_database_health(service: DatabaseHealthService) -> None:
+    """由启动组合根登记数据库探测服务。"""
+    global _configured_database_health
+    _configured_database_health = service
+
+
+def get_configured_database_health() -> DatabaseHealthService:
+    """返回启动阶段登记的数据库探测服务。"""
+    if _configured_database_health is None:
+        raise RuntimeError("数据库探测服务尚未配置")
+    return _configured_database_health

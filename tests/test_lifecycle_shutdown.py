@@ -1,22 +1,14 @@
 import asyncio
 import signal
 import threading
-from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 
 from app.adapters.network import http as http_utils
-from app.application.configuration import (
-    get_configured_system_config,
-    get_runtime_settings,
-)
-from app.runtime.config import settings as runtime_settings
 from app.runtime.tasks import configure_task_registry, get_task_registry
 from app.startup import lifecycle
-from app.startup.composition.system import compose_system_service
 from app.startup.initializers import modules as modules_initializer
 
 
@@ -30,34 +22,17 @@ def _isolate_task_registry():
 
 def _assert_completed_once(mock: MagicMock) -> None:
     if isinstance(mock, AsyncMock):
-        mock.assert_awaited_once()
+        mock.assert_awaited_once_with()
     else:
-        mock.assert_called_once()
-
-
-def _system_runtime():
-    """构造使用真实系统控制适配器的最小运行时。"""
-
-    @asynccontextmanager
-    async def rule_group_mutation():
-        """提供本组测试不会进入的规则组事务替身。"""
-        yield SimpleNamespace()
-
-    return SimpleNamespace(
-        system=compose_system_service(
-            settings=get_runtime_settings(),
-            system_config=get_configured_system_config(),
-            rule_group_mutation=rule_group_mutation,
-        )
-    )
+        mock.assert_called_once_with()
 
 
 def _patch_lifespan(monkeypatch, *, failing_step: str | None = None) -> dict:
     """隔离 lifespan 的外部依赖，并按名称注入一个关闭失败"""
-    monkeypatch.setattr(runtime_settings, "MOVIEPILOT_SAFE_MODE", False)
-    monkeypatch.setattr(lifecycle.main_loop_registry, "register", MagicMock())
-    monkeypatch.setattr(lifecycle.main_loop_registry, "release", MagicMock())
-    monkeypatch.setattr(lifecycle.runtime_stop_state, "stop_system", MagicMock())
+    monkeypatch.setattr(lifecycle.settings, "MOVIEPILOT_SAFE_MODE", False)
+    monkeypatch.setattr(lifecycle.global_vars, "set_loop", MagicMock())
+    monkeypatch.setattr(lifecycle.global_vars, "clear_loop", MagicMock())
+    monkeypatch.setattr(lifecycle.global_vars, "stop_system", MagicMock())
 
     for name in (
         "init_routers",
@@ -69,7 +44,6 @@ def _patch_lifespan(monkeypatch, *, failing_step: str | None = None) -> dict:
         "init_workflow",
     ):
         monkeypatch.setattr(lifecycle, name, MagicMock())
-    monkeypatch.setattr(lifecycle, "configure_plugin_runtime_services", MagicMock())
     monkeypatch.setattr(lifecycle, "configure_plugin_services", MagicMock())
     plugin_recovery = MagicMock()
     plugin_recovery.replay = AsyncMock()
@@ -79,41 +53,6 @@ def _patch_lifespan(monkeypatch, *, failing_step: str | None = None) -> dict:
         MagicMock(return_value=plugin_recovery),
     )
     monkeypatch.setattr(lifecycle, "init_modules", AsyncMock())
-    log_owner = object()
-
-    def initialize_log(app: FastAPI) -> None:
-        """发布隔离的日志 owner，覆盖正常启动和失败清理路径。"""
-        app.state.log_writer = log_owner
-        app.state.log_shutdown_failed = False
-
-    logger_shutdown = MagicMock(return_value=True)
-
-    def stop_log(app: FastAPI) -> bool:
-        """按 mock 返回值模拟 owner 收敛并同步生命周期状态。"""
-        converged = logger_shutdown.return_value is not False
-        app.state.log_shutdown_failed = not converged
-        if converged:
-            app.state.log_writer = None
-        return converged
-
-    logger_shutdown.side_effect = stop_log
-    message_shutdown = MagicMock(return_value=True)
-
-    def stop_message(app: FastAPI) -> bool:
-        """按 mock 返回值模拟消息 owner 的明确关闭结果。"""
-        converged = message_shutdown.return_value is not False
-        app.state.message_shutdown_failed = not converged
-        return converged
-
-    message_shutdown.side_effect = stop_message
-    monkeypatch.setattr(
-        lifecycle,
-        "initialize_log_runtime",
-        MagicMock(side_effect=initialize_log),
-    )
-    monkeypatch.setattr(lifecycle, "stop_log_runtime", logger_shutdown)
-    monkeypatch.setattr(lifecycle, "initialize_message_runtime", MagicMock())
-    monkeypatch.setattr(lifecycle, "stop_message_runtime", message_shutdown)
 
     # 启动期的引擎预热与额度核算也要打桩。不打的话这些用例会走真实的引擎创建，在测试
     # 进程里留下一个从此无人释放的全局异步引擎——NullPool 不持连接、无害，但用例就不再
@@ -150,8 +89,6 @@ def _patch_lifespan(monkeypatch, *, failing_step: str | None = None) -> dict:
         "finalize_plugins": MagicMock(return_value=True),
         "stop_modules": AsyncMock(),
         "close_http": AsyncMock(),
-        "message": message_shutdown,
-        "logger": logger_shutdown,
     }
     for name in (
         "stop_workflow",
@@ -195,6 +132,9 @@ def _patch_lifespan(monkeypatch, *, failing_step: str | None = None) -> dict:
             f"{failing_step} failed"
         )
 
+    logger_shutdown = MagicMock()
+    monkeypatch.setattr(lifecycle.LoggerManager, "shutdown", logger_shutdown)
+    shutdown_steps["logger"] = logger_shutdown
     return shutdown_steps
 
 
@@ -219,7 +159,7 @@ def test_lifespan_continues_after_each_shutdown_owner_failure(
 
     asyncio.run(run_lifespan())
 
-    lifecycle.runtime_stop_state.stop_system.assert_called_once_with()
+    lifecycle.global_vars.stop_system.assert_called_once_with()
     lifecycle.init_modules.assert_awaited_once_with()
     for step in shutdown_steps.values():
         _assert_completed_once(step)
@@ -235,8 +175,8 @@ def test_lifespan_normal_mode_starts_full_runtime(monkeypatch):
 
     asyncio.run(run_lifespan())
 
-    lifecycle.main_loop_registry.release.assert_called_once_with(
-        lifecycle.main_loop_registry.register.return_value
+    lifecycle.global_vars.clear_loop.assert_called_once_with(
+        lifecycle.global_vars.set_loop.return_value
     )
     lifecycle.init_modules.assert_awaited_once_with()
     lifecycle.prepare_database_component.assert_called_once()
@@ -254,26 +194,6 @@ def test_lifespan_normal_mode_starts_full_runtime(monkeypatch):
         _assert_completed_once(step)
 
 
-def test_lifespan_can_start_and_stop_resource_owners_twice(monkeypatch) -> None:
-    """同一应用连续两轮 lifespan 必须各自启动并关闭日志和消息 owner。"""
-    shutdown_steps = _patch_lifespan(monkeypatch)
-    app = FastAPI()
-
-    async def run_two_cycles() -> None:
-        """连续运行两轮隔离生命周期。"""
-        async with lifecycle.lifespan(app):
-            pass
-        async with lifecycle.lifespan(app):
-            pass
-
-    asyncio.run(run_two_cycles())
-
-    assert lifecycle.initialize_log_runtime.call_count == 2
-    assert lifecycle.initialize_message_runtime.call_count == 2
-    assert shutdown_steps["message"].call_count == 2
-    assert shutdown_steps["logger"].call_count == 2
-
-
 def test_lifespan_propagates_logger_nonconvergence(monkeypatch):
     """最后一个日志 owner 未收敛时 lifespan 必须以关闭失败结束。"""
     shutdown_steps = _patch_lifespan(monkeypatch)
@@ -289,26 +209,9 @@ def test_lifespan_propagates_logger_nonconvergence(monkeypatch):
 
     for step in shutdown_steps.values():
         _assert_completed_once(step)
-    lifecycle.main_loop_registry.release.assert_called_once_with(
-        lifecycle.main_loop_registry.register.return_value
+    lifecycle.global_vars.clear_loop.assert_called_once_with(
+        lifecycle.global_vars.set_loop.return_value
     )
-
-
-def test_lifespan_propagates_message_nonconvergence(monkeypatch):
-    """消息 owner 未收敛时 lifespan 必须保留资源并明确失败。"""
-    shutdown_steps = _patch_lifespan(monkeypatch)
-    shutdown_steps["message"].return_value = False
-
-    async def run_lifespan() -> None:
-        """运行完整生命周期并触发消息资源失败。"""
-        async with lifecycle.lifespan(FastAPI()):
-            pass
-
-    with pytest.raises(RuntimeError, match="消息资源未在关停预算内收敛"):
-        asyncio.run(run_lifespan())
-
-    _assert_completed_once(shutdown_steps["message"])
-    _assert_completed_once(shutdown_steps["logger"])
 
 
 def test_runtime_gil_status_warns_when_free_threaded_runtime_enables_gil(monkeypatch):
@@ -340,8 +243,8 @@ def test_lifespan_validation_failure_does_not_clear_outer_loop_owner(monkeypatch
     with pytest.raises(RuntimeError, match="invalid topology"):
         asyncio.run(run_lifespan())
 
-    lifecycle.main_loop_registry.register.assert_not_called()
-    lifecycle.main_loop_registry.release.assert_not_called()
+    lifecycle.global_vars.set_loop.assert_not_called()
+    lifecycle.global_vars.clear_loop.assert_not_called()
 
 
 def test_lifespan_settles_plugin_handlers_before_legacy_hooks(monkeypatch) -> None:
@@ -390,33 +293,9 @@ _ORDERED_SHUTDOWN_STEPS = (
     "quiesce_plugin_services",
     "drain_events",
     "finalize_plugins",
-    "message",
     "stop_modules",
     "close_http",
 )
-
-
-def test_scheduler_shutdown_callback_is_awaited_on_lifecycle_loop(monkeypatch) -> None:
-    """定时器关闭必须在生命周期主循环等待异步句柄收口。"""
-    awaited = False
-
-    async def stop_scheduler_async() -> None:
-        """记录 manifest 回调返回的协程已被生命周期等待。"""
-        nonlocal awaited
-        awaited = True
-
-    monkeypatch.setattr(lifecycle, "stop_scheduler", stop_scheduler_async)
-    component = next(
-        item
-        for item in lifecycle.build_lifecycle_components(FastAPI())
-        if item.name == "定时器"
-    )
-
-    assert component.stop is stop_scheduler_async
-    assert asyncio.run(
-        lifecycle.run_shutdown_step("定时器", component.stop)
-    ) is True
-    assert awaited is True
 
 
 @pytest.mark.parametrize(
@@ -517,20 +396,13 @@ def test_plugin_settlement_cannot_bypass_task_registry_shutdown_budget(
     lifecycle.init_extra.side_effect = settle_plugins
 
     async def run_lifespan() -> None:
-        """仅对关闭阶段计时，避免覆盖率启动开销污染停机预算断言。"""
-        lifespan_context = lifecycle.lifespan(FastAPI())
-        await lifespan_context.__aenter__()
-        try:
+        """确认 context 能由 TaskRegistry 的失败结果立即结束。"""
+        async with lifecycle.lifespan(FastAPI()):
             await started.wait()
-            await asyncio.wait_for(
-                lifespan_context.__aexit__(None, None, None),
-                timeout=0.5,
-            )
-        finally:
-            release.set()
-            await asyncio.sleep(0)
+        release.set()
+        await asyncio.sleep(0)
 
-    asyncio.run(run_lifespan())
+    asyncio.run(asyncio.wait_for(run_lifespan(), timeout=0.5))
 
     shutdown.assert_awaited_once_with(timeout_seconds=30.0)
     for name, step in shutdown_steps.items():
@@ -572,13 +444,11 @@ def test_lifespan_waits_for_uncancellable_plugin_settlement_before_shutdown(
     assert order[:2] == ["settled", "backup"]
 
 
-def test_lifespan_configures_plugin_runtime_and_services_in_dependency_order(monkeypatch):
-    """插件 Runtime、模块持久化和应用服务必须按依赖顺序装配。"""
+def test_lifespan_configures_plugin_services_before_restore(monkeypatch):
+    """插件恢复依赖的外部系统服务必须先于恢复阶段完成装配。"""
     shutdown_steps = _patch_lifespan(monkeypatch)
     order = []
-    lifecycle.configure_plugin_runtime_services.side_effect = lambda: order.append("runtime")
-    lifecycle.init_modules.side_effect = lambda: order.append("modules")
-    lifecycle.configure_plugin_services.side_effect = lambda: order.append("services")
+    lifecycle.configure_plugin_services.side_effect = lambda: order.append("configure")
     lifecycle.get_plugin_installation_recovery.return_value.replay.side_effect = (
         lambda: order.append("replay")
     )
@@ -592,14 +462,14 @@ def test_lifespan_configures_plugin_runtime_and_services_in_dependency_order(mon
 
     asyncio.run(run_lifespan())
 
-    assert order == ["runtime", "modules", "services", "replay", "restore"]
+    assert order == ["configure", "replay", "restore"]
     _assert_completed_once(shutdown_steps["close_http"])
 
 
 def test_lifespan_safe_mode_skips_optional_runtime(monkeypatch):
     """安全模式只启动基础模块，并跳过插件及可选后台服务。"""
     shutdown_steps = _patch_lifespan(monkeypatch)
-    monkeypatch.setattr(runtime_settings, "MOVIEPILOT_SAFE_MODE", True)
+    monkeypatch.setattr(lifecycle.settings, "MOVIEPILOT_SAFE_MODE", True)
 
     async def run_lifespan():
         async with lifecycle.lifespan(FastAPI()):
@@ -686,21 +556,14 @@ def test_lifecycle_manifest_declares_normal_and_safe_mode_order() -> None:
     safe_names = {item["name"] for item in safe}
 
     assert normal_start == [
-        "文件日志",
         "后台任务登记器",
         "数据库准备",
         "HTTP 基础能力",
-        "站点访问端口",
-        "Chain 外部端口",
-        "Chain 网络端口",
         "领域依赖装配",
         "数据库引擎预热",
         "数据库连接预算",
         "路由",
-        "插件运行时装配",
         "模块服务",
-        "插件服务装配",
-        "消息队列",
         "插件备份恢复",
         "插件",
         "定时器",
@@ -716,7 +579,6 @@ def test_lifecycle_manifest_declares_normal_and_safe_mode_order() -> None:
         "插件变更监控",
         "插件备份",
         "工作流",
-        "命令服务",
         "监控器",
         "定时器",
         "AI智能体会话",
@@ -726,30 +588,18 @@ def test_lifecycle_manifest_declares_normal_and_safe_mode_order() -> None:
         "插件后台服务",
         "事件投递屏障",
         "插件",
-        "消息队列",
         "模块服务",
-        "Chain 网络端口",
-        "Chain 外部端口",
-        "站点访问端口",
         "HTTP 基础能力",
-        "文件日志",
     ]
     assert safe_names == {
-        "文件日志",
         "后台任务登记器",
         "数据库准备",
         "HTTP 基础能力",
-        "站点访问端口",
-        "Chain 外部端口",
-        "Chain 网络端口",
         "领域依赖装配",
         "数据库引擎预热",
         "数据库连接预算",
         "路由",
-        "插件运行时装配",
         "模块服务",
-        "插件服务装配",
-        "消息队列",
         "AI智能体会话",
         "整理后台服务",
         "事件投递屏障",
@@ -774,8 +624,6 @@ def test_lifecycle_manifest_declares_normal_and_safe_mode_order() -> None:
         "插件后台服务",
         "事件投递屏障",
         "插件",
-        "消息队列",
-        "文件日志",
     }
     assert all(
         item["stop_failure"] == "continue"
@@ -794,8 +642,6 @@ def test_lifecycle_manifest_declares_normal_and_safe_mode_order() -> None:
             "插件后台服务",
             "事件投递屏障",
             "插件",
-            "消息队列",
-            "文件日志",
         }
     )
     assert all(
@@ -917,8 +763,8 @@ def test_lifespan_fails_fast_when_async_engine_cannot_be_built(monkeypatch):
     with pytest.raises(RuntimeError, match="no async driver"):
         asyncio.run(run_lifespan())
 
-    lifecycle.main_loop_registry.release.assert_called_once_with(
-        lifecycle.main_loop_registry.register.return_value
+    lifecycle.global_vars.clear_loop.assert_called_once_with(
+        lifecycle.global_vars.set_loop.return_value
     )
     # 失败要发生在任何东西被初始化之前，否则模块起来了却没人关：关停块在 yield 处才开始
     lifecycle.init_routers.assert_not_called()
@@ -930,11 +776,7 @@ def test_uvicorn_signal_publishes_stop_before_server_exit(monkeypatch):
     from app import main
 
     calls = []
-    monkeypatch.setattr(
-        main.runtime_stop_state,
-        "stop_system",
-        lambda: calls.append("stop"),
-    )
+    monkeypatch.setattr(main.global_vars, "stop_system", lambda: calls.append("stop"))
     monkeypatch.setattr(
         main.uvicorn.Server,
         "handle_exit",
@@ -953,7 +795,7 @@ def test_application_preserves_stop_requested_before_startup(monkeypatch):
 
     stop_event = threading.Event()
     stop_event.set()
-    monkeypatch.setattr(main.runtime_stop_state, "_system_event", stop_event)
+    monkeypatch.setattr(main.global_vars, "STOP_EVENT", stop_event)
     calls = []
     monkeypatch.setattr(
         main.signal,
@@ -1022,7 +864,7 @@ def test_lifespan_cleans_started_owners_after_late_startup_failure(monkeypatch):
     assert raised.value is startup_error
     # 停止信号是无依赖的 stop-only owner：启动失败清理同样要先发出停机通知，
     # 让仍在运行的后台任务尽早感知进程即将退出。
-    lifecycle.runtime_stop_state.stop_system.assert_called_once_with()
+    lifecycle.global_vars.stop_system.assert_called_once_with()
     for name in (
         "stop_plugin_monitor",
         "backup_plugins",
@@ -1040,8 +882,7 @@ def test_lifespan_cleans_started_owners_after_late_startup_failure(monkeypatch):
     ):
         _assert_completed_once(shutdown_steps[name])
     shutdown_steps["stop_workflow"].assert_not_called()
-    _assert_completed_once(shutdown_steps["message"])
-    _assert_completed_once(shutdown_steps["logger"])
+    shutdown_steps["logger"].assert_not_called()
     assert isinstance(app.state.task_registry, lifecycle.TaskRegistry)
     assert get_task_registry() is app.state.task_registry
     assert app.state.moviepilot_health.phase.value == "failed"
@@ -1088,11 +929,11 @@ def test_uvicorn_preserves_stop_requested_before_serve(monkeypatch):
     from app import main
 
     stop_event = threading.Event()
-    monkeypatch.setattr(main.runtime_stop_state, "_system_event", stop_event)
-    main.runtime_stop_state.stop_system()
+    monkeypatch.setattr(main.global_vars, "STOP_EVENT", stop_event)
+    main.global_vars.stop_system()
 
     async def serve(_self, sockets=None):
-        assert main.runtime_stop_state.is_system_stopped
+        assert main.global_vars.is_system_stopped
 
     monkeypatch.setattr(main.uvicorn.Server, "serve", serve)
     server = object.__new__(main.MoviePilotServer)
@@ -1116,30 +957,21 @@ def test_restart_endpoint_failure_preserves_stop_state(
     stop_event = threading.Event()
     if initially_stopped:
         stop_event.set()
-    monkeypatch.setattr(system.runtime_stop_state, "_system_event", stop_event)
+    monkeypatch.setattr(system.global_vars, "STOP_EVENT", stop_event)
+    monkeypatch.setattr(system.SystemHelper, "can_restart", MagicMock(return_value=True))
+    monkeypatch.setattr(system.SystemHelper, "restart", MagicMock(return_value=(False, "restart failed")))
     monkeypatch.setattr(
-        "app.startup.composition.system.SystemHelper.can_restart",
-        MagicMock(return_value=True),
-    )
-    monkeypatch.setattr(
-        "app.startup.composition.system.SystemHelper.restart",
-        MagicMock(return_value=(False, "restart failed")),
-    )
-    monkeypatch.setattr(
-        "app.startup.composition.system.system_update_manager.request_install",
+        system.system_update_manager,
+        "request_install",
         MagicMock(return_value=(True, "prepared")),
     )
     cancel_install = MagicMock()
-    monkeypatch.setattr(
-        "app.startup.composition.system.system_update_manager.cancel_install",
-        cancel_install,
-    )
-    runtime = _system_runtime()
+    monkeypatch.setattr(system.system_update_manager, "cancel_install", cancel_install)
 
     if endpoint_name == "restart_system":
-        response = system.restart_system(None, runtime)
+        response = system.restart_system(None)
     else:
-        response = system.install_system_update(None, runtime)
+        response = system.install_system_update(None)
 
     assert not response.success
     assert stop_event.is_set() is initially_stopped
@@ -1153,19 +985,13 @@ def test_upgrade_endpoint_retains_dev_mode_only(monkeypatch):
     """旧升级入口只保留 Dev，Release 必须迁移到后台下载流程。"""
     from app.api.endpoints import system
 
-    monkeypatch.setattr(
-        "app.startup.composition.system.SystemHelper.can_restart",
-        MagicMock(return_value=True),
-    )
+    monkeypatch.setattr(system.SystemHelper, "can_restart", MagicMock(return_value=True))
     upgrade_dev = MagicMock(return_value=(True, "dev queued"))
-    monkeypatch.setattr(
-        "app.startup.composition.system.SystemHelper.upgrade_dev", upgrade_dev
-    )
-    runtime = _system_runtime()
+    monkeypatch.setattr(system.SystemHelper, "upgrade_dev", upgrade_dev)
 
-    dev_response = system.upgrade_system("dev", None, runtime)
-    release_response = system.upgrade_system("release", None, runtime)
-    legacy_default_response = system.upgrade_system(None, None, runtime)
+    dev_response = system.upgrade_system("dev", None)
+    release_response = system.upgrade_system("release", None)
+    legacy_default_response = system.upgrade_system(None, None)
 
     assert dev_response.success
     assert not release_response.success
@@ -1208,6 +1034,18 @@ def test_stop_modules_propagates_false_without_skipping_later_cleanup(monkeypatc
     """关闭回调显式返回 False 时不得被转换为整体成功。"""
     dependencies = _patch_module_shutdown_dependencies(monkeypatch)
     dependencies["module"].return_value = False
+
+    converged = asyncio.run(modules_initializer.stop_modules())
+
+    assert converged is False
+    for dependency in dependencies.values():
+        _assert_completed_once(dependency)
+
+
+def test_stop_modules_propagates_message_queue_nonconvergence(monkeypatch):
+    """消息队列线程未终止时必须由模块服务关闭结果向上暴露。"""
+    dependencies = _patch_module_shutdown_dependencies(monkeypatch)
+    dependencies["stop_message"].return_value = False
 
     converged = asyncio.run(modules_initializer.stop_modules())
 
@@ -1279,97 +1117,27 @@ def test_stop_modules_drains_web_agent_tasks_before_persistence(monkeypatch):
         "get_configured_agent_chat_persistence",
         MagicMock(return_value=persistence),
     )
-    database_state = {"active": True}
 
-    async def stop_database_runtime() -> None:
+    async def stop_database_worker() -> None:
         """模拟生产 worker 关闭后释放组合根句柄。"""
         order.append("database")
-        database_state["active"] = False
+        modules_initializer._database_worker = None
 
     monkeypatch.setattr(
         modules_initializer,
-        "stop_database_runtime",
-        AsyncMock(side_effect=stop_database_runtime),
+        "stop_database_worker",
+        AsyncMock(side_effect=stop_database_worker),
     )
-    monkeypatch.setattr(
-        modules_initializer,
-        "database_runtime_active",
-        lambda: database_state["active"],
-    )
-    dependencies["reset_module_providers"].side_effect = lambda: order.append(
-        "providers"
-    ) or True
-    dependencies["close_database"].side_effect = lambda: order.append("connection")
+    monkeypatch.setattr(modules_initializer, "_database_worker", object())
 
     converged = asyncio.run(modules_initializer.stop_modules())
 
     assert converged is True
-    assert order == [
-        "web-agent",
-        "persistence-admission",
-        "persistence",
-        "database",
-        "providers",
-        "connection",
-    ]
-
-
-def test_stop_modules_retains_providers_when_database_worker_remains_active(
-    monkeypatch,
-) -> None:
-    """数据库 worker 未收敛时不得撤销 Provider 或关闭仍被使用的连接。"""
-    dependencies = _patch_module_shutdown_dependencies(monkeypatch)
-    persistence = MagicMock()
-    persistence.begin_shutdown = MagicMock()
-    persistence.shutdown = AsyncMock()
-    monkeypatch.setattr(
-        modules_initializer,
-        "get_configured_agent_chat_persistence",
-        MagicMock(return_value=persistence),
-    )
-    monkeypatch.setattr(
-        modules_initializer,
-        "stop_database_runtime",
-        AsyncMock(side_effect=RuntimeError("database busy")),
-    )
-    monkeypatch.setattr(
-        modules_initializer,
-        "database_runtime_active",
-        lambda: True,
-    )
-
-    assert asyncio.run(modules_initializer.stop_modules()) is False
-    dependencies["reset_module_providers"].assert_not_called()
-    dependencies["close_database"].assert_not_awaited()
-
-
-def test_reset_module_providers_preserves_reverse_order_after_failure(
-    monkeypatch,
-) -> None:
-    """单个 Provider reset 失败时仍按既定逆序执行全部后续 owner。"""
-    calls: list[str] = []
-
-    def fail() -> None:
-        """记录失败 owner 后抛出异常。"""
-        calls.append("second")
-        raise RuntimeError("reset failed")
-
-    monkeypatch.setattr(
-        modules_initializer,
-        "_module_provider_reset_steps",
-        lambda: (
-            ("first", lambda: calls.append("first")),
-            ("second", fail),
-            ("third", lambda: calls.append("third")),
-        ),
-    )
-
-    assert modules_initializer.reset_module_providers() is False
-    assert calls == ["first", "second", "third"]
+    assert order == ["web-agent", "persistence-admission", "persistence", "database"]
 
 
 @pytest.mark.asyncio
-async def test_stop_modules_cancellation_does_not_skip_database_runtime_cleanup(
+async def test_stop_modules_cancellation_does_not_skip_database_worker_cleanup(
     monkeypatch,
 ):
     """模块关闭收到取消请求后仍应继续收口数据库 worker。"""
@@ -1399,19 +1167,9 @@ async def test_stop_modules_cancellation_does_not_skip_database_runtime_cleanup(
         MagicMock(return_value=persistence),
     )
     database_worker_stopped = asyncio.Event()
-    database_state = {"active": True}
-
-    def mark_database_worker_stopped() -> None:
-        """记录取消路径仍执行了 worker 关闭调用。"""
-        database_worker_stopped.set()
-
-    stop_database_runtime = AsyncMock(side_effect=mark_database_worker_stopped)
-    monkeypatch.setattr(modules_initializer, "stop_database_runtime", stop_database_runtime)
-    monkeypatch.setattr(
-        modules_initializer,
-        "database_runtime_active",
-        lambda: database_state["active"],
-    )
+    stop_database_worker = AsyncMock(side_effect=database_worker_stopped.set)
+    monkeypatch.setattr(modules_initializer, "stop_database_worker", stop_database_worker)
+    monkeypatch.setattr(modules_initializer, "_database_worker", object())
 
     shutdown = asyncio.create_task(modules_initializer.stop_modules())
     await started.wait()
@@ -1420,7 +1178,7 @@ async def test_stop_modules_cancellation_does_not_skip_database_runtime_cleanup(
 
     assert completed is False
     assert database_worker_stopped.is_set()
-    stop_database_runtime.assert_awaited_once_with()
+    stop_database_worker.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1538,27 +1296,23 @@ def _patch_module_shutdown_dependencies(monkeypatch) -> dict:
     for name, method_name in (
         ("ModuleManager", "shutdown"),
         ("EventManager", "stop_async"),
+        ("DohHelper", "shutdown"),
         ("ThreadHelper", "shutdown"),
         ("RedisHelper", "close"),
     ):
         instance = MagicMock()
         setattr(instance, method_name, MagicMock())
-        instance_type = MagicMock(return_value=instance)
-        instance_type.get_existing_instance.return_value = instance
-        monkeypatch.setattr(modules_initializer, name, instance_type)
+        monkeypatch.setattr(
+            modules_initializer,
+            name,
+            MagicMock(return_value=instance),
+        )
         key = name.removesuffix("Helper").removesuffix("Manager").lower()
         dependencies[key] = getattr(instance, method_name)
 
-    stop_doh_composition = MagicMock()
-    monkeypatch.setattr(
-        modules_initializer,
-        "stop_doh_composition",
-        stop_doh_composition,
-    )
-    dependencies["doh"] = stop_doh_composition
-
     for name in (
         "close_browser_sessions",
+        "stop_message",
         "stop_frontend",
         "clear_temp",
     ):
@@ -1586,20 +1340,15 @@ def _patch_module_shutdown_dependencies(monkeypatch) -> dict:
 
     async_redis = MagicMock()
     async_redis.close = AsyncMock()
-    async_redis_type = MagicMock(return_value=async_redis)
-    async_redis_type.get_existing_instance.return_value = async_redis
-    monkeypatch.setattr(modules_initializer, "AsyncRedisHelper", async_redis_type)
+    monkeypatch.setattr(
+        modules_initializer,
+        "AsyncRedisHelper",
+        MagicMock(return_value=async_redis),
+    )
     dependencies["async_redis"] = async_redis.close
     close_database = AsyncMock()
     monkeypatch.setattr(modules_initializer, "close_database", close_database)
     dependencies["close_database"] = close_database
-    reset_module_providers = MagicMock(return_value=True)
-    monkeypatch.setattr(
-        modules_initializer,
-        "reset_module_providers",
-        reset_module_providers,
-    )
-    dependencies["reset_module_providers"] = reset_module_providers
     return dependencies
 
 

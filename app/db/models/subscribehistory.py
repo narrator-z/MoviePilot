@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Float, Index, Integer, String, or_, select
+from sqlalchemy import Integer, String, Float, JSON, Index, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -156,7 +156,7 @@ class SubscribeHistory(Base):
     @classmethod
     def _identity_condition(
             cls,
-            media_source: MediaSource | str | None = None,
+            media_source: Optional[MediaSource] = None,
             media_id: Optional[str] = None,
             music_type: Optional[str] = None,
     ):
@@ -175,7 +175,7 @@ class SubscribeHistory(Base):
 
     @classmethod
     def exists(
-            cls, db: Session, media_source: MediaSource | str, media_id: str,
+            cls, db: Session, media_source: MediaSource, media_id: str,
             season: Optional[int] = None,
             episode_group: Optional[str] = None,
             music_type: Optional[str] = None,
@@ -194,7 +194,7 @@ class SubscribeHistory(Base):
 
     @classmethod
     async def async_exists(
-            cls, db: AsyncSession, media_source: MediaSource | str, media_id: str,
+            cls, db: AsyncSession, media_source: MediaSource, media_id: str,
             season: Optional[int] = None,
             episode_group: Optional[str] = None,
             music_type: Optional[str] = None,

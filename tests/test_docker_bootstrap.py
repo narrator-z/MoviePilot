@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "docker" / "launcher.sh"
 UPDATER = ROOT / "docker" / "update.sh"
@@ -29,7 +30,11 @@ def _write_bundle(path: Path, label: str, *, extra_files: tuple[str, ...] = ()) 
 def test_dockerfile_control_bundle_build_checks_fail_closed() -> None:
     dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "FROM ghcr.io/astral-sh/uv:latest AS uv" in dockerfile
+    assert (
+        "FROM ghcr.io/astral-sh/uv:0.12.5@sha256:"
+        "e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 AS uv"
+        in dockerfile
+    )
     assert "COPY --from=uv /uv /usr/local/bin/uv" in dockerfile
     assert "COPY pyproject.toml uv.lock ./" in dockerfile
     assert "python3 -m venv --without-pip ${VENV_PATH}" in dockerfile
@@ -74,9 +79,7 @@ runtime-free-threaded = ["free-threaded"]
         encoding="utf-8",
     )
     (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
-    runtime_selector = (
-        project / "app" / "runtime" / "dependencies" / "profile.py"
-    )
+    runtime_selector = project / "app" / "runtime" / "dependencies.py"
     runtime_selector.parent.mkdir(parents=True)
     runtime_selector.write_text("print('runtime-free-threaded')\n", encoding="utf-8")
     venv_bin = tmp_path / "venv" / "bin"
@@ -122,78 +125,6 @@ runtime-free-threaded = ["free-threaded"]
 
     command = uv_log.read_text(encoding="utf-8")
     assert "--no-default-groups --group runtime-free-threaded" in command
-
-
-def test_update_sync_supports_legacy_runtime_selector_during_rollback(
-    tmp_path: Path,
-) -> None:
-    """更新回滚必须能读取改名前旧快照中的依赖 profile 选择器。"""
-    project = tmp_path / "legacy-project"
-    project.mkdir()
-    (project / "pyproject.toml").write_text(
-        """
-[project]
-name = "moviepilot"
-version = "0"
-
-[dependency-groups]
-runtime-standard = ["standard"]
-runtime-free-threaded = ["free-threaded"]
-""",
-        encoding="utf-8",
-    )
-    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
-    legacy_selector = project / "app" / "runtime" / "dependencies.py"
-    legacy_selector.parent.mkdir(parents=True)
-    legacy_selector.write_text("print('runtime-standard')\n", encoding="utf-8")
-
-    venv_bin = tmp_path / "venv" / "bin"
-    venv_bin.mkdir(parents=True)
-    python_log = tmp_path / "python.log"
-    python_bin = venv_bin / "python3"
-    python_bin.write_text(
-        "#!/bin/bash\nprintf '%s\\n' \"$*\" > "
-        f"{shlex.quote(str(python_log))}\nprintf '%s\\n' runtime-standard\n",
-        encoding="utf-8",
-    )
-    python_bin.chmod(0o755)
-    uv_bin = tmp_path / "uv"
-    uv_log = tmp_path / "uv.log"
-    uv_bin.write_text(
-        f"#!/bin/bash\nprintf '%s\\n' \"$*\" > {shlex.quote(str(uv_log))}\n",
-        encoding="utf-8",
-    )
-    uv_bin.chmod(0o755)
-    script = textwrap.dedent(
-        f"""\
-        CONFIG_DIR="$1"
-        VENV_PATH="$2"
-        UV_BIN="$3"
-        source {UPDATER!s}
-        PACKAGE_ENV=()
-        UV_OPTIONS=()
-        sync_project_dependencies_for "$4"
-        """
-    )
-
-    subprocess.run(
-        [
-            "bash",
-            "-c",
-            script,
-            "legacy-runtime-profile-test",
-            str(tmp_path / "config"),
-            str(tmp_path / "venv"),
-            str(uv_bin),
-            str(project),
-        ],
-        check=True,
-    )
-
-    assert python_log.read_text(encoding="utf-8").strip() == str(legacy_selector)
-    assert "--no-default-groups --group runtime-standard" in uv_log.read_text(
-        encoding="utf-8"
-    )
 
 
 def test_build_profiles_use_full_runtime_capability_probe() -> None:
@@ -1237,7 +1168,7 @@ def test_pending_update_recovers_previous_payload_on_next_start(tmp_path: Path) 
     (previous_public / "index.html").write_text("old-front", encoding="utf-8")
     config_dir = tmp_path / "config"
     (config_dir / "temp").mkdir(parents=True)
-    (config_dir / "temp" / "__update_pending__").write_text("prepared\n", encoding="utf-8")
+    (config_dir / "temp" / "__update_pending__").write_text("dependencies\n", encoding="utf-8")
     uv_bin = tmp_path / "uv"
     uv_log = tmp_path / "uv.log"
     uv_bin.write_text(
@@ -1288,118 +1219,14 @@ def test_pending_update_recovers_previous_payload_on_next_start(tmp_path: Path) 
     )
 
     assert result.stdout == "old|old-front|cleared|true\n"
-    assert not uv_log.exists()
-
-
-def test_pending_dependency_update_keeps_current_payload_for_database_safety(
-    tmp_path: Path,
-) -> None:
-    """依赖阶段中断时保留当前载荷，避免新数据库回退到旧迁移链。"""
-    live_app = tmp_path / "app"
-    live_public = tmp_path / "public"
-    previous_app = tmp_path / "previous-app"
-    previous_public = tmp_path / "previous-public"
-    (live_app / "app").mkdir(parents=True)
-    live_public.mkdir()
-    (previous_app / "app").mkdir(parents=True)
-    previous_public.mkdir()
-    (live_app / "app" / "new.py").write_text("new", encoding="utf-8")
-    (live_public / "index.html").write_text("new-front", encoding="utf-8")
-    (previous_app / "app" / "old.py").write_text("old", encoding="utf-8")
-    (previous_public / "index.html").write_text("old-front", encoding="utf-8")
-    config_dir = tmp_path / "config"
-    pending_file = config_dir / "temp" / "__update_pending__"
-    pending_file.parent.mkdir(parents=True)
-    pending_file.write_text("dependencies\n", encoding="utf-8")
-    script = textwrap.dedent(
-        f"""\
-        CONFIG_DIR="$1"
-        source {UPDATER!s}
-        APP_DIR="$2"
-        PUBLIC_DIR="$3"
-        UPDATE_PREVIOUS_APP="$4"
-        UPDATE_PREVIOUS_PUBLIC="$5"
-        INFO() {{ :; }}
-        WARN() {{ :; }}
-        ERROR() {{ :; }}
-        recover_pending_update
-        printf '%s|%s|%s|%s|%s|%s\n' \
-            "$([[ -f "${{APP_DIR}}/app/new.py" ]] && printf new || printf missing)" \
-            "$([[ -f "${{PUBLIC_DIR}}/index.html" ]] && head -n1 "${{PUBLIC_DIR}}/index.html" || printf missing)" \
-            "$(tr -d '\r\n' < "${{UPDATE_PENDING_FILE}}")" \
-            "${{UPDATE_RECOVERY_COMPLETED}}" \
-            "${{UPDATE_RECOVERY_BLOCKED}}" \
-            "$([[ -f "${{UPDATE_PREVIOUS_APP}}/app/old.py" ]] && printf retained || printf absent)"
-        """
+    assert uv_log.read_text(encoding="utf-8").startswith(
+        f"sync --project {live_app} --locked --inexact --no-dev"
     )
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            script,
-            "pending-dependency-recovery-test",
-            str(config_dir),
-            str(live_app),
-            str(live_public),
-            str(previous_app),
-            str(previous_public),
-        ],
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-    assert result.stdout == "new|new-front|blocked|true|true|retained\n"
-
-
-def test_launcher_uses_current_control_for_dependency_recovery(
-    tmp_path: Path,
-) -> None:
-    """依赖阶段 pending 不得先选旧代控制脚本触发回退。"""
-    source = tmp_path / "source"
-    image = tmp_path / "image"
-    previous = tmp_path / "previous-app"
-    config = tmp_path / "config"
-    _write_bundle(source, "new")
-    _write_bundle(image, "image")
-    _write_bundle(previous / "docker", "old")
-    pending_file = config / "temp" / "__update_pending__"
-    pending_file.parent.mkdir(parents=True)
-    pending_file.write_text("dependencies\n", encoding="utf-8")
-    script = textwrap.dedent(
-        f"""\
-        source {LAUNCHER!s}
-        SOURCE_CONTROL_DIR="$1"
-        IMAGE_CONTROL_DIR="$2"
-        RUNTIME_ROOT="$3"
-        UPDATE_PENDING_FILE="$4"
-        UPDATE_PREVIOUS_APP="$5"
-        source_bundle_is_trusted() {{ control_bundle_generation "$1" > /dev/null; }}
-        launcher_main
-        """
-    )
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            script,
-            "dependency-launcher-test",
-            str(source),
-            str(image),
-            str(tmp_path / "run"),
-            str(pending_file),
-            str(previous),
-        ],
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-    assert result.stdout == "new\n"
 
 
 def test_update_transaction_keeps_marker_when_backup_cleanup_fails(tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
+    pending_file = config_dir / "temp" / "__update_pending__"
     log_file = tmp_path / "cleanup.log"
     script = textwrap.dedent(
         f"""\
@@ -1545,6 +1372,7 @@ def test_staged_payload_swap_failure_restores_previous_generation(tmp_path: Path
     (stage_app / "app" / "new.py").write_text("new", encoding="utf-8")
     (stage_public / "index.html").write_text("new-front", encoding="utf-8")
     config_dir = tmp_path / "config"
+    uv_log = tmp_path / "uv.log"
     script = textwrap.dedent(
         f"""\
         CONFIG_DIR="$1"

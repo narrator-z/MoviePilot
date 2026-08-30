@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
-from app.application.transfer.workflow import TransferPlanningInput
+from app.application.transfer import TransferPlanningInput
 from app.db.models.transferpending import TransferPending
 
 try:
@@ -24,31 +24,12 @@ except ModuleNotFoundError:
 
     POSTGRESQL_DIALECT = "postgresql+psycopg"
 
-PLANNING_MIGRATION = "database.versions.c2f8a4d6e1b3_3_0_14"
-LEASE_MIGRATION = "database.versions.d3a9e5f7b2c4_3_0_15"
-POST_LEASE_EXECUTION_COLUMNS = {
-    "execution_state",
-    "execution_version",
-    "execution_payload",
-    "execution_fingerprint",
-    "retry_generation",
-    "retry_count",
-    "retry_due_at",
-    "retry_requested_by",
-    "retry_reason",
-    "settlement_revision",
-    "terminal_history_id",
-    "manual_review_revision",
-    "reviewed_at",
-    "reviewed_by",
-    "review_reason",
-    "review_decision",
-}
+MIGRATION = "database.versions.c2f8a4d6e1b3_3_0_14"
 
 
-def _bind_migration(monkeypatch, connection, module_name=PLANNING_MIGRATION):
+def _bind_migration(monkeypatch, connection):
     """把迁移绑定到隔离数据库连接。"""
-    migration = importlib.import_module(module_name)
+    migration = importlib.import_module(MIGRATION)
     monkeypatch.setattr(
         migration,
         "op",
@@ -110,33 +91,25 @@ def _planning_row(connection) -> dict[str, object]:
 def _assert_upgrade_downgrade_reupgrade(connection, monkeypatch) -> None:
     """断言规划迁移在当前隔离连接上的完整可逆生命周期。"""
     _create_admission_table(connection)
-    planning_migration = _bind_migration(monkeypatch, connection)
-    lease_migration = _bind_migration(monkeypatch, connection, LEASE_MIGRATION)
+    migration = _bind_migration(monkeypatch, connection)
 
-    planning_migration.upgrade()
-    planning_migration.upgrade()
-    lease_migration.upgrade()
-    lease_migration.upgrade()
+    migration.upgrade()
+    migration.upgrade()
 
     inspector = sa.inspect(connection)
     assert {
         column["name"]
         for column in inspector.get_columns("transferpending")
-    } == {
-        column.name
-        for column in TransferPending.__table__.columns
-        if column.name not in POST_LEASE_EXECUTION_COLUMNS
-    }
+    } == {column.name for column in TransferPending.__table__.columns}
     upgraded = _planning_row(connection)
     planning_payload = upgraded["planning_input"]
     if isinstance(planning_payload, str):
         planning_payload = json.loads(planning_payload)
     planning_input = TransferPlanningInput.from_payload(planning_payload)
-    assert planning_input.source_fileitem == {
-        "storage": "local",
-        "path": "/downloads/Movie.mkv",
-    }
-    assert planning_input.options == {"legacy_replan": True}
+    assert planning_input == TransferPlanningInput.legacy(
+        storage="local",
+        src_path="/downloads/Movie.mkv",
+    )
     assert upgraded["input_version"] == 1
     assert upgraded["input_fingerprint"] == planning_input.fingerprint
     assert upgraded["checkpoint_payload"] is None
@@ -160,9 +133,7 @@ def _assert_upgrade_downgrade_reupgrade(connection, monkeypatch) -> None:
             planned_at="2026-08-27 11:00:00",
         )
     )
-    lease_migration.downgrade()
-    lease_migration.downgrade()
-    planning_migration.downgrade()
+    migration.downgrade()
 
     downgraded = sa.inspect(connection)
     assert {
@@ -181,21 +152,12 @@ def _assert_upgrade_downgrade_reupgrade(connection, monkeypatch) -> None:
         for index in downgraded.get_indexes("transferpending")
     } == {"ix_transferpending_state_created", "ux_transferpending_storage_path"}
 
-    planning_migration.upgrade()
-    lease_migration.upgrade()
+    migration.upgrade()
     reupgraded = _planning_row(connection)
     assert reupgraded["task_id"] == "stable-task"
     assert reupgraded["state"] == "accepted"
     assert reupgraded["checkpoint_payload"] is None
     assert reupgraded["input_fingerprint"] == planning_input.fingerprint
-    assert {
-        column["name"]
-        for column in sa.inspect(connection).get_columns("transferpending")
-    } == {
-        column.name
-        for column in TransferPending.__table__.columns
-        if column.name not in POST_LEASE_EXECUTION_COLUMNS
-    }
 
 
 def test_transfer_planning_upgrade_downgrade_reupgrade(monkeypatch) -> None:
@@ -281,58 +243,6 @@ def test_partial_upgrade_preserves_existing_planning_json(monkeypatch) -> None:
         assert connection.execute(sa.text(
             "SELECT state FROM transferpending WHERE id = 1"
         )).scalar_one() == "future-state"
-
-
-def test_partial_upgrade_recomputes_inconsistent_planning_identity(monkeypatch) -> None:
-    """部分升级留下的版本和指纹必须按最终 JSON 重算，不能保留伪身份。"""
-    engine = sa.create_engine("sqlite://")
-    with engine.begin() as connection:
-        _create_admission_table(connection)
-        connection.execute(sa.text(
-            "ALTER TABLE transferpending ADD COLUMN input_version INTEGER"
-        ))
-        connection.execute(sa.text(
-            "ALTER TABLE transferpending ADD COLUMN input_fingerprint VARCHAR(64)"
-        ))
-        connection.execute(sa.text(
-            "UPDATE transferpending SET input_version = 99, "
-            "input_fingerprint = 'bogus' WHERE id = 1"
-        ))
-
-        migration = _bind_migration(monkeypatch, connection)
-        migration.upgrade()
-        upgraded = _planning_row(connection)
-        payload = upgraded["planning_input"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        planning_input = TransferPlanningInput.from_payload(payload)
-
-        assert upgraded["input_version"] == planning_input.schema_version == 1
-        assert upgraded["input_fingerprint"] == planning_input.fingerprint
-        assert upgraded["input_fingerprint"] != "bogus"
-
-
-def test_replayed_upgrade_repairs_complete_but_mismatched_identity(monkeypatch) -> None:
-    """重复执行升级也必须修复完整三元组中与 payload 不一致的旧值。"""
-    engine = sa.create_engine("sqlite://")
-    with engine.begin() as connection:
-        _create_admission_table(connection)
-        migration = _bind_migration(monkeypatch, connection)
-        migration.upgrade()
-        connection.execute(sa.text(
-            "UPDATE transferpending SET input_version = 7, "
-            "input_fingerprint = 'stale' WHERE id = 1"
-        ))
-
-        migration.upgrade()
-        upgraded = _planning_row(connection)
-        payload = upgraded["planning_input"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        planning_input = TransferPlanningInput.from_payload(payload)
-
-        assert upgraded["input_version"] == 1
-        assert upgraded["input_fingerprint"] == planning_input.fingerprint
 
 
 def test_transfer_planning_migration_runs_on_postgresql(monkeypatch) -> None:

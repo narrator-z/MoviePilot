@@ -14,13 +14,12 @@ from app.application.security.auth import (
     AuthService,
     AuthUserRepository,
 )
-from app.application.security.passkey import PasskeyRepository, PasskeyService
+from app.application.security.passkeys import PasskeyRepository, PasskeyService
 from app.application.security.user import (
     AsyncUnitOfWork,
     UserRepository,
     UserService,
 )
-from app.application.security.userconfig import get_configured_user_configuration
 from app.schemas.token import TokenPayload as _SchemaTokenPayload
 from app.startup.composition.context import HostRuntime
 
@@ -37,7 +36,6 @@ def get_user_service(
         unit_of_work=cast(
             AsyncUnitOfWork, runtime.persistence.async_transaction(db)
         ),
-        configuration=get_configured_user_configuration(),
     )
 
 
@@ -66,13 +64,19 @@ def get_current_user(
     token_data: _SchemaTokenPayload = Depends(verify_token),
     runtime: HostRuntime = Depends(get_host_runtime),
 ) -> Any:
-    """读取令牌对应用户，不存在时返回 403。"""
+    """读取令牌对应用户。
+
+    fork 自定义：令牌可正常解出但库中已无此用户时返回 401（未认证，可重试）而非 403。
+    前端对 403 会直接强制登出，对 401 会清 Bearer 后用资源 Cookie 兜底重试；
+    插件微前端在 HTTPS 下偶发携带 sub 不匹配的令牌，返回 401 可让 Cookie 兜底成功、
+    避免误登出。
+    """
     user_repository = cast(
         AuthUserRepository, runtime.authentication.user_repository(db)
     )
     user = user_repository.get_by_id(token_data.sub)
     if not user:
-        raise HTTPException(status_code=403, detail="用户不存在")
+        raise HTTPException(status_code=401, detail="用户不存在")
     return user
 
 
@@ -81,13 +85,17 @@ async def get_current_user_async(
     token_data: _SchemaTokenPayload = Depends(verify_token),
     runtime: HostRuntime = Depends(get_host_runtime),
 ) -> Any:
-    """异步读取令牌对应用户，不存在时返回 403。"""
+    """异步读取令牌对应用户。
+
+    fork 自定义：同 ``get_current_user``，令牌可解但库无用户时返回 401 而非 403，
+    避免前端/插件微前端在 Cookie 兜底可恢复的场景下被强制登出。
+    """
     user_repository = cast(
         UserRepository, runtime.authentication.user_repository(db)
     )
     user = await user_repository.async_get_by_id(token_data.sub)
     if not user:
-        raise HTTPException(status_code=403, detail="用户不存在")
+        raise HTTPException(status_code=401, detail="用户不存在")
     return user
 
 

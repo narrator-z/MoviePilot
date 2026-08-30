@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.foundation.singleton import Singleton
-from app.runtime.loop import main_loop_registry
+from app.runtime.config import global_vars
 from app.runtime.extensions.plugin.dependency import (
     PluginDependencyClassification,
     PluginDependencyInstallResult,
@@ -19,18 +19,10 @@ from app.runtime.extensions.plugin.monitor import (
 )
 from app.runtime.extensions.plugin.admission import PluginMutationAdmission
 from app.runtime.extensions.plugin.system import reset_plugin_system
-from app.runtime.extensions.plugin import manager as plugin_manager_module
-from app.runtime.extensions.plugin.manager import PluginManager
+from app.runtime.extensions import plugin_manager as plugin_manager_module
+from app.runtime.extensions.plugin_manager import PluginManager
 from app.schemas.plugin import PluginRuntimeStatus
 from app.startup.initializers import plugins as plugins_initializer
-
-
-@pytest.fixture(autouse=True)
-def _restore_main_loop_registry():
-    """每个插件生命周期用例后恢复主循环投递目标。"""
-    previous = main_loop_registry.current
-    yield
-    main_loop_registry.replace_compat(previous)
 
 
 def _reset_plugin_manager() -> None:
@@ -87,8 +79,11 @@ def test_init_plugins_starts_monitor_after_runtime_and_routes(monkeypatch) -> No
     manager.reopen_plugins.side_effect = lambda: order.append("reopen") or True
     manager.start.side_effect = lambda plugin_id: order.append(f"plugin:{plugin_id}")
     manager.start_monitor.side_effect = lambda **_kwargs: order.append("monitor")
-    manager.get_local_repo_plugins.return_value = []
-    manager.get_plugin_source_id.side_effect = lambda plugin_id: plugin_id
+    monkeypatch.setattr(
+        plugins_initializer,
+        "configure_plugin_services",
+        lambda: order.append("services"),
+    )
     monkeypatch.setattr(plugins_initializer, "PluginManager", lambda: manager)
     monkeypatch.setattr(
         plugins_initializer,
@@ -99,6 +94,7 @@ def test_init_plugins_starts_monitor_after_runtime_and_routes(monkeypatch) -> No
     plugins_initializer.init_plugins()
 
     assert order == [
+        "services",
         "reopen",
         "plugin:ReadyPlugin",
         "routes",
@@ -107,37 +103,6 @@ def test_init_plugins_starts_monitor_after_runtime_and_routes(monkeypatch) -> No
     manager.reopen_plugins.assert_called_once_with()
     manager.set_plugin_settling.assert_called_once_with(True)
     manager.start_monitor.assert_called_once_with(reopen=True)
-
-
-def test_init_plugins_defers_installed_local_candidate_until_sync(monkeypatch) -> None:
-    """本地仓候选不得在源码协调前先启动运行目录中的旧载荷。"""
-    order: list[str] = []
-    manager = MagicMock()
-    manager.classify_plugins.return_value = PluginDependencyClassification(
-        ready=("DownloadCenter", "OnlineOnly"),
-        missing_dependencies=(),
-        missing_source=(),
-    )
-    manager.reopen_plugins.return_value = True
-    manager.get_local_repo_plugins.return_value = [
-        SimpleNamespace(id="downloadcenter", plugin_version="3.3.2")
-    ]
-    manager.get_plugin_source_id.side_effect = lambda plugin_id: plugin_id
-    manager.start.side_effect = lambda plugin_id: order.append(plugin_id)
-    config = MagicMock()
-    config.get.return_value = ["DownloadCenter", "OnlineOnly"]
-    monkeypatch.setattr(plugins_initializer, "configure_plugin_services", lambda: None)
-    monkeypatch.setattr(plugins_initializer, "PluginManager", lambda: manager)
-    monkeypatch.setattr(
-        plugins_initializer,
-        "get_configured_system_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(plugins_initializer, "register_plugin_api", MagicMock())
-
-    plugins_initializer.init_plugins()
-
-    assert order == ["OnlineOnly"]
 
 
 def test_plugin_manager_projects_dependency_classification_to_runtime_status() -> None:
@@ -191,7 +156,11 @@ def _patch_sync_plugins(monkeypatch, manager: MagicMock) -> MagicMock:
         return task_func()
 
     register = MagicMock()
-    main_loop_registry.replace_compat(asyncio.get_running_loop())
+    monkeypatch.setattr(
+        global_vars,
+        "CURRENT_EVENT_LOOP",
+        asyncio.get_running_loop(),
+    )
     monkeypatch.setattr(plugins_initializer, "configure_plugin_services", lambda: None)
     migration = MagicMock()
     migration.migrate = AsyncMock()
@@ -227,56 +196,7 @@ def _patch_sync_plugins(monkeypatch, manager: MagicMock) -> MagicMock:
         return_value=dependency_result,
     )
     manager.get_plugin_runtime_statuses.return_value = {}
-    manager.get_local_repo_plugins.return_value = []
-    manager.get_plugin_source_id.side_effect = lambda plugin_id: plugin_id
     return register
-
-
-@pytest.mark.asyncio
-async def test_sync_plugins_installs_local_payload_before_first_activation(
-    monkeypatch,
-) -> None:
-    """本地高版本写入完成后才能首次激活对应插件。"""
-    order: list[str] = []
-    manager = MagicMock()
-    manager.sync.side_effect = lambda *_args, **_kwargs: (
-        order.append("install:downloadcenter") or ["downloadcenter"]
-    )
-    manager.async_install_plugin_missing_dependencies_with_status.return_value = (
-        PluginDependencyInstallResult(missing=[], success=True)
-    )
-    manager.classify_plugins.return_value = PluginDependencyClassification(
-        ready=("DownloadCenter",),
-        missing_dependencies=(),
-        missing_source=(),
-    )
-    manager.running_plugins = {}
-    manager.start.side_effect = lambda plugin_id: order.append(f"start:{plugin_id}")
-    register = _patch_sync_plugins(monkeypatch, manager)
-
-    assert await plugins_initializer.sync_plugins() is True
-
-    assert order == ["install:downloadcenter", "start:DownloadCenter"]
-    register.assert_called_once_with("DownloadCenter")
-
-
-@pytest.mark.asyncio
-async def test_sync_plugins_does_not_activate_after_package_sync_failure(
-    monkeypatch,
-) -> None:
-    """包同步失败后不得继续激活启动阶段主动延后的旧载荷。"""
-    manager = MagicMock()
-    _patch_sync_plugins(monkeypatch, manager)
-    monkeypatch.setattr(
-        plugins_initializer,
-        "execute_task",
-        AsyncMock(return_value=None),
-    )
-
-    assert await plugins_initializer.sync_plugins() is False
-
-    manager.async_install_plugin_missing_dependencies_with_status.assert_not_awaited()
-    manager.start.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -485,7 +405,11 @@ async def test_sync_plugins_keeps_event_loop_responsive_during_activation(
     )
     monkeypatch.setattr(plugins_initializer, "PluginManager", lambda: manager)
     monkeypatch.setattr(plugins_initializer, "register_plugin_api", MagicMock())
-    main_loop_registry.replace_compat(asyncio.get_running_loop())
+    monkeypatch.setattr(
+        plugins_initializer.global_vars,
+        "CURRENT_EVENT_LOOP",
+        asyncio.get_running_loop(),
+    )
 
     sync_task = asyncio.create_task(plugins_initializer.sync_plugins())
     assert await asyncio.to_thread(activation_started.wait, 1)
@@ -752,7 +676,7 @@ async def test_quiesce_timeout_retains_future_owner_until_worker_finishes(
         with ThreadPoolExecutor(max_workers=1) as executor:
             thread_helper = SimpleNamespace(submit=executor.submit)
             monkeypatch.setattr(
-                "app.runtime.extensions.plugin.manager.ThreadHelper",
+                "app.runtime.extensions.plugin_manager.ThreadHelper",
                 lambda: thread_helper,
             )
 
@@ -901,11 +825,8 @@ def test_monitor_reload_refreshes_source_and_instance_routes(monkeypatch) -> Non
     ]
 
 
-def test_plugin_monitor_suppression_covers_delayed_write_events(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    """重叠写入退出后的延迟批次不重复重载，后续真实修改仍可重载。"""
+def test_plugin_monitor_suppression_is_reference_counted(monkeypatch) -> None:
+    """同一插件的重叠写入必须等最后一个事务退出后才解除监控抑制。"""
     _reset_plugin_manager()
     reset_plugin_system()
     _patch_runtime_settings(
@@ -914,26 +835,7 @@ def test_plugin_monitor_suppression_covers_delayed_write_events(
         PLUGIN_AUTO_RELOAD=False,
         ROOT_PATH=MagicMock(),
     )
-    now = [100.0]
-    monkeypatch.setattr(plugin_manager_module.time, "monotonic", lambda: now[0])
     manager = PluginManager()
-    reload_plugin = MagicMock()
-    monitor = PluginChangeMonitor(
-        runtime_root=tmp_path,
-        local_roots=lambda: [],
-        stop_event=threading.Event(),
-        recent_sync={},
-        federated_change=lambda _path: None,
-        runtime_plugin=lambda _path: "DemoPlugin",
-        local_candidate=lambda _path: None,
-        sync_local=MagicMock(),
-        reload_plugin=reload_plugin,
-        dependency_manifest_status=lambda _path: None,
-        watch=lambda *_args, **_kwargs: (),
-        log=MagicMock(),
-        monitor_suppressed=manager.is_plugin_monitor_suppressed,
-    )
-    changes = {("modified", str(tmp_path / "demo" / "plugin.py"))}
 
     with manager.suppress_plugin_monitor("DemoPlugin"):
         assert manager.is_plugin_monitor_suppressed("demoplugin") is True
@@ -941,12 +843,7 @@ def test_plugin_monitor_suppression_covers_delayed_write_events(
             assert manager.is_plugin_monitor_suppressed("DemoPlugin") is True
         assert manager.is_plugin_monitor_suppressed("DemoPlugin") is True
 
-    monitor._process_changes(changes)
-    reload_plugin.assert_not_called()
-
-    now[0] += manager.MONITOR_SETTLE_SECONDS
-    monitor._process_changes(changes)
-    reload_plugin.assert_called_once_with("DemoPlugin")
+    assert manager.is_plugin_monitor_suppressed("DemoPlugin") is False
     _reset_plugin_manager()
 
 

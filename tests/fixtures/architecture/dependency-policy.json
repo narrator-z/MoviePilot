@@ -10,6 +10,17 @@
   },
   "allowed_sccs": [
     {
+      "classification": "temporary_debt",
+      "id": "chain-package-root",
+      "modules": [
+        "app.chain",
+        "app.chain._messaging",
+        "app.chain._recognition"
+      ],
+      "reason": "ChainBase 仍由包根导出，包根又加载消息和识别实现；S2-L2 负责拆出 app.chain.base 并清零该环。",
+      "tracking": "ARCH-107"
+    },
+    {
       "classification": "contained_vendor",
       "id": "themoviedb-vendored-package",
       "modules": [
@@ -59,7 +70,148 @@
       "parent_package_expansion": false,
       "imported_symbols": false
     },
-    "entries": [],
+    "entries": [
+      {
+        "source": "app.application.backup",
+        "target": "app.adapters.system.backup.files",
+        "tracking": "S2-L5"
+      },
+      {
+        "source": "app.application.directory",
+        "target": "app.adapters.system.host",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.image",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.image",
+        "target": "app.adapters.network.ip",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.messaging.ingress",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.rss",
+        "target": "app.adapters.network.browser",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.rss",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.rss",
+        "target": "app.adapters.system",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.rules",
+        "target": "app.adapters.system",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.security.cookie",
+        "target": "app.adapters.external.ocr",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.security.cookie",
+        "target": "app.adapters.network.browser",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.security.cookie",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.security.passkey",
+        "target": "app.adapters.cache.redis",
+        "tracking": "S2-L4"
+      },
+      {
+        "source": "app.application.torrent",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.application.transfer",
+        "target": "app.adapters.system.host",
+        "tracking": "S2-L6"
+      },
+      {
+        "source": "app.chain._recognition",
+        "target": "app.adapters.external.server",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain._transfer",
+        "target": "app.adapters.system.host",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.download",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.download",
+        "target": "app.adapters.system.host",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.message",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.scraping",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.site",
+        "target": "app.adapters.external.cookiecloud",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.site",
+        "target": "app.adapters.network.browser",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.site",
+        "target": "app.adapters.network.cloudflare",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.site",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.subscribe",
+        "target": "app.adapters.external.server",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.system",
+        "target": "app.adapters.network.http",
+        "tracking": "S2-L7"
+      },
+      {
+        "source": "app.chain.system",
+        "target": "app.adapters.system.host",
+        "tracking": "S2-L7"
+      }
+    ],
     "target_state": "empty"
   },
   "direct_egress": {
@@ -95,20 +247,57 @@
     },
     "groups": [
       {
+        "classification": "temporary_debt",
+        "reason_code": "direct_http",
+        "tracking": "S2-L7",
+        "target_state": "empty",
+        "reason": "普通宿主 HTTP 与 SDK client factory 尚未收口；provider 的直接请求和注入 client 必须在同一迁移中处理。",
+        "facts": [
+          {"source": "app.agent.llm.provider", "target": "httpx", "kind": "raw_transport", "fingerprint": "a68ad216d86b4b33aa8c35572c26f7993245c0c12dd512e962bcacb46d7f15fc"},
+          {"source": "app.modules.filemanager.storages.alipan", "target": "requests", "kind": "raw_transport", "fingerprint": "82d84425f58ed9664a6e2a4ece53240198c95a0f9fee5d0afd0a11e3c459ecf6"},
+          {"source": "app.modules.filemanager.storages.u115", "target": "httpx", "kind": "raw_transport", "fingerprint": "f6678109963f9973d5d15e38e5f5e8dca01ec5e0117598ad1ac877b841ff7961"},
+          {"source": "app.modules.ugreen.api", "target": "requests", "kind": "raw_transport", "fingerprint": "a266dd2b74f216b289682e5d83c0b5a7d0d08b5447d79c165659b6d7302656d6"}
+        ]
+      },
+      {
+        "classification": "temporary_debt",
+        "reason_code": "requestutils_session_bridge",
+        "tracking": "S2-L7",
+        "target_state": "empty",
+        "reason": "模块构造或接收 requests Session，并管理生命周期或桥接给 RequestUtils；迁移后不再直接拥有 transport。",
+        "facts": [
+          {"source": "app.modules.bangumi.bangumi", "target": "requests", "kind": "raw_transport", "fingerprint": "e5baf8a89b8661025169e9eec8d3c13d30660f63b35d94ec4896cd97e7fde3bf"},
+          {"source": "app.modules.douban.apiv2", "target": "requests", "kind": "raw_transport", "fingerprint": "6e871a27b88263676797edd65093d0b38db48f77fb5db2bb581b7b82e9b2977d"},
+          {"source": "app.modules.imdb.api", "target": "requests", "kind": "raw_transport", "fingerprint": "3d05532e62d2cddf3bb05495196176b76aa02216c2b0d868cf9281d2257d9627"},
+          {"source": "app.modules.indexer.parser", "target": "requests", "kind": "raw_transport", "fingerprint": "facdb091442bacba0fc0f631637643e95e18545bd7ab63f1d49d67a9a928d016"},
+          {"source": "app.modules.musicbrainz", "target": "requests", "kind": "raw_transport", "fingerprint": "c54a10dd672fb0ebb32a536ae42c221ad434313466cc108d43e433dd84cac9a5"},
+          {"source": "app.modules.plex.plex", "target": "requests", "kind": "raw_transport", "fingerprint": "93f20b9c01571553e9601f4b9f4ee9471073e65f938cb635320f72fa41ec3843"},
+          {"source": "app.modules.trimemedia.api", "target": "requests", "kind": "raw_transport", "fingerprint": "aecbe00404b2866c918c939bee5f1002045fc72aed4440c85e0811a4379913e4"}
+        ]
+      },
+      {
+        "classification": "temporary_debt",
+        "reason_code": "direct_dns",
+        "tracking": "S2-L6",
+        "target_state": "empty",
+        "reason": "SSRF 校验仍在 Application 直接执行 DNS I/O；迁移到注入的解析 Port 后清零。",
+        "facts": [
+          {"source": "app.application.security.url", "target": "socket.getaddrinfo", "kind": "protocol_operation", "fingerprint": "89c563fdb640259584563fc718f7104a7b4dc6717e97b9c9e449f70f74a9532b"}
+        ]
+      },
+      {
         "classification": "approved_exception",
         "reason_code": "canonical_transport",
         "owner": "$source",
         "reason": "精确 Adapter source 持有其 Redis、浏览器、HTTP 或 DNS transport；上层只能消费 Port 或统一 Facade。",
         "facts": [
-          {"source": "app.adapters.cache.redis", "target": "redis", "kind": "network_sdk", "fingerprint": "49f0b28ef731b25aa772d6887febd762d03b981a1f52d6dfc8dff82f2f489f81"},
+          {"source": "app.adapters.cache.redis", "target": "redis", "kind": "network_sdk", "fingerprint": "9d455a5298d4373ff18d74a9d498a3dd797bcb5f5543af9776c0c741c30362c7"},
           {"source": "app.adapters.network.browser", "target": "cloakbrowser", "kind": "network_sdk", "fingerprint": "15c1777b14eb9147d6cab9783f67577011714f9220600dda5db5269b59726173"},
           {"source": "app.adapters.network.doh", "target": "socket.getaddrinfo", "kind": "protocol_operation", "fingerprint": "4ff03419dfacc6bf582b7d4421dd5a0666a63f8ca79be2b1e625f4c8f4c96b71"},
           {"source": "app.adapters.network.doh", "target": "urllib.request", "kind": "raw_transport", "fingerprint": "6f5f5fd3da02a9e780ea5e7cc1e47bd962314a1a358f14b4ee698485f96ab52b"},
-          {"source": "app.adapters.network.http", "target": "httpx", "kind": "raw_transport", "fingerprint": "c00458c868240f1adfe6278ba22bd5c4782e9bd2fcf896114c2288bf82981ee3"},
           {"source": "app.adapters.network.http", "target": "httpx2", "kind": "raw_transport", "fingerprint": "a70799e9930ff79cd28ebed92836c8108cd2d18bc668e0081f68533d84f69d0d"},
-          {"source": "app.adapters.network.http", "target": "requests", "kind": "raw_transport", "fingerprint": "dffac27a2e24803dd7c50b238ba44b4f106b7b105e63a487edc12258f65c710d"},
-          {"source": "app.adapters.network.ip", "target": "socket.gethostbyname", "kind": "protocol_operation", "fingerprint": "a43e8969e2f26546fcf925b258728b309f1b9b966ff3c7b48a64273b8c82d048"},
-          {"source": "app.adapters.network.resolver", "target": "socket.getaddrinfo", "kind": "protocol_operation", "fingerprint": "1b1ce6763d730d7aa9c35d32a668560013c939467dcb3087357ffa53653ff306"}
+          {"source": "app.adapters.network.http", "target": "requests", "kind": "raw_transport", "fingerprint": "95fb4576cec363355f40aa1758d90fbb09242a2b1d029b7ab5ab65e2aaca12f8"},
+          {"source": "app.adapters.network.ip", "target": "socket.gethostbyname", "kind": "protocol_operation", "fingerprint": "a43e8969e2f26546fcf925b258728b309f1b9b966ff3c7b48a64273b8c82d048"}
         ]
       },
       {
@@ -127,16 +316,18 @@
         "reason": "命名 SDK 或显式注入的 SDK transport 由该精确 source 持有，不授权新增调用方。",
         "facts": [
           {"source": "app.agent.llm.capability", "target": "openai", "kind": "network_sdk", "fingerprint": "60160ab01b60be2c9794b9724a50b90f8875c6a10748ff9392a1e4bc7d48c334"},
+          {"source": "app.agent.llm.helper", "target": "google.genai", "kind": "network_sdk", "fingerprint": "d41688ecda4c5de296fabb0d0d25c79a7b0f29f67ccdd44569dc1110e1db9b86"},
           {"source": "app.agent.llm.helper", "target": "httpx", "kind": "raw_transport", "fingerprint": "caeccd432f48d9a23948dd5b9220ddbebc57d2b2936bfa499fc7d4876e935ea8"},
           {"source": "app.agent.llm.helper", "target": "langchain_anthropic", "kind": "network_sdk", "fingerprint": "c8d2c3166c4d42d61e7ef38a25080cac0f93422f47393df6dc19b329a7f72265"},
           {"source": "app.agent.llm.helper", "target": "langchain_aws", "kind": "network_sdk", "fingerprint": "51dd02f5e2305cce4e1f6f29b4ed47edf54dde9f6557781178a6edf96bfeeb6b"},
           {"source": "app.agent.llm.helper", "target": "langchain_deepseek", "kind": "network_sdk", "fingerprint": "bcf8b1ffae0995cfc33cfe26609cef8014cd2ce036b845c2a88c0cd878b1ebc4"},
           {"source": "app.agent.llm.helper", "target": "langchain_google_genai", "kind": "network_sdk", "fingerprint": "79ae88c63908da9ea36dcfc23c4ad5345bc5d1977b80cc2e0b89292d063ed8ee"},
           {"source": "app.agent.llm.helper", "target": "langchain_openai", "kind": "network_sdk", "fingerprint": "15775bf1694780d5cf516e6cc3d3b5174ebb25e3038433132d3071e6abceba52"},
-          {"source": "app.agent.llm.discovery", "target": "boto3", "kind": "network_sdk", "fingerprint": "9b49a7988025e00f5758115804281695d11e5327b8cd49f662ec579d29419f11"},
-          {"source": "app.agent.llm.discovery", "target": "botocore", "kind": "network_sdk", "fingerprint": "74285ca518bd6e863adc78e84a387abd84c4f8fd22872e447a9c4acf64386b66"},
-          {"source": "app.agent.llm.discovery", "target": "google.genai", "kind": "network_sdk", "fingerprint": "5b87a7bb210b521bd21971fb6e3d19ca450658548670106e3c756c0ce3a83cad"},
-          {"source": "app.agent.llm.discovery", "target": "openai", "kind": "network_sdk", "fingerprint": "fff154461ff3fdfdf1daea0530dcb68589d6ad7a67f3966e3b86338b483e6dfd"},
+          {"source": "app.agent.llm.helper", "target": "openai", "kind": "network_sdk", "fingerprint": "dbebd5e9fa38b2a525a5a2e5a92d855ba9d05762410590bfb544e665fe38f620"},
+          {"source": "app.agent.llm.provider", "target": "boto3", "kind": "network_sdk", "fingerprint": "04ca4b5ecbda1531266d5f53817dde061dcfdd3293cabf9301fc8d8e4c281a88"},
+          {"source": "app.agent.llm.provider", "target": "botocore", "kind": "network_sdk", "fingerprint": "fbeaa702703665ca60233a153aade0da7e49dfb6fe31f72e5593c883fb7d3f11"},
+          {"source": "app.agent.llm.provider", "target": "google.genai", "kind": "network_sdk", "fingerprint": "b545cffb169b87f87606c17762b5d9da3f35372bd411c1f4ebba010b3d7c3ebb"},
+          {"source": "app.agent.llm.provider", "target": "openai", "kind": "network_sdk", "fingerprint": "ffac3b355eb640f6421299cf838cb4e24866a39afabd9dcfd8d0f340925dc1a8"},
           {"source": "app.agent.tools.impl.search_web", "target": "ddgs", "kind": "network_sdk", "fingerprint": "377e73bb3be804b825d60ad6e792344ca633de107f8c4dbb45d50a34a4dfa04b"},
           {"source": "app.api.endpoints.message", "target": "pywebpush", "kind": "network_sdk", "fingerprint": "7d83ca0dc89dfb6af1cdd7bc90d922105de94222e4e3a44bba4f53bbd97bc31b"},
           {"source": "app.modules.discord.discord", "target": "discord", "kind": "network_sdk", "fingerprint": "e1486525fedbfe574aa47d60b483426c8c48e4e27fa35dbe34f6cd2f47d37c86"},
@@ -198,8 +389,9 @@
         "owner": "$source",
         "reason": "运行期 import 仅用于响应类型、协议解析或兼容补丁，uses 为空或不获取网络能力。",
         "facts": [
-          {"source": "app.adapters.external.plugin.client", "target": "httpx2", "kind": "raw_transport", "fingerprint": "2d249b0906bc7f8fa29f569d6bcc5667d4290a551b1a06bcdf85e09ec50a793d"},
-          {"source": "app.adapters.external.plugin.client", "target": "requests", "kind": "raw_transport", "fingerprint": "b5239e7eee9c23569b7fec66791e56bcc226db86a8d09ee7fc58d3ba8bc14f09"},
+          {"source": "app.adapters.external.market", "target": "httpx2", "kind": "raw_transport", "fingerprint": "d4a648e8188818c0465013fc63cc3e49899da4df38541344303c251896564b1f"},
+          {"source": "app.adapters.external.market", "target": "requests", "kind": "raw_transport", "fingerprint": "ecc5368adfced20741e5ed8696008ea7555a4a81ceda6d7149e09f5f3d0ff7e3"},
+          {"source": "app.modules.douban.apiv2", "target": "httpx2", "kind": "raw_transport", "fingerprint": "edc337b12976d978cad3f83d0fa6faf71b2af2d814926dff890d5acc94f0a0a6"},
           {"source": "app.modules.emby.emby", "target": "requests", "kind": "raw_transport", "fingerprint": "6c4c17fe170226ea1272f5859bc119c2775442cabe8ce2a9edcabaf9c37bec31"},
           {"source": "app.modules.filemanager.storages.smb", "target": "smbprotocol", "kind": "network_sdk", "fingerprint": "f02686afd99c59820dffa7b4c2627a0be1ad62980c98a9cd33b7564697842b22"},
           {"source": "app.modules.jellyfin.jellyfin", "target": "requests", "kind": "raw_transport", "fingerprint": "5c46d09ca9a4bcc0bae21ca5d554ef09baa3f901c562b27c5f5ee1439c7746b5"},
@@ -224,7 +416,7 @@
         "owner": "$source",
         "reason": "测试守卫包装 getaddrinfo 以拒绝真实外联，不执行新的 DNS 解析策略。",
         "facts": [
-          {"source": "app.testing.network", "target": "socket.getaddrinfo", "kind": "protocol_operation", "fingerprint": "ebf33718b54c81e1f575401da4a0bef5aa0e1ddc284e201f557897feeca71c6d"}
+          {"source": "app.testing.network_guard", "target": "socket.getaddrinfo", "kind": "protocol_operation", "fingerprint": "2518de211c9ba32ccbc004cf58fe9c98837fe8ac95fe8ffb6ea82897b28d753f"}
         ]
       }
     ]

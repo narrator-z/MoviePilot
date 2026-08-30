@@ -10,10 +10,12 @@ from app.application.configuration import (
     get_api_runtime_config_snapshot,
 )
 from app.application.messaging.chat import AsyncAgentChatRepository, AsyncUnitOfWork
-from app.application.outbox import AsyncOutboxDispatchStore, AsyncOutboxStager
-from app.application.subscription.contract import (
-    SubscriptionHistoryStagingPort,
-    SubscriptionStagingPort,
+from app.application.outbox import AsyncOutboxTransaction
+from app.application.subscription.delete import SubscribeDeletionRepository
+from app.application.subscription.identity import SubscribeIdentityDeletionRepository
+from app.application.subscription.mutation import (
+    SubscriptionHistoryMutationRepository,
+    SubscriptionMutationRepository,
 )
 from app.runtime.tasks import TaskRegistry, get_task_registry
 from app.startup.composition.context import (
@@ -131,7 +133,11 @@ async def get_subscription_session(
 def get_subscription_repository(
     session: object = Depends(get_subscription_session),
     runtime: SubscriptionRuntime = Depends(get_subscription_runtime),
-) -> SubscriptionStagingPort:
+) -> (
+    SubscriptionMutationRepository
+    | SubscribeDeletionRepository
+    | SubscribeIdentityDeletionRepository
+):
     """构造绑定当前请求会话的订阅仓储。"""
     return runtime.repository(session)
 
@@ -139,7 +145,7 @@ def get_subscription_repository(
 def get_subscription_history_repository(
     session: object = Depends(get_subscription_session),
     runtime: SubscriptionRuntime = Depends(get_subscription_runtime),
-) -> SubscriptionHistoryStagingPort:
+) -> SubscriptionHistoryMutationRepository:
     """构造绑定当前请求会话的订阅历史仓储。"""
     return runtime.history_repository(session)
 
@@ -155,13 +161,6 @@ def get_subscription_transaction(
 def get_subscription_outbox(
     session: object = Depends(get_subscription_session),
     runtime: SubscriptionRuntime = Depends(get_subscription_runtime),
-) -> AsyncOutboxStager:
+) -> AsyncOutboxTransaction:
     """构造与订阅写入共享请求会话的 outbox 端口。"""
     return runtime.outbox(session)
-
-
-def get_subscription_outbox_store(
-    runtime: SubscriptionRuntime = Depends(get_subscription_runtime),
-) -> AsyncOutboxDispatchStore:
-    """返回使用独立短事务的订阅 outbox 派发存储。"""
-    return runtime.dispatch_store

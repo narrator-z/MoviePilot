@@ -26,14 +26,14 @@ from app.foundation.environment import (
 from app.foundation.url import UrlUtils
 from app.runtime.log import (
     LogConfigModel,
+    NonBlockingFileHandler,
     configure_log_settings,
+    configure_log_writer,
     log_settings,
     logger,
 )
-from app.runtime.loop import MainLoopRegistry, main_loop_registry
 from app.runtime.stop import runtime_stop_state
 from app.runtime.version import get_app_version
-from app.runtime.webpush import WebPushRegistry, webpush_registry
 from app.schemas.types import MediaType
 
 
@@ -106,6 +106,9 @@ class ConfigModel(BaseModel):
     DEBUG: bool = False
     # 是否开发模式
     DEV: bool = False
+    # 高级设置模式
+    ADVANCED_MODE: bool = True
+
     # ==================== 安全认证配置 ====================
     # 密钥
     SECRET_KEY: str = secrets.token_urlsafe(32)
@@ -116,11 +119,11 @@ class ConfigModel(BaseModel):
     # TOKEN过期时间
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
     # RESOURCE_TOKEN过期时间
-    RESOURCE_ACCESS_TOKEN_EXPIRE_SECONDS: int = 60 * 30
-    # 超级管理员用户名；V3 首次启动时为空，由初始化页面设置
-    SUPERUSER: str = ""
-    # 超级管理员密码不再通过部署配置初始化，始终由数据库存储哈希
-    SUPERUSER_PASSWORD: str = ""
+    RESOURCE_ACCESS_TOKEN_EXPIRE_SECONDS: int = 60 * 60 * 24 * 8
+    # 超级管理员初始用户名
+    SUPERUSER: str = "admin"
+    # 超级管理员初始密码
+    SUPERUSER_PASSWORD: Optional[str] = None
     # 辅助认证，允许通过外部服务进行认证、单点登录以及自动创建用户
     AUXILIARY_AUTH_ENABLE: bool = False
     # API密钥，需要更换
@@ -563,9 +566,10 @@ class ConfigModel(BaseModel):
 
     # ==================== 插件配置 ====================
     # 插件市场仓库地址，多个地址使用,分隔，地址以/结尾
-    PLUGIN_MARKET: str = (
-        "https://github.com/jxxghp/MoviePilot-Plugins"
-    )
+    PLUGIN_MARKET: str = "https://github.com/jxxghp/MoviePilot-Plugins"
+    # fork 自定义：在默认源之后追加社区与市场源（含 fork 自有源），
+    # 用追加而非覆盖，避免上游更新默认值时整段冲突。
+    # 实际追加在 Settings.__init__ 末尾的 _append_fork_plugin_markets() 完成。
     # 插件安装数据共享
     PLUGIN_STATISTIC_SHARE: bool = True
     # 安装版本统计上报
@@ -797,13 +801,16 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         if isinstance(value, (list, dict, set)):
             value = copy.deepcopy(value)
         value = value.strip() if isinstance(value, str) else None
-        if not value:
-            return None, str(original_value) not in {"", "None"}
-        if len(value) < 16:
+        if not value or len(value) < 16:
             new_token = secrets.token_urlsafe(16)
-            logger.warning(
-                f"'API_TOKEN' 长度不足 16 个字符，存在安全隐患，已随机生成新的【API_TOKEN】{new_token}"
-            )
+            if not value:
+                logger.info(
+                    f"'API_TOKEN' 未设置，已随机生成新的【API_TOKEN】{new_token}"
+                )
+            else:
+                logger.warning(
+                    f"'API_TOKEN' 长度不足 16 个字符，存在安全隐患，已随机生成新的【API_TOKEN】{new_token}"
+                )
             return new_token, True
         return value, str(value) != str(original_value)
 
@@ -905,6 +912,62 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
             )
         return default, True
 
+    @classmethod
+    def persist_signature_secrets(cls, data: Dict[str, Any]) -> None:
+        """fork 自定义：签名密钥持久化。
+
+        未在 app.env/环境变量中显式配置 SECRET_KEY / RESOURCE_SECRET_KEY 时，
+        随机生成并写回 app.env。否则每次进程启动都会用新的随机密钥，导致已签发的
+        JWT 全部验签失败（403），前端被强制登出。
+
+        抽成独立方法，便于上游更新 config.py 时仅 re-apply 这一处调用。
+        """
+        for _secret_field in ("SECRET_KEY", "RESOURCE_SECRET_KEY"):
+            if _secret_field not in data:
+                _new_key = secrets.token_urlsafe(32)
+                cls.update_env_config(_secret_field, None, _new_key)
+                logger.info(f"'{_secret_field}' 未持久化，已随机生成并写入 'app.env'")
+                data[_secret_field] = _new_key
+
+    @classmethod
+    def _append_fork_plugin_markets(cls, data: Dict[str, Any]) -> None:
+        """fork 自定义：在默认插件市场源之后追加 fork 社区与市场源。
+
+        用追加而非覆盖，避免上游更新 PLUGIN_MARKET 默认值时整段冲突。
+        """
+        _fork_markets = [
+            "https://github.com/thsrite/MoviePilot-Plugins",
+            "https://github.com/honue/MoviePilot-Plugins",
+            "https://github.com/InfinityPacer/MoviePilot-Plugins",
+            "https://github.com/DDSRem-Dev/MoviePilot-Plugins",
+            "https://github.com/madrays/MoviePilot-Plugins",
+            "https://github.com/justzerock/MoviePilot-Plugins",
+            "https://github.com/KoWming/MoviePilot-Plugins",
+            "https://github.com/wikrin/MoviePilot-Plugins",
+            "https://github.com/HankunYu/MoviePilot-Plugins",
+            "https://github.com/baozaodetudou/MoviePilot-Plugins",
+            "https://github.com/Aqr-K/MoviePilot-Plugins",
+            "https://github.com/hotlcc/MoviePilot-Plugins-Third",
+            "https://github.com/gxterry/MoviePilot-Plugins",
+            "https://github.com/DzAvril/MoviePilot-Plugins",
+            "https://github.com/mrtian2016/MoviePilot-Plugins",
+            "https://github.com/Hqyel/MoviePilot-Plugins-Third",
+            "https://github.com/xijin285/MoviePilot-Plugins",
+            "https://github.com/Seed680/MoviePilot-Plugins",
+            "https://github.com/imaliang/MoviePilot-Plugins",
+            "https://github.com/narrator-z/MoviePilot-PluginsV2",
+        ]
+        # 基础源：优先取 data 中已配置值，否则取 model 字段默认值（上游默认 jxxghp）。
+        _current = data.get("PLUGIN_MARKET")
+        if not _current:
+            _field = cls.model_fields.get("PLUGIN_MARKET")
+            _current = _field.default if _field is not None else ""
+        _current = _current or ""
+        _existing = {m.strip() for m in _current.split(",") if m.strip()}
+        _added = [m for m in _fork_markets if m not in _existing]
+        if _added:
+            data["PLUGIN_MARKET"] = ",".join([_current] + _added) if _current else ",".join(_added)
+
     @model_validator(mode="before")
     @classmethod
     def generic_type_validator(cls, data: Any):  # noqa
@@ -938,6 +1001,12 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
             if needs_update:
                 cls.update_env_config("API_TOKEN", data["API_TOKEN"], converted_value)
                 data["API_TOKEN"] = converted_value
+
+        # fork 自定义：签名密钥持久化（独立方法，便于上游更新时仅 re-apply 此调用）。
+        cls.persist_signature_secrets(data)
+
+        # fork 自定义：在默认插件市场源之后追加 fork 社区与市场源。
+        cls._append_fork_plugin_markets(data)
 
         # 对其他字段进行类型转换
         for field_name, field_info in cls.model_fields.items():
@@ -1333,7 +1402,7 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
     def VAPID(self):
         """返回 Web Push 使用的 VAPID 配置。"""
         return {
-            "subject": f"mailto:{self.SUPERUSER or 'moviepilot'}@movie-pilot.org",
+            "subject": f"mailto:{self.SUPERUSER}@movie-pilot.org",
             "publicKey": "BH3w49sZA6jXUnE-yt4jO6VKh73lsdsvwoJ6Hx7fmPIDKoqGiUl2GEoZzy-iJfn4SfQQcx7yQdHf9RknwrL_lSM",
             "privateKey": "JTixnYY0vEw97t9uukfO3UWKfHKJdT5kCQDiv3gu894",
         }
@@ -1380,6 +1449,7 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
 # 实例化配置
 settings = Settings()
 configure_log_settings(settings)
+configure_log_writer(NonBlockingFileHandler(), settings.LOG_PATH)
 
 
 class GlobalVar(object):
@@ -1387,45 +1457,22 @@ class GlobalVar(object):
     全局标识
     """
 
+    # 系统停止事件
+    # webpush订阅
+    SUBSCRIPTIONS: List[dict] = []
+    # webpush订阅读写锁
+    SUBSCRIPTIONS_LOCK: threading.Lock = threading.Lock()
     # 需应急停止的工作流
     EMERGENCY_STOP_WORKFLOWS: List[int] = []
     # 需应急停止文件整理
     EMERGENCY_STOP_TRANSFER: List[str] = []
+    # 生命周期登记的主事件循环
+    CURRENT_EVENT_LOOP: Optional[AbstractEventLoop] = None
 
-    def __init__(
-        self,
-        *,
-        loop_registry: Optional[MainLoopRegistry] = None,
-        push_registry: Optional[WebPushRegistry] = None,
-    ) -> None:
-        """绑定兼容门面背后的显式 owner；普通实例保持循环状态隔离。"""
-        self._loop_registry = loop_registry or MainLoopRegistry()
-        self._push_registry = push_registry or webpush_registry
-
-    @property
-    def CURRENT_EVENT_LOOP(self) -> Optional[AbstractEventLoop]:
-        """兼容旧代码读取未经可用性校验的主循环。"""
-        return self._loop_registry.current
-
-    @CURRENT_EVENT_LOOP.setter
-    def CURRENT_EVENT_LOOP(self, loop: Optional[AbstractEventLoop]) -> None:
-        """兼容旧测试和插件直接替换主循环投递目标。"""
-        self._loop_registry.replace_compat(loop)
-
-    @CURRENT_EVENT_LOOP.deleter
-    def CURRENT_EVENT_LOOP(self) -> None:
-        """兼容属性 patch 清理，删除时仅清空当前投递目标。"""
-        self._loop_registry.replace_compat(None)
-
-    @property
-    def SUBSCRIPTIONS(self) -> List[dict]:
-        """兼容旧代码在持锁后直接访问订阅列表。"""
-        return self._push_registry.compat_items
-
-    @property
-    def SUBSCRIPTIONS_LOCK(self) -> threading.Lock:
-        """兼容旧代码保护原始订阅列表的互斥锁。"""
-        return self._push_registry.compat_lock
+    def __init__(self) -> None:
+        self.CURRENT_EVENT_LOOP = None
+        self._event_loop_owners: dict[object, AbstractEventLoop] = {}
+        self._event_loop_owner_lock = threading.Lock()
 
     @property
     def STOP_EVENT(self) -> threading.Event:
@@ -1454,19 +1501,37 @@ class GlobalVar(object):
         """
         获取webpush订阅
         """
-        return self._push_registry.list()
+        with self.SUBSCRIPTIONS_LOCK:
+            return list(self.SUBSCRIPTIONS)
 
     def push_subscription(self, subscription: dict):
         """
         添加或更新webpush订阅。
         """
-        self._push_registry.upsert(subscription)
+        endpoint = subscription.get("endpoint") if subscription else None
+        if not endpoint:
+            return
+        with self.SUBSCRIPTIONS_LOCK:
+            for index, current in enumerate(self.SUBSCRIPTIONS):
+                if current.get("endpoint") == endpoint:
+                    self.SUBSCRIPTIONS[index] = subscription
+                    return
+            self.SUBSCRIPTIONS.append(subscription)
 
     def remove_subscription(self, subscription: dict) -> bool:
         """
         根据 endpoint 移除webpush订阅，返回是否实际删除。
         """
-        return self._push_registry.remove(subscription)
+        endpoint = subscription.get("endpoint") if subscription else None
+        if not endpoint:
+            return False
+        with self.SUBSCRIPTIONS_LOCK:
+            before_count = len(self.SUBSCRIPTIONS)
+            self.SUBSCRIPTIONS[:] = [
+                current for current in self.SUBSCRIPTIONS
+                if current.get("endpoint") != endpoint
+            ]
+            return len(self.SUBSCRIPTIONS) != before_count
 
     def stop_workflow(self, workflow_id: int):
         """
@@ -1501,19 +1566,30 @@ class GlobalVar(object):
     @property
     def loop(self) -> AbstractEventLoop:
         """返回由应用生命周期登记的主事件循环。"""
-        return self._loop_registry.require()
+        loop = self.CURRENT_EVENT_LOOP
+        if loop is None or not loop.is_running() or loop.is_closed():
+            raise RuntimeError("主事件循环尚未启动或已经停止")
+        return loop
 
     def set_loop(self, loop: AbstractEventLoop) -> object:
         """登记主事件循环，并返回仅供当前生命周期释放的 owner。"""
-        return self._loop_registry.register(loop)
+        owner = object()
+        with self._event_loop_owner_lock:
+            self._event_loop_owners[owner] = loop
+            self.CURRENT_EVENT_LOOP = loop
+        return owner
 
     def clear_loop(self, owner: object) -> None:
         """释放指定 owner，保留仍然有效的其他生命周期登记。"""
-        self._loop_registry.release(owner)
+        with self._event_loop_owner_lock:
+            if owner not in self._event_loop_owners:
+                return
+            self._event_loop_owners.pop(owner)
+            self.CURRENT_EVENT_LOOP = next(
+                reversed(self._event_loop_owners.values()),
+                None,
+            )
 
 
 # 全局标识
-global_vars = GlobalVar(
-    loop_registry=main_loop_registry,
-    push_registry=webpush_registry,
-)
+global_vars = GlobalVar()

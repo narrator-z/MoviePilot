@@ -16,36 +16,20 @@ def test_official_plugin_baseline_records_external_source():
     baseline_path = BASELINE_ROOT / "official-plugin-baseline.json"
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 
-    assert baseline["schema_version"] == 4
+    assert baseline["schema_version"] == 3
     assert baseline["scope"]["repository"] == "MoviePilot-Plugins"
     assert baseline["scope"]["roots"] == ["plugins.v2", "plugins.v3", "plugins"]
     assert baseline["scope"]["default_plugins"]
     assert len(baseline["provenance"]["head"]) == 40
     assert all(
         not path.startswith("app/plugins/")
-        for contract in (
-            *baseline["imports"].values(),
-            *baseline["from_imports"].values(),
-            *baseline["attribute_calls"].values(),
-            *baseline["hooks"].values(),
-        )
+        for contract in (*baseline["imports"].values(), *baseline["hooks"].values())
         for path in contract["files"]
     )
     assert all(
         not path.startswith("app/plugins/")
         for path in baseline["api_routes"]
     )
-    assert {
-        "app.agent.llm.LLMHelper",
-        "app.agent.llm.helper.LLMHelper",
-        "app.helper.llm.LLMHelper",
-    } <= set(baseline["from_imports"])
-    assert {
-        "app.agent.llm.LLMHelper.get_llm",
-        "app.agent.llm.helper.LLMHelper.test_current_settings",
-        "app.helper.llm.LLMHelper.get_llm",
-        "app.agent.tools.manager.moviepilot_tool_manager._load_tools",
-    } <= set(baseline["attribute_calls"])
 
 
 def test_dependency_baseline_records_nonempty_host_graph() -> None:
@@ -90,9 +74,6 @@ def test_architecture_documents_match_generated_quality_metrics() -> None:
     ruff = json.loads(
         (BASELINE_ROOT / "ruff-baseline.json").read_text(encoding="utf-8")
     )
-    mypy = json.loads(
-        (BASELINE_ROOT / "mypy-baseline.json").read_text(encoding="utf-8")
-    )
     coverage = json.loads(
         (BASELINE_ROOT / "coverage-baseline.json").read_text(encoding="utf-8")
     )
@@ -105,26 +86,15 @@ def test_architecture_documents_match_generated_quality_metrics() -> None:
         encoding="utf-8"
     )
     checklist = (
-        PROJECT_ROOT
-        / "docs"
-        / "architecture"
-        / "optimization-checklist.md"
+        PROJECT_ROOT / "docs" / "architecture-optimization-checklist.md"
     ).read_text(encoding="utf-8")
     roadmap = (
-        PROJECT_ROOT
-        / "docs"
-        / "architecture"
-        / "refactor-roadmap.md"
+        PROJECT_ROOT / "docs" / "architecture-refactor-roadmap.md"
     ).read_text(encoding="utf-8")
     edge_count = f"{dependency['edge_count']:,}"
     ruff_count = sum(
         count
         for diagnostics in ruff.values()
-        for count in diagnostics.values()
-    )
-    mypy_count = sum(
-        count
-        for diagnostics in mypy.values()
         for count in diagnostics.values()
     )
     application_coverage = coverage["application"]["percent"]
@@ -133,14 +103,10 @@ def test_architecture_documents_match_generated_quality_metrics() -> None:
 
     assert edge_count in overview
     assert f"{dependency['module_count']} / {edge_count}" in checklist
-    assert f"全量 mypy 历史债务 | {mypy_count:,} / {len(mypy)} 文件" in checklist
     assert f"Ruff 历史诊断 | {ruff_count}" in checklist
     assert f"Application {application_coverage:.2f}%" in checklist
     assert f"Domain {domain_coverage:.2f}%" in checklist
-    if "**阶段状态：`CANCELLED`" in roadmap:
-        assert "| S4-L5 Ruff 治理债务清零 | `CANCELLED` |" in roadmap
-    else:
-        assert f"当前受控 {ruff_count} 条诊断归零" in roadmap
+    assert f"当前受控 {ruff_count} 条诊断归零" in roadmap
     assert (
         f"当前宿主有 {event_facts['producer_call_count']} 个\n"
         f"生产调用，其中 {event_facts['static_producer_call_count']} 个静态解析为 "
@@ -224,10 +190,10 @@ def test_transaction_debt_baseline_is_a_model_and_oper_ratchet() -> None:
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 
     assert baseline["schema_version"] == 1
-    assert baseline["model_decorators"]["count"] == 0
-    assert sum(baseline["model_decorators"]["by_kind"].values()) == 0
-    assert baseline["model_decorators"]["by_kind"]["db_update"] == 0
-    assert baseline["model_decorators"]["by_kind"]["async_db_update"] == 0
+    assert baseline["model_decorators"]["count"] == 44
+    assert sum(baseline["model_decorators"]["by_kind"].values()) == 44
+    assert baseline["model_decorators"]["by_kind"]["db_update"] == 4
+    assert baseline["model_decorators"]["by_kind"]["async_db_update"] == 1
     assert baseline["model_transaction_calls"] == {"count": 0, "calls": []}
     assert baseline["model_session_factories"] == {"count": 0, "calls": []}
     assert baseline["oper_transaction_calls"] == {"count": 0, "calls": []}
@@ -286,19 +252,34 @@ def test_configuration_debt_baseline_tracks_canonical_direct_access() -> None:
     assert baseline["system_config_oper_constructions"]["count"] == len(
         baseline["system_config_oper_constructions"]["calls"]
     )
-    assert baseline["settings_imports"] == {"count": 0, "files": []}
+    assert baseline["settings_imports"] == {
+        "count": 4,
+        "files": [
+            "app/chain/download_backfill.py",
+            "app/startup/agent_initializer.py",
+            "app/startup/modules_initializer.py",
+            "app/utils/media.py",
+        ],
+    }
     assert baseline["system_config_oper_constructions"] == {
-        "count": 0,
-        "calls": [],
+        "count": 6,
+        "calls": [
+            {"file": "app/startup/modules_initializer.py", "name": "SystemConfigOper"},
+            {"file": "app/startup/modules_initializer.py", "name": "SystemConfigOper"},
+            {"file": "app/startup/modules_initializer.py", "name": "SystemConfigOper"},
+            {"file": "app/startup/modules_initializer.py", "name": "SystemConfigOper"},
+            {"file": "app/startup/modules_initializer.py", "name": "SystemConfigOper"},
+            {"file": "app/startup/modules_initializer.py", "name": "SystemConfigOper"},
+        ],
     }
     assert baseline["foundational_settings_boundaries"] == {
         "count": 0,
         "entries": [],
     }
-    assert baseline["composition_root_oper_boundaries"] == {
-        "count": 0,
-        "entries": [],
-    }
+    assert baseline["composition_root_oper_boundaries"]["count"] == 1
+    assert baseline["composition_root_oper_boundaries"]["entries"][0]["file"] == (
+        "app/startup/initializers/modules.py"
+    )
 
 
 def test_startup_performance_baseline_records_normal_and_safe_lifecycle_resources():
@@ -469,18 +450,18 @@ def test_event_contract_baseline_covers_every_public_event_enum() -> None:
 
     assert set(events["event_index"]) == expected
     assert events["event_count"] == len(expected)
-    assert events["producer_call_count"] == 90
-    assert events["static_producer_call_count"] == 89
+    assert events["producer_call_count"] == 97
+    assert events["static_producer_call_count"] == 96
     assert events["dynamic_producer_count"] == 1
     assert events["invalid_producer_count"] == 0
-    assert events["producer_event_reference_count"] == 91
-    assert events["consumer_registration_count"] == 17
-    assert events["static_consumer_count"] == 16
+    assert events["producer_event_reference_count"] == 98
+    assert events["consumer_registration_count"] == 18
+    assert events["static_consumer_count"] == 17
     assert events["dynamic_consumer_count"] == 1
     assert events["invalid_consumer_count"] == 0
-    assert events["consumer_event_reference_count"] == 16
-    assert events["fact_count"] == 107
-    assert len({fact["fingerprint"] for fact in events["consumers"]}) == 17
+    assert events["consumer_event_reference_count"] == 17
+    assert events["fact_count"] == 115
+    assert len({fact["fingerprint"] for fact in events["consumers"]}) == 18
     assert all(
         not fact["caller"].startswith("app.plugins")
         for fact in (*events["producers"], *events["consumers"])

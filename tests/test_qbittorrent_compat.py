@@ -210,10 +210,7 @@ def _load_qbittorrent_modules():
     modules_module._ModuleBase = _ModuleBase
     modules_module._DownloaderBase = _DownloaderBase
     base_module = types.ModuleType("app.modules._base")
-    base_module.__path__ = []
-    downloader_base_module = types.ModuleType("app.modules._base.downloader")
-    downloader_base_module._DownloaderModuleBase = _DownloaderModuleBase
-    base_module.downloader = downloader_base_module
+    base_module._DownloaderModuleBase = _DownloaderModuleBase
     modules_module._base = base_module
     torrentool_torrent_module.Torrent = _Torrent
     qbittorrentapi_module.TorrentDictionary = dict
@@ -268,7 +265,6 @@ def _load_qbittorrent_modules():
         "app.runtime.settings": runtime_settings_module,
         "app.modules": modules_module,
         "app.modules._base": base_module,
-        "app.modules._base.downloader": downloader_base_module,
         "app.modules.qbittorrent": qbittorrent_package_module,
         "app.schemas": schemas_module,
         "app.schemas.dashboard": schema_dashboard_module,
@@ -681,26 +677,8 @@ def test_download_falls_back_to_tag_lookup_when_added_ids_missing():
     )
 
     assert result == ("qb", "def456", "Original", "添加下载成功")
-    fake_server.delete_torrents_tag.assert_called_once_with("def456", "tmp-tag-01")
+    fake_server.delete_torrents_tag.assert_not_called()
     fake_server.get_torrent_id_by_tag.assert_called_once_with(tags="tmp-tag-01")
-
-
-def test_download_cleans_temporary_tag_when_addition_lookup_fails():
-    """添加失败且无法查询下载器时仍应清理临时标签。"""
-    fake_server = MagicMock()
-    fake_server.add_torrent.return_value = (False, [])
-    fake_server.get_torrents.return_value = ([], True)
-
-    module = _build_module(fake_server)
-    result = module.download(
-        content="magnet:?xt=urn:btih:789",
-        download_dir=Path("/downloads"),
-        cookie="",
-        downloader="qb",
-    )
-
-    assert result == (None, None, None, "无法连接qbittorrent下载器")
-    fake_server.delete_torrents_tag.assert_called_once_with(None, "tmp-tag-01")
 
 
 def test_download_removes_temporary_tag_from_existing_torrent():

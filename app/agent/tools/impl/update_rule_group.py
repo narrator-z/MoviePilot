@@ -6,6 +6,7 @@ from typing import Optional, Type
 from pydantic import BaseModel, Field
 
 from app.agent.tools.base import MoviePilotTool
+from app.agent.tools.tags import ToolTag
 from app.agent.tools.impl._filter_rule_utils import (
     build_custom_rule_map,
     collect_rule_group_usages,
@@ -13,10 +14,10 @@ from app.agent.tools.impl._filter_rule_utils import (
     get_custom_rules,
     get_rule_groups,
     normalize_rule_group,
-    publish_rule_config_changed,
+    rename_rule_group_references,
+    save_system_config,
     serialize_rule_group,
 )
-from app.agent.tools.tags import ToolTag
 from app.runtime.log import logger
 from app.schemas.types import SystemConfigKey
 
@@ -81,9 +82,6 @@ class UpdateRuleGroupTool(MoviePilotTool):
 
         try:
             rule_groups = get_rule_groups()
-            expected_definitions = [
-                group.model_dump(exclude_none=True) for group in rule_groups
-            ]
             group_map = {group.name: group for group in rule_groups if group.name}
             current_group = group_map.get(current_name)
             if not current_group:
@@ -125,26 +123,19 @@ class UpdateRuleGroupTool(MoviePilotTool):
                 else:
                     final_groups.append(group)
 
-            definitions = [
-                group.model_dump(exclude_none=True) for group in final_groups
-            ]
-            async with self.data.async_rule_group_mutation_scope() as mutation:
-                result = await mutation.apply(
-                    definitions,
-                    expected_rule_groups=expected_definitions,
-                    previous_name=current_group.name,
-                    current_name=updated_group.name,
-                )
-            await publish_rule_config_changed(
+            await save_system_config(
                 SystemConfigKey.UserFilterRuleGroups,
-                definitions,
+                [group.model_dump(exclude_none=True) for group in final_groups],
             )
-            reference_changes = result.to_dict()
 
-            usage = await collect_rule_group_usages(
-                self.data.subscriptions,
-                [updated_group.name],
-            )
+            reference_changes = {}
+            if updated_group.name != current_group.name:
+                reference_changes = await rename_rule_group_references(
+                    current_group.name,
+                    updated_group.name,
+                )
+
+            usage = await collect_rule_group_usages([updated_group.name])
             return json.dumps(
                 {
                     "success": True,

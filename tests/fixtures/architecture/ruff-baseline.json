@@ -1,9 +1,31 @@
 {
-  "app/adapters/external/wechat.py": {
+  "app/adapters/external/cookiecloud.py": {
+    "I001": 1
+  },
+  "app/adapters/external/market.py": {
+    "I001": 1
+  },
+  "app/adapters/external/server.py": {
+    "I001": 1
+  },
+  "app/adapters/external/wechat_crypt.py": {
+    "I001": 1
+  },
+  "app/adapters/network/http.py": {
+    "F841": 2,
+    "I001": 1
+  },
+  "app/adapters/system/display/__init__.py": {
     "I001": 1
   },
   "app/adapters/system/host.py": {
     "I001": 2
+  },
+  "app/adapters/system/plugin/manifest.py": {
+    "I001": 1
+  },
+  "app/adapters/system/plugin/package.py": {
+    "I001": 1
   },
   "app/adapters/system/rust.py": {
     "I001": 1
@@ -21,13 +43,16 @@
   "app/agent/callback/__init__.py": {
     "I001": 1
   },
+  "app/agent/llm/__init__.py": {
+    "I001": 1
+  },
   "app/agent/llm/capability.py": {
     "I001": 1
   },
-  "app/agent/llm/tools.py": {
+  "app/agent/llm/provider.py": {
     "I001": 1
   },
-  "app/agent/loader.py": {
+  "app/agent/llm/server_tools.py": {
     "I001": 1
   },
   "app/agent/mcp.py": {
@@ -39,17 +64,21 @@
   "app/agent/middleware/policy.py": {
     "I001": 1
   },
-  "app/agent/middleware/selection.py": {
-    "I001": 1
-  },
   "app/agent/middleware/skills.py": {
     "I001": 1
   },
   "app/agent/middleware/subagents.py": {
     "I001": 1
   },
+  "app/agent/middleware/tool_selection.py": {
+    "I001": 1
+  },
   "app/agent/middleware/utils.py": {
     "I001": 1
+  },
+  "app/agent/orchestrator.py": {
+    "E402": 11,
+    "I001": 2
   },
   "app/agent/policy/__init__.py": {
     "I001": 1
@@ -63,7 +92,7 @@
   "app/agent/policy/sanitizer.py": {
     "I001": 1
   },
-  "app/agent/policy/secrets.py": {
+  "app/agent/policy/secret_fields.py": {
     "I001": 1
   },
   "app/agent/prompt/__init__.py": {
@@ -72,7 +101,16 @@
   "app/agent/runtime.py": {
     "I001": 1
   },
+  "app/agent/runtime_loader.py": {
+    "I001": 1
+  },
   "app/agent/skills/metadata.py": {
+    "I001": 1
+  },
+  "app/agent/tools/base.py": {
+    "I001": 1
+  },
+  "app/agent/tools/factory.py": {
     "I001": 1
   },
   "app/agent/tools/impl/_command_safety.py": {
@@ -90,13 +128,28 @@
   "app/agent/tools/impl/add_custom_filter_rule.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/add_download_tasks.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/add_subscribe.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/ask_user_choice.py": {
     "I001": 1
   },
   "app/agent/tools/impl/browse_webpage.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/create_agent_task.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/delete_custom_filter_rule.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/delete_rule_group.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/delete_transfer_history.py": {
     "I001": 1
   },
   "app/agent/tools/impl/execute_command.py": {
@@ -120,6 +173,9 @@
   "app/agent/tools/impl/query_custom_filter_rules.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/query_download_tasks.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/query_installed_plugins.py": {
     "I001": 1
   },
@@ -138,13 +194,28 @@
   "app/agent/tools/impl/query_plugin_config.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/query_plugin_data.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/query_popular_subscribes.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/query_rule_groups.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/query_subscribe_history.py": {
     "I001": 1
   },
   "app/agent/tools/impl/query_subscribe_shares.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/query_subscribes.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/query_system_settings.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/query_transfer_history.py": {
     "I001": 1
   },
   "app/agent/tools/impl/recognize_captcha.py": {
@@ -168,6 +239,9 @@
   "app/agent/tools/impl/search_person_credits.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/search_subscribe.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/search_torrents.py": {
     "I001": 1
   },
@@ -177,7 +251,16 @@
   "app/agent/tools/impl/send_voice_message.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/test_site.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/transfer_file.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/uninstall_plugin.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/update_custom_filter_rule.py": {
     "I001": 1
   },
   "app/agent/tools/impl/update_custom_identifiers.py": {
@@ -189,7 +272,41 @@
   "app/agent/tools/impl/update_plugin_config.py": {
     "I001": 1
   },
+  "app/agent/tools/impl/update_rule_group.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/update_site.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/update_site_cookie.py": {
+    "I001": 1
+  },
+  "app/agent/tools/impl/update_subscribe.py": {
+    "I001": 1
+  },
   "app/agent/tools/impl/update_system_settings.py": {
+    "I001": 1
+  },
+  "app/api/endpoints/agent.py": {
+    "F841": 1
+  },
+  "app/api/endpoints/subscribe.py": {
+    "F841": 1
+  },
+  "app/api/endpoints/system.py": {
+    "F401": 1,
+    "I001": 1
+  },
+  "app/application/agentdata.py": {
+    "I001": 1
+  },
+  "app/application/agenttask.py": {
+    "I001": 1
+  },
+  "app/application/chain/data.py": {
+    "I001": 1
+  },
+  "app/application/directory.py": {
     "I001": 1
   },
   "app/application/downloader.py": {
@@ -198,16 +315,52 @@
   "app/application/formatting.py": {
     "I001": 1
   },
+  "app/application/history.py": {
+    "I001": 1
+  },
+  "app/application/image.py": {
+    "I001": 1
+  },
   "app/application/maintenance.py": {
+    "I001": 1
+  },
+  "app/application/mediaserver.py": {
+    "I001": 1
+  },
+  "app/application/messaging/agent.py": {
+    "I001": 1
+  },
+  "app/application/messaging/chat.py": {
     "I001": 1
   },
   "app/application/messaging/session.py": {
     "I001": 1
   },
+  "app/application/messaging/site.py": {
+    "I001": 1
+  },
+  "app/application/messaging/subscribe.py": {
+    "I001": 1
+  },
   "app/application/notification.py": {
     "I001": 1
   },
+  "app/application/outbox.py": {
+    "I001": 1
+  },
   "app/application/plugin/runtime.py": {
+    "I001": 1
+  },
+  "app/application/rss.py": {
+    "I001": 1
+  },
+  "app/application/security/auth.py": {
+    "I001": 1
+  },
+  "app/application/security/passkey.py": {
+    "I001": 1
+  },
+  "app/application/security/url.py": {
     "I001": 1
   },
   "app/application/site/sites.pyi": {
@@ -216,16 +369,67 @@
   "app/application/storage.py": {
     "I001": 1
   },
+  "app/application/subscription/delete.py": {
+    "I001": 1
+  },
+  "app/application/subscription/identity.py": {
+    "I001": 1
+  },
+  "app/application/subscription/mutation.py": {
+    "I001": 1
+  },
+  "app/application/subscription/priority.py": {
+    "F401": 1,
+    "I001": 1
+  },
+  "app/application/subscription/write.py": {
+    "I001": 1
+  },
+  "app/application/torrent.py": {
+    "F541": 3,
+    "I001": 1
+  },
+  "app/application/torrent_cache.py": {
+    "I001": 1
+  },
+  "app/application/workflow.py": {
+    "I001": 1
+  },
+  "app/chain/_music.py": {
+    "E402": 5
+  },
+  "app/chain/_transfer.py": {
+    "E402": 15,
+    "F401": 1
+  },
+  "app/chain/media.py": {
+    "E731": 2
+  },
+  "app/command.py": {
+    "I001": 1
+  },
   "app/db/__init__.py": {
     "I001": 1
   },
+  "app/db/adapters/chain.py": {
+    "I001": 1
+  },
+  "app/db/adapters/outbox.py": {
+    "I001": 1
+  },
   "app/db/adapters/transaction.py": {
+    "I001": 1
+  },
+  "app/db/adapters/workflow.py": {
     "I001": 1
   },
   "app/db/base.py": {
     "I001": 1
   },
   "app/db/diagnostics.py": {
+    "I001": 1
+  },
+  "app/db/engine.py": {
     "I001": 1
   },
   "app/db/models/__init__.py": {
@@ -243,6 +447,12 @@
   "app/db/models/message.py": {
     "I001": 1
   },
+  "app/db/models/outbox.py": {
+    "I001": 1
+  },
+  "app/db/models/passkey.py": {
+    "I001": 1
+  },
   "app/db/models/plugindata.py": {
     "I001": 1
   },
@@ -258,10 +468,28 @@
   "app/db/models/siteuserdata.py": {
     "I001": 1
   },
+  "app/db/models/subscribe.py": {
+    "I001": 1
+  },
+  "app/db/models/subscribehistory.py": {
+    "I001": 1
+  },
   "app/db/models/systemconfig.py": {
     "I001": 1
   },
+  "app/db/models/transferhistory.py": {
+    "I001": 1
+  },
+  "app/db/models/user.py": {
+    "I001": 1
+  },
+  "app/db/models/userconfig.py": {
+    "I001": 1
+  },
   "app/db/models/workflow.py": {
+    "I001": 1
+  },
+  "app/db/oper/downloadhistory.py": {
     "I001": 1
   },
   "app/db/oper/message.py": {
@@ -270,7 +498,19 @@
   "app/db/oper/site.py": {
     "I001": 1
   },
+  "app/db/oper/subscribe.py": {
+    "I001": 1
+  },
+  "app/db/oper/systemconfig.py": {
+    "I001": 1
+  },
   "app/db/oper/user.py": {
+    "I001": 1
+  },
+  "app/db/oper/userconfig.py": {
+    "I001": 1
+  },
+  "app/db/oper/workflow.py": {
     "I001": 1
   },
   "app/db/session.py": {
@@ -293,6 +533,9 @@
   },
   "app/doctor/runner.py": {
     "I001": 1
+  },
+  "app/domain/context.py": {
+    "E731": 1
   },
   "app/domain/media.py": {
     "E731": 1
@@ -352,7 +595,7 @@
     "I001": 1
   },
   "app/main.py": {
-    "E402": 14,
+    "E402": 15,
     "I001": 1
   },
   "app/modules/__init__.py": {
@@ -367,6 +610,21 @@
   "app/modules/_base/notification.py": {
     "I001": 1
   },
+  "app/modules/acoustid/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/anilist/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/anilist/anilist.py": {
+    "I001": 1
+  },
+  "app/modules/bangumi/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/bangumi/bangumi.py": {
+    "I001": 1
+  },
   "app/modules/discord/__init__.py": {
     "F401": 2,
     "I001": 1
@@ -374,6 +632,12 @@
   "app/modules/discord/discord.py": {
     "E741": 1,
     "F541": 2,
+    "I001": 1
+  },
+  "app/modules/douban/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/douban/apiv2.py": {
     "I001": 1
   },
   "app/modules/douban/scraper.py": {
@@ -394,10 +658,16 @@
     "F401": 1,
     "I001": 1
   },
+  "app/modules/feishu/feishu.py": {
+    "I001": 1
+  },
   "app/modules/filemanager/__init__.py": {
     "I001": 1
   },
   "app/modules/filter/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/indexer/__init__.py": {
     "I001": 1
   },
   "app/modules/indexer/parser/bitpt.py": {
@@ -410,7 +680,10 @@
   "app/modules/indexer/parser/file_list.py": {
     "I001": 1
   },
-  "app/modules/indexer/parser/ipt.py": {
+  "app/modules/indexer/parser/hddolby.py": {
+    "I001": 1
+  },
+  "app/modules/indexer/parser/ipt_project.py": {
     "I001": 1
   },
   "app/modules/indexer/parser/mtorrent.py": {
@@ -473,6 +746,9 @@
   "app/modules/indexer/spider/torrentleech.py": {
     "I001": 1
   },
+  "app/modules/indexer/spider/yema.py": {
+    "I001": 1
+  },
   "app/modules/jellyfin/__init__.py": {
     "F401": 1,
     "I001": 1
@@ -487,7 +763,10 @@
   "app/modules/lrclib/__init__.py": {
     "I001": 1
   },
-  "app/modules/musicbrainz/cache.py": {
+  "app/modules/musicbrainz/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/musicbrainz/music_cache.py": {
     "I001": 1
   },
   "app/modules/navidrome/__init__.py": {
@@ -498,6 +777,10 @@
     "I001": 1
   },
   "app/modules/plex/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/plex/plex.py": {
+    "F541": 2,
     "I001": 1
   },
   "app/modules/qbittorrent/__init__.py": {
@@ -552,7 +835,10 @@
   "app/modules/telegram/telegram.py": {
     "I001": 3
   },
-  "app/modules/themoviedb/cache.py": {
+  "app/modules/theaudiodb/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/themoviedb/__init__.py": {
     "I001": 1
   },
   "app/modules/themoviedb/category.py": {
@@ -562,10 +848,19 @@
   "app/modules/themoviedb/scraper.py": {
     "I001": 1
   },
+  "app/modules/themoviedb/tmdb_cache.py": {
+    "I001": 1
+  },
+  "app/modules/themoviedb/tmdbapi.py": {
+    "I001": 1
+  },
   "app/modules/themoviedb/tmdbv3api/__init__.py": {
     "F401": 25
   },
   "app/modules/themoviedb/tmdbv3api/tmdb.py": {
+    "I001": 1
+  },
+  "app/modules/thetvdb/__init__.py": {
     "I001": 1
   },
   "app/modules/transmission/__init__.py": {
@@ -578,6 +873,9 @@
   "app/modules/trimemedia/__init__.py": {
     "I001": 1
   },
+  "app/modules/trimemedia/api.py": {
+    "I001": 1
+  },
   "app/modules/trimemedia/module.py": {
     "I001": 1
   },
@@ -585,6 +883,9 @@
     "I001": 1
   },
   "app/modules/ugreen/__init__.py": {
+    "I001": 1
+  },
+  "app/modules/ugreen/api.py": {
     "I001": 1
   },
   "app/modules/ugreen/module.py": {
@@ -627,6 +928,9 @@
   "app/monitor/__init__.py": {
     "I001": 1
   },
+  "app/monitor/dispatcher.py": {
+    "I001": 1
+  },
   "app/monitor/monitor.py": {
     "I001": 1
   },
@@ -637,7 +941,8 @@
     "I001": 1
   },
   "app/runtime/cache.py": {
-    "E731": 2
+    "E731": 2,
+    "I001": 1
   },
   "app/runtime/capabilities/__init__.py": {
     "I001": 1
@@ -654,16 +959,25 @@
   "app/runtime/debounce.py": {
     "I001": 1
   },
+  "app/runtime/dependencies.py": {
+    "I001": 1
+  },
+  "app/runtime/event/dispatch.py": {
+    "I001": 1
+  },
   "app/runtime/event/errors.py": {
     "I001": 1
   },
   "app/runtime/execution.py": {
     "I001": 1
   },
-  "app/runtime/extensions/module/adapter.py": {
+  "app/runtime/extensions/host_module_adapter.py": {
     "I001": 1
   },
-  "app/runtime/extensions/module/manager.py": {
+  "app/runtime/extensions/managed_resource_adapter.py": {
+    "I001": 1
+  },
+  "app/runtime/extensions/module_manager.py": {
     "I001": 1
   },
   "app/runtime/extensions/plugin/lifecycle.py": {
@@ -675,7 +989,20 @@
   "app/runtime/extensions/plugin/storage.py": {
     "I001": 1
   },
+  "app/runtime/extensions/plugin_manager.py": {
+    "I001": 1
+  },
+  "app/runtime/extensions/service_config.py": {
+    "I001": 1
+  },
   "app/runtime/gc.py": {
+    "I001": 1
+  },
+  "app/runtime/log.py": {
+    "E731": 1,
+    "I001": 1
+  },
+  "app/runtime/managed_resources.py": {
     "I001": 1
   },
   "app/runtime/observability/__init__.py": {
@@ -708,6 +1035,9 @@
   "app/schemas/message.py": {
     "I001": 1
   },
+  "app/schemas/plugin.py": {
+    "I001": 1
+  },
   "app/schemas/response.py": {
     "I001": 1
   },
@@ -720,13 +1050,22 @@
   "app/schemas/system.py": {
     "I001": 1
   },
+  "app/schemas/transfer.py": {
+    "I001": 1
+  },
   "app/schemas/types.py": {
     "I001": 1
   },
   "app/schemas/user.py": {
     "I001": 1
   },
+  "app/sdk/_legacy/transfer.py": {
+    "I001": 1
+  },
   "app/sdk/_legacy/user.py": {
+    "I001": 1
+  },
+  "app/sdk/cache.py": {
     "I001": 1
   },
   "app/sdk/config.py": {
@@ -751,7 +1090,11 @@
     "I001": 1
   },
   "app/startup/lifecycle/__init__.py": {
-    "E402": 25
+    "E402": 27,
+    "F401": 1
+  },
+  "app/workflow/__init__.py": {
+    "F401": 1
   },
   "scripts/architecture/task_ownership.py": {
     "I001": 1
@@ -794,6 +1137,9 @@
   "scripts/perf/task_registry_ab.py": {
     "E402": 1
   },
+  "scripts/perf/test_scenarios.py": {
+    "I001": 1
+  },
   "scripts/schema/exports.py": {
     "I001": 1
   },
@@ -803,22 +1149,54 @@
   "scripts/startup/performance.py": {
     "I001": 1
   },
+  "tests/conftest.py": {
+    "F401": 1,
+    "I001": 7
+  },
   "tests/test_acoustid_module.py": {
     "I001": 1
   },
   "tests/test_agent_activity_log.py": {
     "I001": 1
   },
+  "tests/test_agent_background_output.py": {
+    "I001": 1
+  },
+  "tests/test_agent_chat_persistence.py": {
+    "I001": 1
+  },
+  "tests/test_agent_image_support.py": {
+    "F401": 1,
+    "I001": 1
+  },
   "tests/test_agent_lazy_runtime_boundary.py": {
     "F401": 1
   },
+  "tests/test_agent_lifecycle.py": {
+    "I001": 1
+  },
   "tests/test_agent_llm_capability.py": {
+    "I001": 1
+  },
+  "tests/test_agent_message_routing.py": {
+    "I001": 1
+  },
+  "tests/test_agent_music_tools.py": {
+    "I001": 1
+  },
+  "tests/test_agent_plugin_tools.py": {
     "I001": 1
   },
   "tests/test_agent_recognize_captcha_tool.py": {
     "I001": 1
   },
+  "tests/test_agent_resource_flow_permissions.py": {
+    "I001": 1
+  },
   "tests/test_agent_runtime.py": {
+    "I001": 1
+  },
+  "tests/test_agent_scheduled_tasks.py": {
     "I001": 1
   },
   "tests/test_agent_session_status.py": {
@@ -828,6 +1206,12 @@
     "I001": 1
   },
   "tests/test_agent_subagents.py": {
+    "I001": 1
+  },
+  "tests/test_agent_summarization_streaming.py": {
+    "I001": 1
+  },
+  "tests/test_agent_task_runs.py": {
     "I001": 1
   },
   "tests/test_agent_tokens_events.py": {
@@ -851,6 +1235,9 @@
   "tests/test_api_authorization.py": {
     "I001": 1
   },
+  "tests/test_api_background_task_registry.py": {
+    "I001": 1
+  },
   "tests/test_api_response.py": {
     "I001": 1
   },
@@ -866,7 +1253,26 @@
   "tests/test_builtin_skill_boundaries.py": {
     "I001": 1
   },
+  "tests/test_cache_system.py": {
+    "I001": 1
+  },
   "tests/test_capability_registry.py": {
+    "I001": 1
+  },
+  "tests/test_capability_runtime.py": {
+    "I001": 1
+  },
+  "tests/test_chain_durable_events.py": {
+    "I001": 1
+  },
+  "tests/test_chain_layering.py": {
+    "I001": 1
+  },
+  "tests/test_chain_rate_limit.py": {
+    "E402": 4,
+    "I001": 1
+  },
+  "tests/test_chain_runtime_context.py": {
     "I001": 1
   },
   "tests/test_cli_auto_update.py": {
@@ -875,10 +1281,19 @@
   "tests/test_coalesce.py": {
     "I001": 1
   },
+  "tests/test_configuration_initializer.py": {
+    "I001": 1
+  },
   "tests/test_dashboard_system_info.py": {
     "I001": 1
   },
+  "tests/test_data_cleanup_chain.py": {
+    "I001": 1
+  },
   "tests/test_database_backup_cli_sdk.py": {
+    "I001": 1
+  },
+  "tests/test_database_backup_scheduler.py": {
     "I001": 1
   },
   "tests/test_database_index_migration.py": {
@@ -904,13 +1319,26 @@
   "tests/test_db_lazy_engine.py": {
     "I001": 1
   },
+  "tests/test_db_oper_layer.py": {
+    "I001": 1
+  },
+  "tests/test_db_oper_layer_extra.py": {
+    "I001": 1
+  },
   "tests/test_db_public_api.py": {
     "I001": 1
   },
   "tests/test_db_session_lifecycle.py": {
     "I001": 1
   },
-  "tests/test_docker_entrypoint_permissions.py": {
+  "tests/test_db_transferhistory_queries.py": {
+    "F401": 1
+  },
+  "tests/test_delete_transfer_history_tool.py": {
+    "I001": 1
+  },
+  "tests/test_docker_bootstrap.py": {
+    "F841": 2,
     "I001": 1
   },
   "tests/test_docker_payload_contract.py": {
@@ -922,12 +1350,21 @@
   "tests/test_douban_recognition.py": {
     "I001": 1
   },
+  "tests/test_download_chain.py": {
+    "I001": 1
+  },
   "tests/test_download_paths_endpoint.py": {
+    "I001": 1
+  },
+  "tests/test_download_save_path_allowlist.py": {
     "I001": 1
   },
   "tests/test_episode_format_helper.py": {
     "F841": 1,
     "I001": 1
+  },
+  "tests/test_episode_group_recognition.py": {
+    "E402": 4
   },
   "tests/test_event_dispatch_snapshot.py": {
     "I001": 1
@@ -945,6 +1382,10 @@
     "I001": 1
   },
   "tests/test_feedback_issue_scripts.py": {
+    "I001": 1
+  },
+  "tests/test_feishu.py": {
+    "E402": 5,
     "I001": 1
   },
   "tests/test_feishu_media_message.py": {
@@ -965,11 +1406,18 @@
   "tests/test_health_probes.py": {
     "I001": 1
   },
+  "tests/test_host_runtime_context.py": {
+    "F401": 1,
+    "I001": 1
+  },
   "tests/test_indexer_spider_search_url.py": {
     "I001": 1
   },
   "tests/test_interaction_router.py": {
     "E402": 5
+  },
+  "tests/test_lifecycle_shutdown.py": {
+    "F841": 1
   },
   "tests/test_llm_provider_bedrock.py": {
     "I001": 1
@@ -982,8 +1430,7 @@
     "I001": 1
   },
   "tests/test_local_setup_config_dir.py": {
-    "F841": 1,
-    "I001": 1
+    "F841": 1
   },
   "tests/test_local_setup_frontend_version.py": {
     "I001": 1
@@ -994,14 +1441,17 @@
   "tests/test_local_setup_resources.py": {
     "I001": 1
   },
-  "tests/test_local_setup_uninstall.py": {
-    "I001": 1
-  },
   "tests/test_local_storage.py": {
     "F401": 1,
     "I001": 1
   },
   "tests/test_main_direct_execution.py": {
+    "I001": 1
+  },
+  "tests/test_managed_resources.py": {
+    "I001": 1
+  },
+  "tests/test_manual_transfer_history.py": {
     "I001": 1
   },
   "tests/test_mcp_plugin_tools.py": {
@@ -1014,6 +1464,10 @@
     "F841": 1,
     "I001": 1
   },
+  "tests/test_media_recognize_share.py": {
+    "F401": 1,
+    "I001": 1
+  },
   "tests/test_media_recognize_share_statistics.py": {
     "I001": 1
   },
@@ -1023,13 +1477,29 @@
   "tests/test_media_search_source_selection.py": {
     "I001": 1
   },
+  "tests/test_media_source_routing.py": {
+    "I001": 1
+  },
   "tests/test_media_source_signature_compatibility.py": {
     "I001": 1
+  },
+  "tests/test_mediascrape.py": {
+    "F401": 2,
+    "I001": 2
   },
   "tests/test_mediaserver_image_signing.py": {
     "I001": 1
   },
+  "tests/test_mediaserver_sync_incremental.py": {
+    "I001": 1
+  },
+  "tests/test_mediaserver_sync_scheduler.py": {
+    "I001": 1
+  },
   "tests/test_message_channel_permissions.py": {
+    "I001": 1
+  },
+  "tests/test_message_ingress.py": {
     "I001": 1
   },
   "tests/test_message_media_identity.py": {
@@ -1041,13 +1511,20 @@
   "tests/test_message_notifications.py": {
     "I001": 1
   },
-  "tests/test_metainfo.py": {
-    "I001": 1
-  },
   "tests/test_metamusic.py": {
     "I001": 1
   },
+  "tests/test_mfa_passkey_registration_errors.py": {
+    "I001": 1
+  },
+  "tests/test_module_manager_capability_adapter.py": {
+    "I001": 1
+  },
   "tests/test_module_quality.py": {
+    "I001": 1
+  },
+  "tests/test_monitor_dispatcher_history.py": {
+    "F401": 1,
     "I001": 1
   },
   "tests/test_monitor_gap_recovery.py": {
@@ -1077,14 +1554,23 @@
   "tests/test_music_mediaserver.py": {
     "I001": 1
   },
+  "tests/test_music_plugin_recognize.py": {
+    "I001": 1
+  },
   "tests/test_music_recognize_cache.py": {
     "I001": 1
   },
   "tests/test_music_scrape.py": {
     "I001": 1
   },
+  "tests/test_music_search.py": {
+    "I001": 1
+  },
   "tests/test_music_torrents.py": {
     "I001": 1
+  },
+  "tests/test_music_workflows.py": {
+    "F401": 1
   },
   "tests/test_musicbrainz_module.py": {
     "I001": 1
@@ -1104,6 +1590,9 @@
   "tests/test_observability.py": {
     "I001": 1
   },
+  "tests/test_passkey_challenge.py": {
+    "I001": 1
+  },
   "tests/test_password_hashing.py": {
     "I001": 1
   },
@@ -1113,8 +1602,14 @@
   "tests/test_plugin_dependency_service.py": {
     "I001": 1
   },
+  "tests/test_plugin_helper.py": {
+    "F401": 2
+  },
   "tests/test_plugin_lifecycle_status.py": {
     "F401": 1
+  },
+  "tests/test_plugin_local_sync.py": {
+    "I001": 1
   },
   "tests/test_plugin_market_default.py": {
     "I001": 1
@@ -1122,8 +1617,14 @@
   "tests/test_plugin_monitor_lifecycle.py": {
     "I001": 1
   },
+  "tests/test_plugin_rating.py": {
+    "I001": 1
+  },
   "tests/test_plugin_sdk.py": {
     "I001": 3
+  },
+  "tests/test_plugin_system_setting_admission.py": {
+    "I001": 1
   },
   "tests/test_plugin_virtual_instances.py": {
     "E731": 1
@@ -1140,19 +1641,59 @@
   "tests/test_recommend_chain.py": {
     "I001": 1
   },
+  "tests/test_release_group.py": {
+    "I001": 1
+  },
+  "tests/test_release_supply_chain.py": {
+    "I001": 1
+  },
   "tests/test_reliability_adr.py": {
     "I001": 1
   },
   "tests/test_resource_token_cookie_secure_flag.py": {
     "I001": 1
   },
+  "tests/test_resource_v3.py": {
+    "I001": 1
+  },
+  "tests/test_rss_helper.py": {
+    "I001": 1
+  },
+  "tests/test_runtime_execution.py": {
+    "I001": 1
+  },
+  "tests/test_rust_accel.py": {
+    "I001": 1
+  },
   "tests/test_rust_accel_toggle.py": {
+    "I001": 1
+  },
+  "tests/test_scheduler_cache_expiry.py": {
+    "I001": 1
+  },
+  "tests/test_scheduler_contracts.py": {
+    "I001": 1
+  },
+  "tests/test_search_ai_recommend.py": {
+    "E402": 8,
     "I001": 1
   },
   "tests/test_search_media_sources.py": {
     "I001": 1
   },
+  "tests/test_search_same_name_disambiguation.py": {
+    "I001": 1
+  },
+  "tests/test_search_title_filter.py": {
+    "E402": 4
+  },
   "tests/test_security_image_url_log.py": {
+    "I001": 1
+  },
+  "tests/test_security_utils.py": {
+    "I001": 1
+  },
+  "tests/test_server_statistic_lifecycle.py": {
     "I001": 1
   },
   "tests/test_site_adapter_collector.py": {
@@ -1165,13 +1706,29 @@
     "E402": 6,
     "I001": 1
   },
+  "tests/test_slash_command_interactions.py": {
+    "E402": 8,
+    "I001": 1
+  },
+  "tests/test_storage_download_path.py": {
+    "I001": 1
+  },
   "tests/test_string_compat.py": {
+    "I001": 1
+  },
+  "tests/test_subscribe_delete_command.py": {
     "I001": 1
   },
   "tests/test_subtitle_rename.py": {
     "I001": 1
   },
+  "tests/test_subtitle_search.py": {
+    "I001": 1
+  },
   "tests/test_subtitle_signed_download.py": {
+    "I001": 1
+  },
+  "tests/test_sunnypt_indexer.py": {
     "I001": 1
   },
   "tests/test_system_database_backup_api.py": {
@@ -1191,6 +1748,9 @@
     "I001": 1
   },
   "tests/test_telegram.py": {
+    "I001": 1
+  },
+  "tests/test_telegram_typing_lifecycle.py": {
     "I001": 1
   },
   "tests/test_template_context_builder.py": {
@@ -1214,6 +1774,9 @@
   "tests/test_tmdb_failure_snapshot_cache.py": {
     "I001": 1
   },
+  "tests/test_tmdb_recognize.py": {
+    "I001": 1
+  },
   "tests/test_tmdb_retry_and_errors.py": {
     "F811": 1
   },
@@ -1232,16 +1795,59 @@
   "tests/test_transfer_failed_retry_budget.py": {
     "I001": 1
   },
+  "tests/test_transfer_failed_retry_buttons.py": {
+    "E402": 6,
+    "I001": 2
+  },
+  "tests/test_transfer_failure_notification_aggregation.py": {
+    "I001": 1
+  },
+  "tests/test_transfer_history_gate.py": {
+    "I001": 1
+  },
   "tests/test_transfer_history_retransfer.py": {
     "I001": 1
   },
+  "tests/test_transfer_history_write_path.py": {
+    "I001": 1
+  },
+  "tests/test_transfer_mark_torrent_completed.py": {
+    "I001": 1
+  },
+  "tests/test_transfer_mounted_disk_cleanup.py": {
+    "I001": 1
+  },
+  "tests/test_transfer_movie_collection.py": {
+    "I001": 1
+  },
+  "tests/test_transfer_queue_count.py": {
+    "I001": 1
+  },
   "tests/test_transfer_rename_build_event.py": {
+    "I001": 1
+  },
+  "tests/test_transfer_stale_tasks.py": {
+    "I001": 1
+  },
+  "tests/test_transfer_tmdb_category.py": {
+    "I001": 1
+  },
+  "tests/test_transferhistory_media_source_migration.py": {
+    "I001": 1
+  },
+  "tests/test_uvicorn_entrypoint.py": {
     "I001": 1
   },
   "tests/test_webpush_helper.py": {
     "I001": 1
   },
   "tests/test_workflow_authorization.py": {
+    "I001": 1
+  },
+  "tests/test_workflow_execution.py": {
+    "I001": 1
+  },
+  "tests/test_workflow_runtime_config.py": {
     "I001": 1
   }
 }

@@ -6,8 +6,8 @@
 文件名只写实体，角色由包名表达，因此这里不再有 `_oper` 后缀。
 
 本文件只做符号解析，不在 import 期执行任何动作——没有建引擎、没有连库、
-也不会把其余 Oper 模块一并拉起。包根仅保留尚未迁移的 canonical Oper；
-已迁移符号由 runtime compat 精确叠加，不在这里重复导出。
+也不会把十六个 Oper 模块一并拉起。`from app.db.oper import SubscribeOper`
+经下方 __getattr__ 惰性解析，只导入被点名的那一个模块。
 
 这一点不是洁癖：多处测试靠往 sys.modules 塞桩来隔离单个 Oper（例如
 app.db.oper.systemconfig），若本文件改成 models/__init__.py 那样的即时
@@ -27,11 +27,15 @@ if TYPE_CHECKING:
     from app.db.oper.mediaserver import MediaServerOper
     from app.db.oper.message import MessageOper
     from app.db.oper.plugindata import PluginDataOper
+    from app.db.oper.site import SiteOper
+    from app.db.oper.subscribe import SubscribeOper
+    from app.db.oper.subscribehistory import SubscribeHistoryOper
     from app.db.oper.systemconfig import SystemConfigOper
+    from app.db.oper.transferhistory import TransferHistoryOper
     from app.db.oper.transferpending import TransferPendingOper
-    from app.db.oper.transfersettlementreceipt import TransferSettlementReceiptOper
     from app.db.oper.user import UserOper
     from app.db.oper.userconfig import UserConfigOper
+    from app.db.oper.workflow import WorkflowOper
 
 # 类名 -> 所在子模块。子模块名即实体名，与 app/db/models 对齐。
 _OPER_MODULES = {
@@ -42,11 +46,15 @@ _OPER_MODULES = {
     "MediaServerOper": "mediaserver",
     "MessageOper": "message",
     "PluginDataOper": "plugindata",
+    "SiteOper": "site",
+    "SubscribeHistoryOper": "subscribehistory",
+    "SubscribeOper": "subscribe",
     "SystemConfigOper": "systemconfig",
+    "TransferHistoryOper": "transferhistory",
     "TransferPendingOper": "transferpending",
-    "TransferSettlementReceiptOper": "transfersettlementreceipt",
     "UserConfigOper": "userconfig",
     "UserOper": "user",
+    "WorkflowOper": "workflow",
 }
 
 
@@ -80,9 +88,13 @@ __all__ = [
     "MediaServerOper",
     "MessageOper",
     "PluginDataOper",
+    "SiteOper",
+    "SubscribeHistoryOper",
+    "SubscribeOper",
     "SystemConfigOper",
+    "TransferHistoryOper",
     "TransferPendingOper",
-    "TransferSettlementReceiptOper",
     "UserConfigOper",
     "UserOper",
+    "WorkflowOper",
 ]

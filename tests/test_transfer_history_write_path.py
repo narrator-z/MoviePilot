@@ -16,11 +16,10 @@ import pytest
 
 from app import schemas
 from app.application.history import add_transfer_fail, add_transfer_success
-from app.db.adapters.history.transfer import TransactionalTransferHistoryRepository
-from app.db.models.transferhistory import TransferHistory
-from app.db.session import SessionFactory, async_session_scope
 from app.domain.context import MediaInfo
 from app.domain.metainfo import MetaInfo
+from app.db.models.transferhistory import TransferHistory
+from app.db.oper.transferhistory import TransferHistoryOper
 from app.schemas.types import MediaSource, MediaType
 
 
@@ -34,14 +33,6 @@ def _fileitem(path: str, storage: str = "local") -> schemas.FileItem:
     """构造源文件项。"""
     return schemas.FileItem(storage=storage, path=path,
                             name=path.rsplit("/", 1)[-1], type="file")
-
-
-def _repository() -> TransactionalTransferHistoryRepository:
-    """构造类型化整理历史仓储。"""
-    return TransactionalTransferHistoryRepository(
-        sync_session=SessionFactory,
-        async_session=async_session_scope,
-    )
 
 
 def _transferinfo(dest: str = "/media/片名/Season 01/片名 - S01E02.mkv",
@@ -81,7 +72,7 @@ def test_add_success_maps_every_field_onto_the_row(db):
     源/目标各自带存储、季集来自识别结果、状态为成功——这些是整理查重与媒体库
     溯源的全部依据，错一项就查不回来。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
     meta = MetaInfo("片名.S01E02.2026.mkv")
 
     add_transfer_success(transfer_history_oper=oper,
@@ -108,7 +99,7 @@ def test_add_success_persists_both_file_items(db):
 
     整理链回滚、重新整理都要拿原始 FileItem 复原，只存路径字符串不够。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
     add_transfer_success(transfer_history_oper=oper,
                          fileitem=_fileitem("/downloads/item.mkv"), mode="link",
                          meta=MetaInfo("item.mkv"), mediainfo=_mediainfo(),
@@ -125,7 +116,7 @@ def test_add_success_tolerates_missing_target_item(db):
 
     某些存储的整理只回传结果不回传条目，硬取 target_item.path 会直接抛。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
     add_transfer_success(transfer_history_oper=oper,
                          fileitem=_fileitem("/downloads/no-target.mkv"), mode="copy",
                          meta=MetaInfo("no-target.mkv"), mediainfo=_mediainfo(),
@@ -140,9 +131,9 @@ def test_add_success_replaces_the_previous_record_of_the_same_source(db):
     """
     同一源路径重复整理只保留最新一条。
 
-    经同源替换的先删后插实现；留下旧行会让查重命中过期的目标路径。
+    经 add_force 的先删后插实现；留下旧行会让查重命中过期的目标路径。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
     for title in ("第一次", "第二次"):
         add_transfer_success(transfer_history_oper=oper,
                              fileitem=_fileitem("/downloads/dup.mkv"), mode="move",
@@ -160,7 +151,7 @@ def test_add_success_prefers_track_title_for_music(db):
 
     音乐库按曲目组织，记成专辑名会让单曲在历史里全部重名、无法区分。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
     music_meta = MetaInfo("周杰伦 - 晴天.flac")
 
     add_transfer_success(transfer_history_oper=oper,
@@ -176,7 +167,7 @@ def test_add_success_falls_back_to_recognized_title(db):
     """
     非音乐文件用识别标题，识别标题为空时退回文件名解析出的名字。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
     meta = MetaInfo("片名.S01E02.2026.mkv")
 
     add_transfer_success(transfer_history_oper=oper,
@@ -197,7 +188,7 @@ def test_add_fail_records_the_transfer_error_message(db):
 
     失败重试与人工排障都只能看这条 errmsg。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
 
     add_transfer_fail(transfer_history_oper=oper,
                       fileitem=_fileitem("/downloads/fail.mkv"), mode="move",
@@ -216,7 +207,7 @@ def test_add_fail_uses_a_default_message_when_none_given(db):
 
     留空会让失败记录在界面上显示成「无错误」，与成功记录无从区分。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
 
     add_transfer_fail(transfer_history_oper=oper,
                       fileitem=_fileitem("/downloads/nomsg.mkv"), mode="move",
@@ -230,7 +221,7 @@ def test_add_fail_persists_episode_group(db):
     """
     失败记录要带上剧集组——重试时靠它还原到同一个剧集组，否则会整理错季。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
 
     add_transfer_fail(transfer_history_oper=oper,
                       fileitem=_fileitem("/downloads/eg.mkv"), mode="move",
@@ -247,7 +238,7 @@ def test_add_fail_without_recognition_takes_the_unidentified_branch(db):
 
     这条分支是「文件识别不出来」的唯一记录方式，丢了这些文件就彻底无迹可寻。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
     meta = MetaInfo("无法识别的文件.S02E05.2020.mkv")
 
     add_transfer_fail(transfer_history_oper=oper,
@@ -269,7 +260,7 @@ def test_add_fail_unidentified_music_is_marked_as_a_recording(db):
 
     音乐订阅按单曲/专辑分别查重，实体类型为空会让这条历史两边都匹配不上。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
 
     add_transfer_fail(transfer_history_oper=oper,
                       fileitem=_fileitem("/downloads/unknown.flac"), mode="move",
@@ -285,7 +276,7 @@ def test_add_fail_returns_the_persisted_row(db):
     """
     两条分支都要把落库后的记录返回，调用方据此拿主键做后续关联。
     """
-    oper = _repository()
+    oper = TransferHistoryOper(db=db.session)
 
     identified = add_transfer_fail(transfer_history_oper=oper,
                                    fileitem=_fileitem("/downloads/r1.mkv"), mode="move",

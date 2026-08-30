@@ -1,24 +1,11 @@
 import asyncio
 import threading
-from collections.abc import Generator
 from uuid import uuid4
 
 import pytest
 
-from app.runtime.loop import main_loop_registry
-from app.scheduler.facade import Scheduler
-from app.scheduler.registry import ExecutionRegistry
-
-
-@pytest.fixture(autouse=True)
-def _restore_main_loop_registry() -> Generator[None, None, None]:
-    """隔离并恢复主循环登记，避免前序兼容层假循环改变投递路径。"""
-    previous = main_loop_registry.current
-    main_loop_registry.replace_compat(None)
-    try:
-        yield
-    finally:
-        main_loop_registry.replace_compat(previous)
+from app.runtime.config import global_vars
+from app.scheduler import Scheduler
 
 
 def _build_scheduler(job_id, func):
@@ -36,7 +23,10 @@ def _build_scheduler(job_id, func):
         }
     }
     scheduler._lifecycle_state = "running"
-    scheduler._registry = ExecutionRegistry(scheduler._lock)
+    scheduler._handles = {}
+    scheduler._job_generations = {}
+    scheduler._active_job_generations = {}
+    scheduler._agent_task_reservations = {}
     return scheduler
 
 
@@ -79,7 +69,7 @@ def test_scheduler_failure_preserves_last_progress(monkeypatch):
     scheduler = _build_scheduler(job_id, task)
     monkeypatch.setattr(
         scheduler,
-        "_handle_job_error",
+        "_Scheduler__handle_job_error",
         lambda **kwargs: None,
     )
 
@@ -122,7 +112,7 @@ def test_scheduler_runs_async_job_without_running_global_loop(monkeypatch):
 
     scheduler = _build_scheduler(job_id, task)
     target_loop = asyncio.new_event_loop()
-    main_loop_registry.replace_compat(target_loop)
+    monkeypatch.setattr(global_vars, "CURRENT_EVENT_LOOP", target_loop)
 
     try:
         scheduler.start(job_id)
@@ -149,17 +139,14 @@ def test_scheduler_runs_async_job_from_current_event_loop(monkeypatch):
 
         async def wait_until_finished() -> None:
             """等待任务及其异步进度句柄全部收敛。"""
-            while (
-                    scheduler._registry.handles()
-                    or scheduler._registry.is_active(job_id)
-            ):
+            while scheduler._handles or scheduler._active_job_generations:
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(wait_until_finished(), timeout=1)
 
     scheduler = _build_scheduler(job_id, task)
     target_loop = asyncio.new_event_loop()
-    main_loop_registry.replace_compat(target_loop)
+    monkeypatch.setattr(global_vars, "CURRENT_EVENT_LOOP", target_loop)
 
     try:
         asyncio.run(run_task())
@@ -181,9 +168,9 @@ def test_scheduler_records_cancelled_async_job_as_failed():
         raise asyncio.CancelledError
 
     async def run_task():
-        job = scheduler._prepare_job(job_id)
+        job = scheduler._Scheduler__prepare_job(job_id)
         with pytest.raises(asyncio.CancelledError):
-            await scheduler._run_coro_job(task, job_id, job)
+            await scheduler._Scheduler__run_coro_job(task, job_id, job)
 
     scheduler = _build_scheduler(job_id, task)
     asyncio.run(run_task())
@@ -216,13 +203,13 @@ def test_scheduler_stop_async_cancels_owned_async_jobs():
         """在当前事件循环启动并收口异步作业。"""
         scheduler.start(job_id)
         await started.wait()
-        assert len(scheduler._registry.handles()) == 1
+        assert len(scheduler._handles) == 1
         await scheduler.stop_async()
 
     asyncio.run(run_task())
 
     assert cancelled.is_set()
-    assert scheduler._registry.handles() == ()
+    assert scheduler._handles == {}
 
 
 def test_scheduler_returns_none_for_unknown_job():
@@ -232,6 +219,9 @@ def test_scheduler_returns_none_for_unknown_job():
     scheduler._lock = threading.RLock()
     scheduler._jobs = {}
     scheduler._lifecycle_state = "running"
-    scheduler._registry = ExecutionRegistry(scheduler._lock)
+    scheduler._handles = {}
+    scheduler._job_generations = {}
+    scheduler._active_job_generations = {}
+    scheduler._agent_task_reservations = {}
 
     assert scheduler.get_progress(job_id) is None

@@ -1,34 +1,16 @@
 """添加订阅工具"""
 
-from typing import List, Optional, Type, TypedDict
+from typing import List, Optional, Type
 
 from pydantic import BaseModel, Field
 
 from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.tags import ToolTag
-from app.chain.subscribe.facade import SubscribeChain
-from app.domain.media import normalize_music_type
+from app.chain.subscribe import SubscribeChain
+from app.application.agentdata import get_agent_user_port
 from app.runtime.log import logger
 from app.schemas.types import MUSIC_ENTITY_ALBUM, MediaSource, MediaType, NotificationChannel
-
-
-class _SubscribeOptions(TypedDict, total=False):
-    """声明 Agent 工具允许透传给订阅链的可选配置。"""
-
-    music_type: str
-    start_episode: int
-    total_episode: int
-    quality: str
-    resolution: str
-    effect: str
-    audio_quality: str
-    audio_format: str
-    min_bitrate: int
-    min_bit_depth: int
-    min_sample_rate: int
-    best_version: int
-    filter_groups: List[str]
-    sites: List[int]
+from app.domain.media import normalize_music_type
 
 
 class AddSubscribeInput(BaseModel):
@@ -172,8 +154,8 @@ class AddSubscribeTool(MoviePilotTool):
 
         mapped_username = await self.run_blocking(
             "db",
-            self.data.users.find_name_by_bindings,
-            {key: self._user_id for key in binding_keys},
+            get_agent_user_port().get_name,
+            **{key: self._user_id for key in binding_keys},
         )
         return mapped_username or resolved_username
 
@@ -253,7 +235,7 @@ class AddSubscribeTool(MoviePilotTool):
             subscribe_username = await self._resolve_subscribe_username()
 
             # 构建额外的订阅参数
-            subscribe_kwargs: _SubscribeOptions = {}
+            subscribe_kwargs = {}
             if normalized_music_type:
                 subscribe_kwargs["music_type"] = normalized_music_type
             if start_episode is not None:

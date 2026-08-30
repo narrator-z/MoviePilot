@@ -16,7 +16,7 @@ uv run --locked --no-sync pytest
 
 Run the full test suite when changing:
 - `app/runtime/`, `app/adapters/`, or `app/runtime/compat/` - config, events, managers, adapters, and compatibility boundaries
-- `app/chain/base.py` — chain base class
+- `app/chain/__init__.py` — chain base class
 - `app/modules/__init__.py` — module base class
 - `app/main.py` — application startup
 - The CLI entrypoint (`moviepilot`)
@@ -56,7 +56,7 @@ uv run --locked --no-sync pylint app/
 ```bash
 uv export --quiet --locked --no-dev --no-emit-project \
   --output-file /tmp/moviepilot-audit-requirements.txt
-uvx --from pip-audit pip-audit \
+uvx --from pip-audit==2.10.1 pip-audit \
   --require-hashes --disable-pip --strict --progress-spinner off \
   --requirement /tmp/moviepilot-audit-requirements.txt
 ```

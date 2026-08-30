@@ -8,7 +8,8 @@ total(),会把历史任务计入「当前共 N 个文件」(如实际只处理 2
 """
 import unittest
 
-from app.application.transfer.workflow import JobManager
+from app.chain.transfer import JobManager
+
 from tests.test_transfer_job_manager import make_task
 
 

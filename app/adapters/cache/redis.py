@@ -204,20 +204,14 @@ class RedisHelper(ConfigReloadMixin, metaclass=Singleton):
         :param kwargs: 其他参数
         """
         try:
-            self.store(key=key, value=value, ttl=ttl, region=region, **kwargs)
+            self._connect()
+            redis_key = self.__make_redis_key(region, key)
+            # 对值进行序列化
+            serialized_value = serialize(value)
+            kwargs.pop("maxsize", None)
+            self.client.set(redis_key, serialized_value, ex=ttl, **kwargs)
         except Exception as e:
             logger.error(f"Failed to set key: {key} in region: {region}, error: {e}")
-
-    def store(self, key: str, value: Any, ttl: Optional[int] = None,
-              region: Optional[str] = "DEFAULT", **kwargs: Any) -> None:
-        """严格写入缓存，连接或序列化故障向调用方传播。"""
-        self._connect()
-        redis_key = self.__make_redis_key(region, key)
-        serialized_value = serialize(value)
-        kwargs.pop("maxsize", None)
-        stored = self.client.set(redis_key, serialized_value, ex=ttl, **kwargs)
-        if stored is not True:
-            raise RuntimeError("Redis cache write was not acknowledged")
 
     def exists(self, key: str, region: Optional[str] = "DEFAULT") -> bool:
         """
@@ -255,21 +249,17 @@ class RedisHelper(ConfigReloadMixin, metaclass=Singleton):
             return None
 
     def pop(self, key: str, region: Optional[str] = "DEFAULT") -> Optional[Any]:
-        """兼容旧调用；后端故障记录日志并返回空值。"""
+        """原子读取并删除缓存值。"""
         try:
-            return self.consume(key=key, region=region)
+            self._connect()
+            redis_key = self.__make_redis_key(region, key)
+            value = self.client.getdel(redis_key)
+            return deserialize(value) if value is not None else None
         except Exception as e:
             logger.error(
                 f"Failed to pop key: {key} in region: {region}, error: {e}"
             )
             return None
-
-    def consume(self, key: str, region: Optional[str] = "DEFAULT") -> Optional[Any]:
-        """通过单条 GETDEL 严格领取缓存值。"""
-        self._connect()
-        redis_key = self.__make_redis_key(region, key)
-        value = self.client.getdel(redis_key)
-        return deserialize(value) if value is not None else None
 
     def delete(self, key: str, region: Optional[str] = "DEFAULT") -> None:
         """

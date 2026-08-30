@@ -25,7 +25,7 @@ def _fake_mediainfo(tmdb_id=_TMDB_ID, seasons=None):
     return SimpleNamespace(
         tmdb_id=tmdb_id,
         title="Tales of Herding Gods",
-        year="2024",
+        year=2024,
         imdb_id=None,
         seasons=seasons or {1: [1, 2, 3]},
         get_poster_image=lambda: None,
@@ -39,25 +39,24 @@ def _series(tmdb_id=None, seasons=None):
         title="Tales of Herding Gods",
         tvdbId=_TVDB_ID,
         tmdbId=tmdb_id,
-        year="2024",
+        year=2024,
         seasons=seasons or [],
     )
 
 
-def _run_add(tv, subscriptions, batch_writer):
+def _run_add(tv, subscriptions):
     """直接调用新增剧集订阅处理函数。"""
     return asyncio.run(
         arr_add_series(
             tv=tv,
             _="api-token",
             subscriptions=subscriptions,
-            batch_writer=batch_writer,
         )
     )
 
 
 def _patch_chains(mediainfo=None, exists=None, add_result=(123, "")):
-    """统一 patch 媒体链、批量订阅链与订阅查询。"""
+    """统一 patch 媒体链、订阅链与订阅查询。"""
     media_chain = MagicMock()
     media_chain.tvdb_info.return_value = {
         "name": "Tales of Herding Gods",
@@ -66,34 +65,32 @@ def _patch_chains(mediainfo=None, exists=None, add_result=(123, "")):
     }
     media_chain.recognize_by_meta.return_value = mediainfo
     subscribe_chain = MagicMock()
-    subscribe_chain.async_add_batch = AsyncMock(return_value=add_result)
+    subscribe_chain.async_add = AsyncMock(return_value=add_result)
     subscriptions = MagicMock()
     subscriptions.exists = AsyncMock(return_value=bool(exists))
-    batch_writer = MagicMock()
     return patch(
         "app.api.servarr.MediaChain",
         return_value=media_chain,
     ), patch(
         "app.api.servarr.SubscribeChain",
         return_value=subscribe_chain,
-    ), subscriptions, subscribe_chain, batch_writer
+    ), subscriptions, subscribe_chain
 
 
 def test_add_series_without_tmdbid_resolves_identity_via_tvdbid():
     """Seerr 请求体不携带 tmdbId 时，应按 tvdbId 补全媒体身份并创建订阅。"""
     tv = _series(seasons=[SonarrSeason(seasonNumber=1, monitored=True)])
-    media_patch, chain_patch, subscriptions, subscribe_chain, batch_writer = _patch_chains(
+    media_patch, chain_patch, subscriptions, subscribe_chain = _patch_chains(
         mediainfo=_fake_mediainfo()
     )
     with media_patch, chain_patch:
-        result = _run_add(tv, subscriptions, batch_writer)
+        result = _run_add(tv, subscriptions)
 
     assert result.id == 123
-    subscribe_chain.async_add_batch.assert_awaited_once_with(
+    subscribe_chain.async_add.assert_awaited_once_with(
         title="Tales of Herding Gods",
-        year="2024",
-        seasons=[1],
-        batch_writer=batch_writer,
+        year=2024,
+        season=1,
         media_source=MediaSource.TMDB,
         media_id=str(_TMDB_ID),
         mtype=MediaType.TV,
@@ -104,16 +101,17 @@ def test_add_series_without_tmdbid_resolves_identity_via_tvdbid():
 def test_add_series_with_empty_seasons_falls_back_to_all_seasons():
     """请求体季列表为空时不应静默成功，应兜底订阅已识别的全部季。"""
     tv = _series()
-    media_patch, chain_patch, subscriptions, subscribe_chain, batch_writer = _patch_chains(
+    media_patch, chain_patch, subscriptions, subscribe_chain = _patch_chains(
         mediainfo=_fake_mediainfo(seasons={1: [1, 2, 3], 2: [1]})
     )
-    subscribe_chain.async_add_batch.return_value = (101, "")
+    subscribe_chain.async_add = AsyncMock(side_effect=[(100, ""), (101, "")])
     with media_patch, chain_patch:
-        result = _run_add(tv, subscriptions, batch_writer)
+        result = _run_add(tv, subscriptions)
 
     assert result.id == 101
-    subscribe_chain.async_add_batch.assert_awaited_once()
-    assert subscribe_chain.async_add_batch.await_args.kwargs["seasons"] == [1, 2]
+    assert subscribe_chain.async_add.await_count == 2
+    assert subscribe_chain.async_add.await_args_list[0].kwargs["season"] == 1
+    assert subscribe_chain.async_add.await_args_list[1].kwargs["season"] == 2
 
 
 def test_add_series_already_subscribed_returns_existing():
@@ -122,25 +120,23 @@ def test_add_series_already_subscribed_returns_existing():
         tmdb_id=_TMDB_ID,
         seasons=[SonarrSeason(seasonNumber=1, monitored=True)],
     )
-    media_patch, chain_patch, subscriptions, subscribe_chain, batch_writer = _patch_chains(
+    media_patch, chain_patch, subscriptions, subscribe_chain = _patch_chains(
         exists=SimpleNamespace(id=9)
     )
     with media_patch, chain_patch:
-        result = _run_add(tv, subscriptions, batch_writer)
+        result = _run_add(tv, subscriptions)
 
     assert result.id == 1
-    subscribe_chain.async_add_batch.assert_not_awaited()
+    subscribe_chain.async_add.assert_not_awaited()
 
 
 def test_add_series_identity_resolution_failure_returns_500():
     """媒体身份补全失败时返回 500，避免 Seerr 误判请求已成功。"""
     tv = _series()
-    media_patch, chain_patch, subscriptions, _, batch_writer = _patch_chains(
-        mediainfo=None
-    )
+    media_patch, chain_patch, subscriptions, _ = _patch_chains(mediainfo=None)
     with media_patch, chain_patch:
         with pytest.raises(HTTPException) as excinfo:
-            _run_add(tv, subscriptions, batch_writer)
+            _run_add(tv, subscriptions)
 
     assert excinfo.value.status_code == 500
 

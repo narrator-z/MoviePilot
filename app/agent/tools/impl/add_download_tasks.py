@@ -3,24 +3,24 @@
 import copy
 import re
 from pathlib import Path
-from typing import List, Optional, Type, Union, cast
+from typing import List, Optional, Type, Union
 
 from pydantic import BaseModel, Field
 
 from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.tags import ToolTag
-from app.application.directory import DirectoryHelper, validate_download_save_path
 from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
+from app.chain.search import SearchChain
+from app.runtime.settings import get_runtime_setting
 
-# SearchChain 由包根惰性公开，Pylint 无法静态解析 __getattr__ 映射。
-from app.chain.search.facade import SearchChain
 from app.domain.context import Context
 from app.domain.metainfo import MetaInfo
-from app.foundation.crypto import HashUtils
+from app.application.agentdata import get_agent_site_port
+from app.application.directory import DirectoryHelper, validate_download_save_path
 from app.runtime.log import logger
-from app.runtime.settings import get_runtime_setting
 from app.schemas.file import FileURI
+from app.foundation.crypto import HashUtils
 
 
 class AddDownloadTasksInput(BaseModel):
@@ -107,7 +107,7 @@ class AddDownloadTasksTool(MoviePilotTool):
         if index < 1:
             return None
 
-        results = cast(List[Context], SearchChain().last_search_results() or [])
+        results = SearchChain().last_search_results() or []
         if index > len(results):
             return None
         context = results[index - 1]
@@ -130,10 +130,7 @@ class AddDownloadTasksTool(MoviePilotTool):
         if index < 1:
             return None
 
-        results = cast(
-            List[Context],
-            await SearchChain().async_last_search_results() or [],
-        )
+        results = await SearchChain().async_last_search_results() or []
         if index > len(results):
             return None
         context = results[index - 1]
@@ -232,15 +229,12 @@ class AddDownloadTasksTool(MoviePilotTool):
         """同步提交带上下文的下载任务，避免站点下载与下载器调用阻塞事件循环。"""
         if save_path is not None:
             save_path = validate_download_save_path(save_path)
-        return cast(
-            tuple[Optional[str], Optional[str]],
-            DownloadChain().download_single(
-                context=context,
-                downloader=downloader,
-                save_path=save_path,
-                label=merged_labels,
-                return_detail=True,
-            ),
+        return DownloadChain().download_single(
+            context=context,
+            downloader=downloader,
+            save_path=save_path,
+            label=merged_labels,
+            return_detail=True,
         )
 
     async def run(self, torrent_url: Optional[List[str]] = None,
@@ -282,7 +276,7 @@ class AddDownloadTasksTool(MoviePilotTool):
                         failed_messages.append(f"{torrent_input} 缺少站点名称")
                         continue
 
-                    siteinfo = await self.data.sites.async_get_by_name(site_name)
+                    siteinfo = await get_agent_site_port().async_get_by_name(site_name)
                     if not siteinfo:
                         failed_messages.append(f"{torrent_input} 未找到站点信息 {site_name}")
                         continue
@@ -295,11 +289,11 @@ class AddDownloadTasksTool(MoviePilotTool):
                     torrent_info.description = torrent_description
                     torrent_info.enclosure = enclosure
                     torrent_info.site_name = site_name
-                    torrent_info.site_ua = siteinfo.ua or ""
-                    torrent_info.site_cookie = siteinfo.cookie or ""
-                    torrent_info.site_proxy = bool(siteinfo.proxy)
-                    torrent_info.site_order = siteinfo.pri or 0
-                    torrent_info.site_downloader = siteinfo.downloader or ""
+                    torrent_info.site_ua = siteinfo.ua
+                    torrent_info.site_cookie = siteinfo.cookie
+                    torrent_info.site_proxy = siteinfo.proxy
+                    torrent_info.site_order = siteinfo.pri
+                    torrent_info.site_downloader = siteinfo.downloader
                     context.torrent_info = torrent_info
 
                     meta_info = cached_context.meta_info or MetaInfo(

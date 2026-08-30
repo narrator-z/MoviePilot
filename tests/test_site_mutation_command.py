@@ -2,7 +2,6 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.application.site.contract import SiteMutation, SitePriorityMutation
 from app.application.site.mutation import SiteMutationCommand
 
 
@@ -48,12 +47,11 @@ async def test_create_site_commits_before_updated_event():
 
     assert result.success is True
     assert calls == ["commit", "event"]
-    mutation = dependencies["repository"].stage_create.await_args.args[0]
-    assert isinstance(mutation, SiteMutation)
-    assert mutation.values["domain"] == "demo.example"
-    assert mutation.values["url"] == "https://demo.example/"
-    assert mutation.values["name"] == "Demo"
-    assert mutation.values["public"] == 1
+    payload = dependencies["repository"].stage_create.await_args.args[0]
+    assert payload["domain"] == "demo.example"
+    assert payload["url"] == "https://demo.example/"
+    assert payload["name"] == "Demo"
+    assert payload["public"] == 1
 
 
 @pytest.mark.asyncio
@@ -95,10 +93,5 @@ async def test_update_priorities_uses_one_transaction():
     result = await command.update_priorities(priorities)
 
     assert result.success is True
-    dependencies["repository"].stage_priorities.assert_awaited_once_with(
-        (
-            SitePriorityMutation(site_id=1, priority=2),
-            SitePriorityMutation(site_id=2, priority=1),
-        )
-    )
+    dependencies["repository"].stage_priorities.assert_awaited_once_with(priorities)
     dependencies["unit_of_work"].commit.assert_awaited_once_with()

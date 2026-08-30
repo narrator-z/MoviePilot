@@ -3,15 +3,13 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.application.outbox import ClaimedOutboxMessage
 from app.application.subscription.delete import (
     DeleteSubscribeCommand,
+    SyncDeleteSubscribeCommand,
     SubscribeDeletionActor,
     SubscribeDeletionCandidate,
-    SyncDeleteSubscribeCommand,
 )
 from app.db.models.subscribe import Subscribe
 from app.db.oper.subscribe import SubscribeOper
@@ -71,27 +69,9 @@ class _Outbox:
         if self.stage_error:
             raise self.stage_error
 
-    async def claim_by_event_key(self, event_key, _now, _lease_until):
-        """记录并返回当前测试拥有的异步 lease。"""
-        self.calls.append(("outbox_claim", event_key))
-        return ClaimedOutboxMessage(
-            message_id=len(self.calls),
-            event_key=event_key,
-            topic="test",
-            payload={},
-            payload_version=1,
-            attempt=1,
-        )
-
-    async def complete(self, message_id, attempt, _completed_at):
-        """记录带 attempt fencing 的异步完成。"""
-        self.calls.append(("outbox_complete", message_id, attempt))
-        return True
-
-    async def retry(self, message_id, attempt, **_kwargs):
-        """记录带 attempt fencing 的异步重试。"""
-        self.calls.append(("outbox_retry", message_id, attempt))
-        return True
+    async def complete_by_event_key(self, event_key, _completed_at):
+        """记录即时事件成功后的 intent 收口。"""
+        self.calls.append(("outbox_complete", event_key))
 
 
 class _SyncRepository:
@@ -145,27 +125,9 @@ class _SyncOutbox:
         """记录同步暂存的 intent。"""
         self.calls.append(("outbox_stage", intent))
 
-    def claim_by_event_key(self, event_key, _now, _lease_until):
-        """记录并返回当前测试拥有的同步 lease。"""
-        self.calls.append(("outbox_claim", event_key))
-        return ClaimedOutboxMessage(
-            message_id=len(self.calls),
-            event_key=event_key,
-            topic="test",
-            payload={},
-            payload_version=1,
-            attempt=1,
-        )
-
-    def complete(self, message_id, attempt, _completed_at):
-        """记录带 attempt fencing 的同步完成。"""
-        self.calls.append(("outbox_complete", message_id, attempt))
-        return True
-
-    def retry(self, message_id, attempt, **_kwargs):
-        """记录带 attempt fencing 的同步重试。"""
-        self.calls.append(("outbox_retry", message_id, attempt))
-        return True
+    def complete_by_event_key(self, event_key, _completed_at):
+        """记录同步完成的 intent。"""
+        self.calls.append(("outbox_complete", event_key))
 
 
 def _candidate(username="alice"):
@@ -213,7 +175,6 @@ def _command(
         publish_deleted=publish,
         report_deleted=report,
         outbox=outbox,
-        dispatch_store=outbox,
     )
 
 
@@ -236,7 +197,6 @@ def _async_report_command(candidate, calls, result=True, error=None, outbox=None
         publish_deleted=publish,
         report_deleted=report,
         outbox=outbox,
-        dispatch_store=outbox,
     )
 
 
@@ -264,7 +224,6 @@ def _sync_command(
         publish_deleted=publish,
         report_deleted=report,
         outbox=outbox,
-        dispatch_store=outbox,
     )
 
 
@@ -283,9 +242,7 @@ async def test_owner_delete_commits_before_event_and_report():
     assert [call[0] for call in calls] == ["get", "delete", "commit", "event", "report"]
     assert calls[3][2]["subscribe_info"] == _candidate().event_payload
     assert calls[3][2]["idempotency_key"].startswith("subscribe.deleted:7:")
-    report_payload = dict(calls[4][1])
-    assert report_payload.pop("idempotency_key").endswith(":report")
-    assert report_payload == _candidate().event_payload
+    assert calls[4][1] == _candidate().event_payload
 
 
 @pytest.mark.asyncio
@@ -400,10 +357,8 @@ async def test_delete_stages_outbox_before_commit_and_completes_after_event():
         "outbox_stage",
         "outbox_stage",
         "commit",
-        "outbox_claim",
         "event",
         "outbox_complete",
-        "outbox_claim",
         "report",
         "outbox_complete",
     ]
@@ -411,8 +366,8 @@ async def test_delete_stages_outbox_before_commit_and_completes_after_event():
     assert intent.topic == "subscribe.deleted"
     report_intent = calls[3][1]
     assert report_intent.topic == "subscribe.deleted.report"
-    assert intent.event_key == calls[6][2]["idempotency_key"]
-    assert calls[5][1] == intent.event_key
+    assert intent.event_key == calls[5][2]["idempotency_key"]
+    assert calls[6][1] == intent.event_key
     assert calls[8][1] == report_intent.event_key
 
 
@@ -453,8 +408,7 @@ async def test_async_reporter_completes_report_intent_only_after_confirmation():
 
     assert [call[0] for call in calls] == [
         "get", "delete", "outbox_stage", "outbox_stage", "commit",
-        "outbox_claim", "event", "outbox_complete", "outbox_claim",
-        "report", "outbox_complete",
+        "event", "outbox_complete", "report", "outbox_complete",
     ]
 
 
@@ -471,8 +425,7 @@ async def test_async_reporter_false_keeps_report_intent_pending():
 
     assert [call[0] for call in calls] == [
         "get", "delete", "outbox_stage", "outbox_stage", "commit",
-        "outbox_claim", "event", "outbox_complete", "outbox_claim",
-        "report", "outbox_retry",
+        "event", "outbox_complete", "report",
     ]
 
 
@@ -494,8 +447,7 @@ async def test_async_reporter_error_keeps_report_intent_pending():
 
     assert [call[0] for call in calls] == [
         "get", "delete", "outbox_stage", "outbox_stage", "commit",
-        "outbox_claim", "event", "outbox_complete", "outbox_claim",
-        "report", "outbox_retry",
+        "event", "outbox_complete", "report",
     ]
 
 
@@ -531,7 +483,7 @@ async def test_repository_candidate_uses_loaded_orm_snapshot(monkeypatch):
 @pytest.mark.asyncio
 async def test_repository_stage_delete_does_not_commit():
     """真实仓储只登记删除，提交必须由请求级 UnitOfWork 执行。"""
-    session = MagicMock(spec=AsyncSession)
+    session = type("SessionStub", (), {})()
     session.execute = AsyncMock()
     session.commit = AsyncMock()
 
@@ -553,8 +505,7 @@ def test_sync_delete_uses_same_durable_effect_order():
 
     assert [call[0] for call in calls] == [
         "get", "delete", "outbox_stage", "outbox_stage", "commit",
-        "outbox_claim", "event", "outbox_complete", "outbox_claim",
-        "report", "outbox_complete",
+        "event", "outbox_complete", "report", "outbox_complete",
     ]
     assert calls[2][1].topic == "subscribe.deleted"
     assert calls[3][1].topic == "subscribe.deleted.report"
@@ -576,12 +527,9 @@ def test_sync_delete_report_failure_returns_success_and_keeps_intent_pending():
     ) is True
     assert [call[0] for call in calls] == [
         "get", "delete", "outbox_stage", "outbox_stage", "commit",
-        "outbox_claim", "event", "outbox_complete", "outbox_claim",
-        "report", "outbox_retry",
+        "event", "outbox_complete", "report",
     ]
-    report_payload = dict(calls[9][1])
-    assert report_payload.pop("idempotency_key").endswith(":report")
-    assert report_payload == _candidate().event_payload
+    assert calls[7][1] == _candidate().event_payload
 
 
 @pytest.mark.parametrize("failure", ["delete", "commit"])

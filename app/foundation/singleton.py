@@ -1,7 +1,6 @@
 import abc
 import threading
 import weakref
-from typing import Any
 
 
 class Singleton(abc.ABCMeta, type):
@@ -12,23 +11,11 @@ class Singleton(abc.ABCMeta, type):
     _instances: dict = {}
     _lock = threading.RLock()
 
-    def get_existing_instance(cls, *args: Any, **kwargs: Any) -> Any:
+    def get_existing_instance(cls, *args, **kwargs):
         """按相同参数返回已创建实例，不触发初始化"""
         key = (cls, args, frozenset(kwargs.items()))
         with cls._lock:
             return cls._instances.get(key)
-
-    def release_existing_instance(cls, instance: object) -> bool:
-        """仅在身份匹配时释放已收敛实例，供显式生命周期重新创建 owner。"""
-        with cls._lock:
-            keys = [
-                key
-                for key, value in cls._instances.items()
-                if key[0] is cls and value is instance
-            ]
-            for key in keys:
-                cls._instances.pop(key, None)
-            return bool(keys)
 
     def __call__(cls, *args, **kwargs):
         """按类和构造参数创建或复用实例。"""
@@ -68,14 +55,6 @@ class SingletonClass(abc.ABCMeta, type):
         with cls._lock:
             return cls._instances.get(cls)
 
-    def release_existing_instance(cls, instance: object) -> bool:
-        """仅在身份匹配时释放已收敛实例，供显式生命周期重新创建 owner。"""
-        with cls._lock:
-            if cls._instances.get(cls) is not instance:
-                return False
-            cls._instances.pop(cls, None)
-            return True
-
     def __call__(cls, *args, **kwargs):
         """按类创建或复用唯一实例。"""
         with cls._lock:
@@ -106,19 +85,6 @@ class WeakSingleton(abc.ABCMeta, type):
     """
     _instances: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
     _lock = threading.RLock()
-
-    def get_existing_instance(cls) -> Any:
-        """返回仍存活的已创建实例，不触发初始化。"""
-        with cls._lock:
-            return cls._instances.get(cls)
-
-    def release_existing_instance(cls, instance: object) -> bool:
-        """仅在身份匹配时释放已关闭实例。"""
-        with cls._lock:
-            if cls._instances.get(cls) is not instance:
-                return False
-            cls._instances.pop(cls, None)
-            return True
 
     def __call__(cls, *args, **kwargs):
         """按类创建或复用仍有强引用的实例。"""

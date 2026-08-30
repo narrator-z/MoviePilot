@@ -1,27 +1,24 @@
 """下载任务应用服务测试。"""
 
+from types import SimpleNamespace
+
 from app.application.download.tasks import DownloadTaskService
-from app.application.history import DownloadHistorySnapshot
-from app.schemas.transfer import DownloaderTorrent
-from app.schemas.types import MediaSource
 
 
 def test_download_task_service_enriches_history_and_controls_task():
     """下载任务查询应附加历史媒体信息，控制方法只转发规范参数。"""
-    torrent = DownloaderTorrent(hash="hash")
-    history = DownloadHistorySnapshot(
-        id=1,
-        path="/downloads/test",
-        media_source=MediaSource.TMDB,
+    torrent = SimpleNamespace(hash="hash", media=None)
+    history = SimpleNamespace(
+        media_source="tmdb",
         media_id="123",
         type="电影",
         title="测试电影",
-        seasons="1",
-        episodes="2",
+        seasons=[1],
+        episodes=[2],
         poster="poster",
         image="backdrop",
         torrent_site="站点",
-        userid="1",
+        userid=1,
         username="alice",
     )
     calls = []
@@ -34,8 +31,7 @@ def test_download_task_service_enriches_history_and_controls_task():
     )
 
     assert service.downloading("qb") == [torrent]
-    assert torrent.media is not None
-    assert torrent.media.media_id == "123"
+    assert torrent.media["media_id"] == "123"
     assert torrent.username == "alice"
     assert service.set_downloading("hash", "start", "qb") is True
     assert service.set_downloading("hash", "stop", "qb") is True

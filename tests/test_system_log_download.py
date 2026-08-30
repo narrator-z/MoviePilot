@@ -4,7 +4,6 @@ import asyncio
 import io
 import threading
 import zipfile
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,12 +12,7 @@ from fastapi import HTTPException
 from starlette.responses import Response
 
 from app.api.endpoints import system as system_endpoint
-from app.application.configuration import (
-    get_configured_system_config,
-    get_runtime_settings,
-)
 from app.runtime.config import settings
-from app.startup.composition.system import compose_system_service
 
 
 def test_logging_routes_use_superuser_dependency():
@@ -52,34 +46,7 @@ def fixture_isolated_log_path(monkeypatch, tmp_path: Path) -> Path:
     return log_path
 
 
-@pytest.fixture(name="system_runtime")
-def fixture_system_runtime(isolated_log_path):
-    """构造使用真实文件日志 Adapter 的最小 HostRuntime 投影。"""
-
-    @asynccontextmanager
-    async def rule_group_mutation():
-        """提供本组日志测试不会进入的规则组事务替身。"""
-        yield SimpleNamespace()
-
-    configured_settings = get_runtime_settings()
-    settings_port = SimpleNamespace(
-        get=lambda key, default=None: (
-            isolated_log_path
-            if key == "LOG_PATH"
-            else configured_settings.get(key, default)
-        )
-    )
-    service = compose_system_service(
-        settings=settings_port,
-        system_config=get_configured_system_config(),
-        rule_group_mutation=rule_group_mutation,
-    )
-    return SimpleNamespace(system=service)
-
-
-def test_logging_requires_superuser_dependency(
-    monkeypatch, isolated_log_path, system_runtime
-):
+def test_logging_requires_superuser_dependency(monkeypatch, isolated_log_path):
     """实时日志查看接口必须通过管理员依赖，普通资源令牌不能直接读取日志。"""
     (isolated_log_path / "moviepilot.log").write_text("hello\n", encoding="utf-8")
     response = asyncio.run(
@@ -88,16 +55,13 @@ def test_logging_requires_superuser_dependency(
             length=-1,
             logfile="moviepilot.log",
             _=SimpleNamespace(id=1, name="admin", is_superuser=True),
-            runtime=system_runtime,
         )
     )
 
     assert isinstance(response, Response)
 
 
-def test_download_moviepilot_logs_packages_latest_ten_log_files(
-    isolated_log_path, system_runtime
-):
+def test_download_moviepilot_logs_packages_latest_ten_log_files(isolated_log_path):
     """传入 moviepilot 时下载主程序滚动日志，最多打包 10 个文件。"""
     for index in range(12):
         (isolated_log_path / f"moviepilot.log.{index}").write_text(f"old-{index}", encoding="utf-8")
@@ -106,11 +70,7 @@ def test_download_moviepilot_logs_packages_latest_ten_log_files(
     (isolated_log_path / "plugins").mkdir()
     (isolated_log_path / "plugins" / "demo.log").write_text("plugin", encoding="utf-8")
 
-    response = asyncio.run(
-        system_endpoint.download_logging(
-            name="moviepilot", _=SimpleNamespace(), runtime=system_runtime
-        )
-    )
+    response = asyncio.run(system_endpoint.download_logging(name="moviepilot", _=SimpleNamespace()))
     body = asyncio.run(_read_streaming_body(response))
 
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
@@ -127,9 +87,7 @@ def test_download_moviepilot_logs_packages_latest_ten_log_files(
     assert "moviepilot.txt" not in names
 
 
-def test_download_plugin_logs_packages_plugin_files_only(
-    isolated_log_path, system_runtime
-):
+def test_download_plugin_logs_packages_plugin_files_only(isolated_log_path):
     """传入插件 ID 时只下载该插件滚动日志，最多打包 10 个文件。"""
     plugin_dir = isolated_log_path / "plugins"
     plugin_dir.mkdir()
@@ -139,11 +97,7 @@ def test_download_plugin_logs_packages_plugin_files_only(
     (plugin_dir / "other.log").write_text("other", encoding="utf-8")
     (isolated_log_path / "moviepilot.log").write_text("main", encoding="utf-8")
 
-    response = asyncio.run(
-        system_endpoint.download_logging(
-            name="DemoPlugin", _=SimpleNamespace(), runtime=system_runtime
-        )
-    )
+    response = asyncio.run(system_endpoint.download_logging(name="DemoPlugin", _=SimpleNamespace()))
     body = asyncio.run(_read_streaming_body(response))
 
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
@@ -158,27 +112,27 @@ def test_download_plugin_logs_packages_plugin_files_only(
     assert "moviepilot.log" not in names
 
 
-def test_download_log_zip_generation_runs_outside_event_loop_thread(
-    monkeypatch, isolated_log_path, system_runtime
-):
+def test_download_log_zip_generation_runs_outside_event_loop_thread(monkeypatch, isolated_log_path):
     """日志压缩 I/O 必须离开事件循环线程执行，避免大日志下载阻塞其他请求。"""
     (isolated_log_path / "moviepilot.log").write_text("current", encoding="utf-8")
     event_loop_thread = threading.current_thread().name
     write_threads = []
-    original_write = zipfile.ZipFile.writestr
+    original_write = zipfile.ZipFile.write
 
-    def capture_write_thread(self, zinfo_or_arcname, data, compress_type=None, compresslevel=None):
+    def capture_write_thread(self, filename, arcname=None, compress_type=None, compresslevel=None):
         """记录实际 zip 写入线程，并保持原始 ZipFile.write 行为。"""
         write_threads.append(threading.current_thread().name)
-        return original_write(self, zinfo_or_arcname, data, compress_type, compresslevel)
-
-    monkeypatch.setattr(zipfile.ZipFile, "writestr", capture_write_thread)
-
-    response = asyncio.run(
-        system_endpoint.download_logging(
-            name="moviepilot", _=SimpleNamespace(), runtime=system_runtime
+        return original_write(
+            self,
+            filename,
+            arcname=arcname,
+            compress_type=compress_type,
+            compresslevel=compresslevel,
         )
-    )
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", capture_write_thread)
+
+    response = asyncio.run(system_endpoint.download_logging(name="moviepilot", _=SimpleNamespace()))
     body = asyncio.run(_read_streaming_body(response))
 
     assert body

@@ -1,13 +1,13 @@
 import json
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple, Optional
 
+from app.runtime.log import logger
+from app.runtime.settings import get_runtime_setting
+from app.foundation.crypto import CryptoJsUtils, HashUtils
 from app.adapters.network.http import RequestUtils
 from app.domain import site as site_rules
 from app.foundation import text as text_tools
-from app.foundation.crypto import CryptoJsUtils, HashUtils
 from app.foundation.url import UrlUtils
-from app.runtime.log import logger
-from app.runtime.settings import get_runtime_setting
 
 
 def _runtime_setting(key: str) -> Any:
@@ -18,16 +18,13 @@ def _runtime_setting(key: str) -> Any:
 class CookieCloudHelper:
     """负责 CookieCloud 配置同步、下载和本地数据解析。"""
 
-    _ignore_cookies: list[str] = [
-        "CookieAutoDeleteBrowsingDataCleanup",
-        "CookieAutoDeleteCleaningDiscarded",
-    ]
+    _ignore_cookies: list = ["CookieAutoDeleteBrowsingDataCleanup", "CookieAutoDeleteCleaningDiscarded"]
 
-    def __init__(self) -> None:
+    def __init__(self):
         """加载当前 CookieCloud 配置。"""
         self.__sync_setting()
 
-    def __sync_setting(self) -> None:
+    def __sync_setting(self):
         """
         同步CookieCloud配置项
         """
@@ -37,7 +34,7 @@ class CookieCloudHelper:
         self._enable_local = _runtime_setting("COOKIECLOUD_ENABLE_LOCAL")
         self._local_path = _runtime_setting("COOKIE_PATH")
 
-    def download(self) -> Tuple[Optional[dict[str, str]], str]:
+    def download(self) -> Tuple[Optional[dict], str]:
         """
         从CookieCloud下载数据
         :return: Cookie数据、错误信息
@@ -57,20 +54,18 @@ class CookieCloudHelper:
                 return {}, "未从本地CookieCloud服务加载到cookie数据，请检查服务器设置、用户KEY及加密密码是否正确"
         else:
             req_url = UrlUtils.combine_url(host=self._server, path=f"get/{self._key}")
-            with RequestUtils(content_type="application/json").response_manager(
-                method="GET", url=req_url
-            ) as ret:
-                if ret and ret.status_code == 200:
-                    try:
-                        result = ret.json()
-                        if not result:
-                            return {}, f"未从{self._server}下载到cookie数据"
-                    except Exception as err:
-                        return {}, f"从{self._server}下载cookie数据错误：{str(err)}"
-                elif ret:
-                    return None, f"远程同步CookieCloud失败，错误码：{ret.status_code}"
-                else:
-                    return None, "CookieCloud请求失败，请检查服务器地址、用户KEY及加密密码是否正确"
+            ret = RequestUtils(content_type="application/json").get_res(url=req_url)
+            if ret and ret.status_code == 200:
+                try:
+                    result = ret.json()
+                    if not result:
+                        return {}, f"未从{self._server}下载到cookie数据"
+                except Exception as err:
+                    return {}, f"从{self._server}下载cookie数据错误：{str(err)}"
+            elif ret:
+                return None, f"远程同步CookieCloud失败，错误码：{ret.status_code}"
+            else:
+                return None, "CookieCloud请求失败，请检查服务器地址、用户KEY及加密密码是否正确"
 
         encrypted = result.get("encrypted")
         if not encrypted:
@@ -91,7 +86,7 @@ class CookieCloudHelper:
         else:
             contents = result
         # 整理数据,使用domain域名的最后两级作为分组依据
-        domain_groups: dict[str, list[dict[str, Any]]] = {}
+        domain_groups = {}
         for site, cookies in contents.items():
             for cookie in cookies:
                 domain_key = site_rules.extract_domain(cookie.get("domain"))
@@ -127,8 +122,7 @@ class CookieCloudHelper:
         使用UUID和密码生成CookieCloud的加解密密钥
         """
         combined_string = f"{self._key}-{self._password}"
-        digest = str(HashUtils.md5(combined_string))
-        return digest[:16].encode("utf-8")
+        return HashUtils.md5(combined_string)[:16].encode("utf-8")
 
     def __load_local_encrypt_data(self, uuid: str) -> Dict[str, Any]:
         """
@@ -144,4 +138,4 @@ class CookieCloudHelper:
         with open(file_path, encoding="utf-8", errors="replace", mode="r") as file:
             read_content = file.read()
         data = json.loads(read_content.encode("utf-8"))
-        return data if isinstance(data, dict) else {}
+        return data

@@ -1,39 +1,68 @@
 """订阅删除应用用例及其依赖端口。"""
 
-import inspect
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Mapping, Optional, Protocol, cast
+import inspect
+from typing import Any, Awaitable, Callable, Mapping, Protocol, cast
 from uuid import uuid4
 
 from app.application.outbox import (
-    SUBSCRIBE_DELETED_TOPIC,
-    AsyncOutboxDispatchStore,
-    AsyncOutboxStager,
-    OutboxDispatchStore,
+    AsyncOutboxTransaction,
     OutboxIntent,
-    OutboxStager,
+    SyncOutboxTransaction,
     SyncUnitOfWork,
-    deliver_async_outbox_effect,
-    deliver_outbox_effect,
-)
-from app.application.subscription.contract import (
-    SubscribeDeletionCandidate,
-    SubscriptionStagingPort,
+    SUBSCRIBE_DELETED_TOPIC,
 )
 from app.runtime.log import logger
-from app.schemas.common import JsonData
 from app.schemas.event import SubscribeDeletedEventData
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SubscribeDeletionActor:
     """执行订阅删除的用户身份。"""
 
     username: str
     is_superuser: bool
 
+
+@dataclass(frozen=True)
+class SubscribeDeletionCandidate:
+    """删除前读取出的订阅快照，不向应用层暴露 ORM 对象。"""
+
+    subscribe_id: int
+    username: str | None
+    event_payload: Mapping[str, object]
+
+
+class SubscribeDeletionRepository(Protocol):
+    """订阅删除用例需要的最小数据访问端口。"""
+
+    async def get_candidate(
+        self,
+        subscribe_id: int,
+    ) -> SubscribeDeletionCandidate | None:
+        """读取订阅及删除事件所需的稳定快照。"""
+        ...
+
+    async def stage_delete(self, subscribe_id: int) -> None:
+        """把已读取的订阅登记为待删除，但不自行提交事务。"""
+        ...
+
+
+class SyncSubscribeDeletionRepository(Protocol):
+    """同步消息入口执行订阅删除所需的最小数据访问端口。"""
+
+    def get_candidate_sync(
+        self,
+        subscribe_id: int,
+    ) -> SubscribeDeletionCandidate | None:
+        """读取订阅及删除事件所需的稳定快照。"""
+        ...
+
+    def stage_delete_sync(self, subscribe_id: int) -> None:
+        """把已读取的订阅登记为待删除，但不自行提交事务。"""
+        ...
 
 class AsyncUnitOfWork(Protocol):
     """订阅写用例使用的异步事务端口。"""
@@ -47,18 +76,18 @@ class AsyncUnitOfWork(Protocol):
         ...
 
 
-SubscribeDeletedPublisher = Callable[[dict[str, JsonData]], Awaitable[None]]
-SubscribeDeletedReporter = Callable[[Mapping[str, JsonData]], object | Awaitable[object]]
-SyncSubscribeDeletedPublisher = Callable[[dict[str, JsonData]], None]
-SyncSubscribeDeletedReporter = Callable[[Mapping[str, JsonData]], object]
+SubscribeDeletedPublisher = Callable[[dict[str, Any]], Awaitable[None]]
+SubscribeDeletedReporter = Callable[[Mapping[str, object]], object | Awaitable[object]]
+SyncSubscribeDeletedPublisher = Callable[[dict[str, Any]], None]
+SyncSubscribeDeletedReporter = Callable[[Mapping[str, object]], object]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _SubscribeDeletionEffects:
     """同步和异步入口共用的删除事件、统计与 outbox 意图。"""
 
-    event_payload: dict[str, JsonData]
-    report_payload: dict[str, JsonData]
+    event_payload: dict[str, Any]
+    report_payload: dict[str, object]
     event_intent: OutboxIntent
     report_intent: OutboxIntent
 
@@ -68,12 +97,11 @@ class DeleteSubscribeCommand:
 
     def __init__(
         self,
-        repository: SubscriptionStagingPort,
+        repository: SubscribeDeletionRepository,
         unit_of_work: AsyncUnitOfWork,
         publish_deleted: SubscribeDeletedPublisher,
         report_deleted: SubscribeDeletedReporter,
-        outbox: Optional[AsyncOutboxStager] = None,
-        dispatch_store: Optional[AsyncOutboxDispatchStore] = None,
+        outbox: AsyncOutboxTransaction | None = None,
     ) -> None:
         """注入数据访问、事务与提交后副作用端口。"""
         self._repository = repository
@@ -81,7 +109,6 @@ class DeleteSubscribeCommand:
         self._publish_deleted = publish_deleted
         self._report_deleted = report_deleted
         self._outbox = outbox
-        self._dispatch_store = dispatch_store
 
     async def execute(
         self,
@@ -119,37 +146,28 @@ class DeleteSubscribeCommand:
             await self._unit_of_work.rollback()
             raise
 
-        if self._dispatch_store:
-            await deliver_async_outbox_effect(
-                self._dispatch_store,
+        await self._publish_deleted(effects.event_payload)
+        if self._outbox:
+            await self._outbox.complete_by_event_key(
                 effects.event_intent.event_key,
-                lambda: self._publish_deleted(effects.event_payload),
+                datetime.now(timezone.utc),
             )
-        else:
-            await self._publish_deleted(effects.event_payload)
         # 上报适配器会自行白名单过滤公开字段；传完整删除前快照可保留音乐实体维度，
         # 避免 Agent 与 API 入口收敛后丢失 music_type / total_tracks。
         try:
-
-            async def report() -> object:
-                """统一等待同步或异步统计 reporter 的确认结果。"""
-                result = self._report_deleted(effects.report_payload)
-                return await result if inspect.isawaitable(result) else result
-
-            report_result: object
-            if self._dispatch_store:
-                report_result = await deliver_async_outbox_effect(
-                    self._dispatch_store,
-                    effects.report_intent.event_key,
-                    report,
-                )
-            else:
-                report_result = await report()
+            report_result = self._report_deleted(effects.report_payload)
+            if inspect.isawaitable(report_result):
+                report_result = await report_result
         except Exception as error:
             logger.warning(f"订阅删除统计上报失败，将由后台重试：{error}")
         else:
             if report_result is False:
                 logger.warning("订阅删除统计上报未确认，将由后台重试")
+            elif self._outbox:
+                await self._outbox.complete_by_event_key(
+                    effects.report_intent.event_key,
+                    datetime.now(timezone.utc),
+                )
         return True
 
 
@@ -158,12 +176,11 @@ class SyncDeleteSubscribeCommand:
 
     def __init__(
         self,
-        repository: SubscriptionStagingPort,
+        repository: SyncSubscribeDeletionRepository,
         unit_of_work: SyncUnitOfWork,
         publish_deleted: SyncSubscribeDeletedPublisher,
         report_deleted: SyncSubscribeDeletedReporter,
-        outbox: Optional[OutboxStager] = None,
-        dispatch_store: Optional[OutboxDispatchStore] = None,
+        outbox: SyncOutboxTransaction | None = None,
     ) -> None:
         """注入同步数据访问、事务与提交后副作用端口。"""
         self._repository = repository
@@ -171,7 +188,6 @@ class SyncDeleteSubscribeCommand:
         self._publish_deleted = publish_deleted
         self._report_deleted = report_deleted
         self._outbox = outbox
-        self._dispatch_store = dispatch_store
 
     def execute(
         self,
@@ -199,29 +215,24 @@ class SyncDeleteSubscribeCommand:
             self._unit_of_work.rollback()
             raise
 
-        if self._dispatch_store:
-            deliver_outbox_effect(
-                self._dispatch_store,
+        self._publish_deleted(effects.event_payload)
+        if self._outbox:
+            self._outbox.complete_by_event_key(
                 effects.event_intent.event_key,
-                lambda: self._publish_deleted(effects.event_payload),
+                datetime.now(timezone.utc),
             )
-        else:
-            self._publish_deleted(effects.event_payload)
         try:
-            report_result: object
-            if self._dispatch_store:
-                report_result = deliver_outbox_effect(
-                    self._dispatch_store,
-                    effects.report_intent.event_key,
-                    lambda: self._report_deleted(effects.report_payload),
-                )
-            else:
-                report_result = self._report_deleted(effects.report_payload)
+            report_result = self._report_deleted(effects.report_payload)
         except Exception as error:
             logger.warning(f"订阅删除统计上报失败，将由后台重试：{error}")
         else:
             if report_result is False:
                 logger.warning("订阅删除统计上报未确认，将由后台重试")
+            elif self._outbox:
+                self._outbox.complete_by_event_key(
+                    effects.report_intent.event_key,
+                    datetime.now(timezone.utc),
+                )
         return True
 
 
@@ -239,14 +250,13 @@ def can_delete_subscribe(
 
 def _build_deletion_effects(
     subscribe_id: int,
-    subscribe_info: Mapping[str, JsonData],
+    subscribe_info: Mapping[str, object],
 ) -> _SubscribeDeletionEffects:
     """一次性构造两种执行风格共用的事件、上报和 durable intent。"""
     event_payload = build_subscribe_deleted_payload(subscribe_id, subscribe_info)
-    event_key = cast(str, event_payload["idempotency_key"])
+    event_key = event_payload["idempotency_key"]
     report_key = f"{event_key}:report"
     report_payload = dict(subscribe_info)
-    report_payload["idempotency_key"] = report_key
     return _SubscribeDeletionEffects(
         event_payload=event_payload,
         report_payload=report_payload,
@@ -268,12 +278,12 @@ def _build_deletion_effects(
 
 def build_subscribe_deleted_payload(
     subscribe_id: int,
-    subscribe_info: Mapping[str, JsonData],
-) -> dict[str, JsonData]:
+    subscribe_info: Mapping[str, object],
+) -> dict[str, Any]:
     """构造兼容旧字段并携带幂等键的订阅删除事件快照。"""
     event_key = f"subscribe.deleted:{subscribe_id}:{uuid4().hex}:v1"
     return cast(
-        dict[str, JsonData],
+        dict[str, Any],
         SubscribeDeletedEventData(
             subscribe_id=subscribe_id,
             subscribe_info=dict(subscribe_info),
@@ -284,3 +294,31 @@ def build_subscribe_deleted_payload(
 
 DeleteSubscribeScope = Callable[[], AbstractAsyncContextManager[DeleteSubscribeCommand]]
 SyncDeleteSubscribeScope = Callable[[], AbstractContextManager[SyncDeleteSubscribeCommand]]
+_configured_delete_scope: DeleteSubscribeScope | None = None
+_configured_sync_delete_scope: SyncDeleteSubscribeScope | None = None
+
+
+def configure_delete_subscribe_scope(provider: DeleteSubscribeScope) -> None:
+    """由启动组合根登记非 HTTP 入口使用的订阅删除事务作用域。"""
+    global _configured_delete_scope
+    _configured_delete_scope = provider
+
+
+def get_delete_subscribe_scope() -> AbstractAsyncContextManager[DeleteSubscribeCommand]:
+    """返回一次独占会话的订阅删除命令作用域。"""
+    if _configured_delete_scope is None:
+        raise RuntimeError("订阅删除事务作用域尚未配置")
+    return _configured_delete_scope()
+
+
+def configure_sync_delete_subscribe_scope(provider: SyncDeleteSubscribeScope) -> None:
+    """由启动组合根登记同步消息入口使用的订阅删除事务作用域。"""
+    global _configured_sync_delete_scope
+    _configured_sync_delete_scope = provider
+
+
+def get_sync_delete_subscribe_scope() -> AbstractContextManager[SyncDeleteSubscribeCommand]:
+    """返回一次独占同步会话的订阅删除命令作用域。"""
+    if _configured_sync_delete_scope is None:
+        raise RuntimeError("同步订阅删除事务作用域尚未配置")
+    return _configured_sync_delete_scope()

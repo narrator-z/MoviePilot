@@ -52,7 +52,7 @@ def test_async_blocking_scan_covers_runtime_entrypoints() -> None:
         "app/command.py",
         "app/factory.py",
         "app/main.py",
-        "app/scheduler",
+        "app/scheduler.py",
     }.issubset({str(path) for path in SCAN_ROOTS})
 
 

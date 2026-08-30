@@ -101,38 +101,13 @@ def test_prepare_database_creates_backup_before_schema_changes(monkeypatch) -> N
 
     assert calls == [
         "backup",
-        "alembic",
         "create_all",
         "before_alembic",
+        "alembic",
     ]
     assert logged_messages == [
         "数据库需要从版本 old 升级到 head，正在创建迁移前备份"
     ]
-
-
-def test_prepare_database_keeps_create_all_first_for_unversioned_database(
-        monkeypatch,
-) -> None:
-    """未标记旧库仍需先补齐基础表，再从 Alembic base 执行数据迁移。"""
-    calls: list[str] = []
-    monkeypatch.setattr(db_init, "get_engine", lambda: object())
-    monkeypatch.setattr(db_init, "_build_alembic_config", lambda _engine: object())
-    monkeypatch.setattr(
-        db_init,
-        "_migration_state",
-        lambda *_: (True, (), ("head",)),
-    )
-    monkeypatch.setattr(db_init.settings, "DB_BACKUP_ENABLE", False)
-    monkeypatch.setattr(db_init, "init_db", lambda: calls.append("create_all"))
-    monkeypatch.setattr(
-        db_init,
-        "update_db",
-        lambda _config: calls.append("alembic"),
-    )
-
-    db_init.prepare_database(before_alembic=lambda: calls.append("before_alembic"))
-
-    assert calls == ["create_all", "before_alembic", "alembic"]
 
 
 @pytest.mark.parametrize(
@@ -588,8 +563,10 @@ def test_migration_config_write_rolls_back_with_alembic_transaction(
         assert stored_templates == original_templates
 
 
-def test_initial_migration_does_not_seed_user_and_initializes_storages(monkeypatch) -> None:
-    """2.0.0 初始化只准备存储，管理员由首次访问页面创建。"""
+def test_initial_migration_rolls_back_user_and_storages_together(
+        monkeypatch,
+) -> None:
+    """2.0.0 管理员与存储初始化必须共享 Alembic 事务。"""
     migration = importlib.import_module(
         "database.versions.294b007932ef_2_0_0"
     )
@@ -620,18 +597,50 @@ def test_initial_migration_does_not_seed_user_and_initializes_storages(monkeypat
     )
     metadata.create_all(engine)
 
+    monkeypatch.setattr(migration.settings, "SUPERUSER", "migration-admin")
+    monkeypatch.setattr(
+        migration.settings,
+        "SUPERUSER_PASSWORD",
+        "migration-password",
+    )
+    monkeypatch.setattr(
+        migration,
+        "get_password_hash",
+        lambda password: f"hashed:{password}",
+    )
+
     with engine.connect() as connection:
+        transaction = connection.begin()
         monkeypatch.setattr(
             migration,
             "op",
             Operations(MigrationContext.configure(connection)),
         )
-        migration.upgrade()
-        connection.commit()
+
+        def fail_storages_write(
+                _connection,
+                _cursor,
+                statement,
+                _parameters,
+                _context,
+                _executemany,
+        ) -> None:
+            if statement.lstrip().upper().startswith("INSERT INTO SYSTEMCONFIG"):
+                raise RuntimeError("injected storages failure")
+
+        event.listen(engine, "after_cursor_execute", fail_storages_write)
+        try:
+            with pytest.raises(RuntimeError, match="injected storages failure"):
+                migration.upgrade()
+        finally:
+            event.remove(engine, "after_cursor_execute", fail_storages_write)
+            transaction.rollback()
 
     with engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM user")).scalar_one() == 0
-        assert connection.execute(text("SELECT value FROM systemconfig WHERE key = 'Storages'")).scalar_one()
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM systemconfig")
+        ).scalar_one() == 0
 
 
 def test_userconfig_cleanup_migration_uses_alembic_transaction(

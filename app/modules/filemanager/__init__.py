@@ -9,7 +9,11 @@ from typing import Any
 
 
 _EXPORTS = {
+    "DirectoryHelper": ("app.modules.filemanager.module", "DirectoryHelper"),
     "FileManagerModule": ("app.modules.filemanager.module", "FileManagerModule"),
+    "StorageBase": ("app.modules.filemanager.storages", "StorageBase"),
+    "TransHandler": ("app.modules.filemanager.transhandler", "TransHandler"),
+    "settings": ("app.modules.filemanager.module", "settings"),
 }
 
 
@@ -32,4 +36,10 @@ def __dir__() -> list[str]:
     return sorted({*globals(), *_EXPORTS})
 
 
-__all__ = ["FileManagerModule"]
+__all__ = [
+    "DirectoryHelper",
+    "FileManagerModule",
+    "StorageBase",
+    "TransHandler",
+    "settings",
+]

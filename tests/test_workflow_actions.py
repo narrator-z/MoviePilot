@@ -1,11 +1,9 @@
 from types import SimpleNamespace
 
-from app.domain.context import Context, TorrentInfo
-from app.domain.metainfo import MetaInfo
 from app.schemas.download import DownloadTask
 from app.schemas.file import FileItem
 from app.schemas.workflow import ActionContext, ActionResult
-from app.workflow import WorkflowManager
+from app.workflow import WorkFlowManager
 from app.workflow.actions import BaseAction
 from app.workflow.actions import fetch_downloads as fetch_downloads_module
 from app.workflow.actions import fetch_torrents as fetch_torrents_module
@@ -55,13 +53,15 @@ def test_fetch_torrents_filters_special_season_zero(monkeypatch):
 
         def search_by_title(self, **_kwargs):
             return [
-                Context(
-                    meta_info=MetaInfo("Test S00"),
-                    torrent_info=TorrentInfo(title="Test S00"),
+                SimpleNamespace(
+                    meta_info=SimpleNamespace(year=None, begin_season=0),
+                    media_info=None,
+                    torrent_info=SimpleNamespace(title="Test S00"),
                 ),
-                Context(
-                    meta_info=MetaInfo("Test S01"),
-                    torrent_info=TorrentInfo(title="Test S01"),
+                SimpleNamespace(
+                    meta_info=SimpleNamespace(year=None, begin_season=1),
+                    media_info=None,
+                    torrent_info=SimpleNamespace(title="Test S01"),
                 ),
             ]
 
@@ -239,7 +239,7 @@ def test_execute_with_inputs_maps_contract_inputs_outputs_and_runtime(monkeypatc
 
 def test_workflow_manager_list_actions_exposes_contract():
     """动作列表应返回固定输入输出契约。"""
-    manager = object.__new__(WorkflowManager)
+    manager = object.__new__(WorkFlowManager)
     manager._actions = {"FetchRssAction": FetchRssAction}
 
     actions = manager.list_actions()

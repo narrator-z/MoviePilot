@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
-from app.adapters.network.http import RequestUtils
-from app.foundation.url import UrlUtils
-from app.modules.ugreen.crypto import UgreenCrypto
+from requests import Session
+
 from app.runtime.log import logger
+from app.modules.ugreen.crypto import UgreenCrypto
+from app.foundation.url import UrlUtils
 
 
 @dataclass
@@ -40,7 +41,7 @@ class Api:
 
     __slots__ = (
         "_host",
-        "_request_utils",
+        "_session",
         "_token",
         "_static_token",
         "_is_ugk",
@@ -75,11 +76,7 @@ class Api:
         :param verify_ssl: 是否校验 HTTPS 证书
         """
         self._host = self._normalize_base_url(host)
-        self._request_utils = RequestUtils(
-            use_session=True,
-            timeout=timeout,
-            verify=verify_ssl,
-        )
+        self._session = Session()
 
         self._token: Optional[str] = None
         self._static_token: Optional[str] = None
@@ -125,7 +122,7 @@ class Api:
         """
         关闭底层 HTTP 会话。
         """
-        self._request_utils.close()
+        self._session.close()
 
     @staticmethod
     def _normalize_base_url(host: str) -> str:
@@ -189,7 +186,7 @@ class Api:
         try:
             method = method.upper()
             if method == "POST":
-                resp = self._request_utils.post_res(
+                resp = self._session.post(
                     url=url,
                     headers=headers,
                     params=params,
@@ -198,16 +195,13 @@ class Api:
                     verify=self._verify_ssl,
                 )
             else:
-                resp = self._request_utils.get_res(
+                resp = self._session.get(
                     url=url,
                     headers=headers,
                     params=params,
                     timeout=self._timeout,
                     verify=self._verify_ssl,
                 )
-            if resp is None:
-                logger.error(f"请求绿联接口失败：{url} 未收到 HTTP 响应")
-                return None
             return resp.json()
         except Exception as err:
             logger.error(f"请求绿联接口失败：{url} {err}")
@@ -245,16 +239,13 @@ class Api:
         headers = self._common_headers()
 
         try:
-            check_resp = self._request_utils.post_res(
+            check_resp = self._session.post(
                 url=f"{self._host}/ugreen/v1/verify/check",
                 headers=headers,
                 json={"username": username},
                 timeout=self._timeout,
                 verify=self._verify_ssl,
             )
-            if check_resp is None:
-                logger.error("绿联获取登录公钥失败：未收到 HTTP 响应")
-                return None
             check_json = check_resp.json()
         except Exception as err:
             logger.error(f"绿联获取登录公钥失败：{err}")
@@ -348,7 +339,7 @@ class Api:
             "client_version": self._client_version,
             "language": self._language,
             "ug_agent": self._ug_agent,
-            "cookies": self._request_utils.get_cookies(),
+            "cookies": self._session.cookies.get_dict(),
         }
 
     def import_session_state(self, state: Mapping[str, Any]) -> bool:
@@ -389,7 +380,7 @@ class Api:
         cookies = state.get("cookies")
         if isinstance(cookies, Mapping):
             try:
-                self._request_utils.update_cookies(
+                self._session.cookies.update(
                     {
                         str(k): str(v)
                         for k, v in cookies.items()
@@ -425,7 +416,7 @@ class Api:
                 method="GET",
                 params={},
             )
-            self._request_utils.get_res(
+            self._session.get(
                 req.url,
                 headers=req.headers,
                 params=req.params,

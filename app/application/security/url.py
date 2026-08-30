@@ -2,25 +2,26 @@ import asyncio
 import hmac
 import importlib
 import ipaddress
+import socket
 import threading
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Protocol, Set, Union, cast
+from typing import Dict, Iterable, List, Optional, Set, Union
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from anyio import Path as AsyncPath
 from cachetools import TTLCache
 
 from app.application.configuration import get_token_runtime_config
+from app.runtime.log import logger
 from app.runtime.coalesce import (
     CoalesceDecision,
     CoalesceSummary,
     EventCoalescer,
 )
-from app.runtime.log import logger
+
 
 # DNS 解析结果缓存。
 # 正向缓存 TTL 选择 120s，短于常见 CDN / fake-ip 的 DNS TTL，避免长期持有失效 IP；
@@ -35,66 +36,12 @@ _dns_negative_cache: "TTLCache[str, bool]" = TTLCache(
     maxsize=_DNS_CACHE_MAXSIZE, ttl=_DNS_CACHE_TTL_NEGATIVE
 )
 # 同步路径下保护 TTLCache 读写：`cachetools.TTLCache` 本身非线程安全。
-# 锁只覆盖缓存读写，不包 DNS Port 调用，避免把解析本身串行化。
+# 锁只覆盖缓存读写，不包 `getaddrinfo`，避免把 DNS 查询本身串行化。
 _dns_cache_lock = threading.Lock()
-# 同一事件循环内按 hostname 合并并发异步解析；asyncio 原语不能跨 loop 共享。
-_DnsInflightKey = tuple[asyncio.AbstractEventLoop, str]
-_dns_inflight_locks: Dict[_DnsInflightKey, asyncio.Lock] = {}
+# 同 hostname 的并发异步解析去重：同一 hostname 首次未命中时建立锁，
+# 后续并发请求 await 同一把锁，避免对同一目标重复发起 `getaddrinfo`。
+_dns_inflight_locks: Dict[str, asyncio.Lock] = {}
 _dns_inflight_meta_lock = threading.Lock()
-_dns_resolver_lock = threading.Lock()
-_dns_resolver: Optional["DnsResolver"] = None
-_dns_resolver_generation = 0
-
-
-class DnsResolver(Protocol):
-    """安全 URL 校验所需的最小 DNS 解析端口。"""
-
-    def resolve(self, hostname: str) -> Optional[Sequence[str]]:
-        """同步返回主机名的全部 IP；解析失败时返回 None。"""
-        ...
-
-    async def async_resolve(self, hostname: str) -> Optional[Sequence[str]]:
-        """异步返回主机名的全部 IP；解析失败时返回 None。"""
-        ...
-
-
-def _clear_dns_runtime_state() -> None:
-    """清除 resolver 变更前的缓存与异步去重状态。"""
-    with _dns_cache_lock:
-        _dns_positive_cache.clear()
-        _dns_negative_cache.clear()
-    with _dns_inflight_meta_lock:
-        _dns_inflight_locks.clear()
-
-
-def configure_dns_resolver(resolver: DnsResolver) -> Optional[DnsResolver]:
-    """由启动组合根装配 DNS 端口，并返回先前实现供隔离环境恢复。"""
-    global _dns_resolver, _dns_resolver_generation
-    with _dns_resolver_lock:
-        previous = _dns_resolver
-        _dns_resolver = resolver
-        _dns_resolver_generation += 1
-        _clear_dns_runtime_state()
-    return previous
-
-
-def reset_dns_resolver(resolver: Optional[DnsResolver] = None) -> None:
-    """恢复指定 DNS 实现；省略参数时回到未装配状态。"""
-    global _dns_resolver, _dns_resolver_generation
-    with _dns_resolver_lock:
-        _dns_resolver = resolver
-        _dns_resolver_generation += 1
-        _clear_dns_runtime_state()
-
-
-def _dns_resolver_snapshot() -> tuple[DnsResolver, int]:
-    """返回 resolver 与绑定代际，未装配时稳定失败。"""
-    with _dns_resolver_lock:
-        resolver = _dns_resolver
-        generation = _dns_resolver_generation
-    if resolver is None:
-        raise RuntimeError("DNS 解析器尚未由启动组合根装配")
-    return resolver, generation
 
 
 def _resource_secret_key() -> str:
@@ -150,21 +97,19 @@ class UrlSafetyDiagnosis:
     matched_private_ranges: List[str] = field(default_factory=list)
 
 
-def _resolve_addresses_to_ips(
-    address_values: Optional[Sequence[str]],
+def _resolve_addrinfo_to_ips(
+    address_infos: Iterable,
 ) -> Optional[List[ipaddress._BaseAddress]]:
     """
-    将 DNS 端口返回的地址字符串归一化为 IP 列表。
+    将 `socket.getaddrinfo` 返回的结果归一化为 IP 列表。
 
-    任一地址无法解析即视为异常情况，整体返回 None 让上层按"不安全目标"
+    任一条目无法解析为 IP 即视为异常情况，整体返回 None 让上层按"不安全目标"
     处理，避免出现"部分 IP 漏校验"的情况。
     """
-    if not address_values:
-        return None
     addresses: List[ipaddress._BaseAddress] = []
-    for address_value in address_values:
+    for address_info in address_infos:
         try:
-            addresses.append(ipaddress.ip_address(address_value))
+            addresses.append(ipaddress.ip_address(address_info[4][0]))
         except ValueError:
             return None
     return addresses or None
@@ -175,26 +120,6 @@ class SecurityUtils:
 
     _SIGNED_URL_PURPOSE = "image-proxy"
     _SUBTITLE_DOWNLOAD_PURPOSE_PREFIX = "subtitle-download"
-
-    @staticmethod
-    def _resolved_path_is_safe(
-        base_path: Union[Path, AsyncPath],
-        user_path: Union[Path, AsyncPath],
-        user_suffix: str,
-        allowed_suffixes: Optional[Union[Set[str], List[str]]],
-    ) -> bool:
-        """统一解析后路径 containment 与后缀白名单判定。"""
-        if base_path != user_path and base_path not in user_path.parents:
-            return False
-        if allowed_suffixes is None:
-            return True
-        return user_suffix.lower() in set(allowed_suffixes)
-
-    @staticmethod
-    def _path_validation_failed(error: Exception) -> bool:
-        """统一记录路径解析异常并按默认拒绝策略返回。"""
-        logger.debug(f"Error occurred while validating paths: {error}")
-        return False
 
     @staticmethod
     def is_safe_path(base_path: Path, user_path: Path,
@@ -213,14 +138,19 @@ class SecurityUtils:
             base_path_resolved = base_path.resolve()
             user_path_resolved = user_path.resolve()
 
-            return SecurityUtils._resolved_path_is_safe(
-                base_path_resolved,
-                user_path_resolved,
-                user_path.suffix,
-                allowed_suffixes,
-            )
+            # 检查用户路径是否在基准目录或基准目录的子目录内
+            if base_path_resolved != user_path_resolved and base_path_resolved not in user_path_resolved.parents:
+                return False
+
+            if allowed_suffixes is not None:
+                allowed_suffixes = set(allowed_suffixes)
+                if user_path.suffix.lower() not in allowed_suffixes:
+                    return False
+
+            return True
         except Exception as e:
-            return SecurityUtils._path_validation_failed(e)
+            logger.debug(f"Error occurred while validating paths: {e}")
+            return False
 
     @staticmethod
     async def async_is_safe_path(base_path: AsyncPath, user_path: AsyncPath,
@@ -239,14 +169,19 @@ class SecurityUtils:
             base_path_resolved = await base_path.resolve()
             user_path_resolved = await user_path.resolve()
 
-            return SecurityUtils._resolved_path_is_safe(
-                base_path_resolved,
-                user_path_resolved,
-                user_path.suffix,
-                allowed_suffixes,
-            )
+            # 检查用户路径是否在基准目录或基准目录的子目录内
+            if base_path_resolved != user_path_resolved and base_path_resolved not in user_path_resolved.parents:
+                return False
+
+            if allowed_suffixes is not None:
+                allowed_suffixes = set(allowed_suffixes)
+                if user_path.suffix.lower() not in allowed_suffixes:
+                    return False
+
+            return True
         except Exception as e:
-            return SecurityUtils._path_validation_failed(e)
+            logger.debug(f"Error occurred while validating paths: {e}")
+            return False
 
     @staticmethod
     def _literal_ip(hostname: str) -> Optional[ipaddress._BaseAddress]:
@@ -270,34 +205,26 @@ class SecurityUtils:
 
         命中值为 `None` 表示命中负向缓存（先前解析失败）。
         """
-        with _dns_resolver_lock:
-            with _dns_cache_lock:
-                cached = _dns_positive_cache.get(hostname)
-                if cached is not None:
-                    return True, cached
-                if hostname in _dns_negative_cache:
-                    return True, None
+        with _dns_cache_lock:
+            cached = _dns_positive_cache.get(hostname)
+            if cached is not None:
+                return True, cached
+            if hostname in _dns_negative_cache:
+                return True, None
         return False, None
 
     @staticmethod
     def _cache_store(
-        hostname: str,
-        addresses: Optional[List[ipaddress._BaseAddress]],
-        generation: int,
+        hostname: str, addresses: Optional[List[ipaddress._BaseAddress]]
     ) -> None:
         """
-        将当前 resolver 代际的解析结果写入对应缓存。
-
-        resolver 被并发替换时，旧查询结果不得污染新实现的缓存。
+        将解析结果写入对应的正向/负向缓存。
         """
-        with _dns_resolver_lock:
-            if generation != _dns_resolver_generation:
-                return
-            with _dns_cache_lock:
-                if addresses is None:
-                    _dns_negative_cache[hostname] = True
-                else:
-                    _dns_positive_cache[hostname] = addresses
+        with _dns_cache_lock:
+            if addresses is None:
+                _dns_negative_cache[hostname] = True
+            else:
+                _dns_positive_cache[hostname] = addresses
 
     @staticmethod
     def _hostname_addresses(hostname: str) -> Optional[List[ipaddress._BaseAddress]]:
@@ -317,34 +244,32 @@ class SecurityUtils:
         if hit:
             return value
 
-        resolver, generation = _dns_resolver_snapshot()
-        addresses = _resolve_addresses_to_ips(resolver.resolve(hostname))
-        SecurityUtils._cache_store(hostname, addresses, generation)
+        try:
+            address_infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            SecurityUtils._cache_store(hostname, None)
+            return None
+        addresses = _resolve_addrinfo_to_ips(address_infos)
+        SecurityUtils._cache_store(hostname, addresses)
         return addresses
 
     @staticmethod
-    def _get_inflight_lock(
-        hostname: str,
-    ) -> tuple[_DnsInflightKey, asyncio.Lock]:
+    def _get_inflight_lock(hostname: str) -> asyncio.Lock:
         """
-        取得当前事件循环内 hostname 对应的 in-flight 锁。
+        取得 hostname 对应的 in-flight 锁，不存在则按需创建。
 
-        `asyncio.Lock` 只能由创建它的事件循环驱动，因此键必须包含 loop；模块级
-        `threading.Lock` 只保护索引本身，不能把 asyncio 原语变成跨线程锁。
+        用 `threading.Lock` 保护字典写入，避免多个事件循环线程并发创建出多把锁
+        破坏去重语义；锁本身是 `asyncio.Lock`，归属当前事件循环。
         """
-        key = (asyncio.get_running_loop(), hostname)
         with _dns_inflight_meta_lock:
-            lock = _dns_inflight_locks.get(key)
+            lock = _dns_inflight_locks.get(hostname)
             if lock is None:
                 lock = asyncio.Lock()
-                _dns_inflight_locks[key] = lock
-            return key, lock
+                _dns_inflight_locks[hostname] = lock
+            return lock
 
     @staticmethod
-    def _release_inflight_lock(
-        key: _DnsInflightKey,
-        lock: asyncio.Lock,
-    ) -> None:
+    def _release_inflight_lock(hostname: str, lock: asyncio.Lock) -> None:
         """
         请求结束后清理 in-flight 锁，避免长期持有大量已闲置的 `asyncio.Lock`。
 
@@ -354,9 +279,9 @@ class SecurityUtils:
         与"刚被等待者接走"两种情况，避免误删后续协程仍在使用的字典条目。
         """
         with _dns_inflight_meta_lock:
-            current = _dns_inflight_locks.get(key)
+            current = _dns_inflight_locks.get(hostname)
             if current is lock and not lock.locked():
-                _dns_inflight_locks.pop(key, None)
+                _dns_inflight_locks.pop(hostname, None)
 
     @staticmethod
     async def _hostname_addresses_async(
@@ -365,8 +290,8 @@ class SecurityUtils:
         """
         异步解析主机名并返回全部 IP 地址，与同步版本共用同一份 TTL 缓存。
 
-        通过注入的异步 DNS Port 解析，不阻塞 asyncio 事件循环；同 hostname 的
-        并发未命中请求通过 in-flight 锁去重，只发起一次 DNS 查询。
+        通过事件循环的默认线程池执行 `getaddrinfo`，不阻塞 asyncio 事件循环；
+        同 hostname 的并发未命中请求通过 in-flight 锁去重，只发起一次 DNS 查询。
         """
         if not hostname:
             return None
@@ -378,7 +303,7 @@ class SecurityUtils:
         if hit:
             return value
 
-        lock_key, lock = SecurityUtils._get_inflight_lock(hostname)
+        lock = SecurityUtils._get_inflight_lock(hostname)
         try:
             async with lock:
                 # 等到锁后再查一次缓存，前一个持锁者可能已经回填结果
@@ -386,16 +311,21 @@ class SecurityUtils:
                 if hit:
                     return value
 
-                resolver, generation = _dns_resolver_snapshot()
-                addresses = _resolve_addresses_to_ips(
-                    await resolver.async_resolve(hostname)
-                )
-                SecurityUtils._cache_store(hostname, addresses, generation)
+                loop = asyncio.get_running_loop()
+                try:
+                    address_infos = await loop.getaddrinfo(
+                        hostname, None, type=socket.SOCK_STREAM
+                    )
+                except socket.gaierror:
+                    SecurityUtils._cache_store(hostname, None)
+                    return None
+                addresses = _resolve_addrinfo_to_ips(address_infos)
+                SecurityUtils._cache_store(hostname, addresses)
                 return addresses
         finally:
             # 必须在 `async with` 释放锁之后再清理字典：`_release_inflight_lock`
             # 以 `not lock.locked()` 为清理守卫，持锁状态下调用会跳过 pop。
-            SecurityUtils._release_inflight_lock(lock_key, lock)
+            SecurityUtils._release_inflight_lock(hostname, lock)
 
     @staticmethod
     def _addresses_all_global(
@@ -697,7 +627,7 @@ class SecurityUtils:
 
         校验细节与失败原因由 `evaluate_url_safety` 返回；本方法只暴露布尔结果，
         作为只关心通过/拒绝判断的调用方的最薄入口。`block_private=True` 时会
-        同步调用已注入的 DNS Port；async 上下文请改用 `is_safe_url_async`。
+        同步调用 `getaddrinfo`；async 上下文请改用 `is_safe_url_async`。
         """
         return SecurityUtils.evaluate_url_safety(
             url,
@@ -718,8 +648,8 @@ class SecurityUtils:
         """
         判定 URL 是否在允许的域名列表中，包括带有端口的域名。
 
-        DNS 解析通过已注入的异步 Port 执行，并复用 TTL 缓存，不阻塞调用方所在
-        的事件循环。参数与返回值含义同 `is_safe_url`；需要失败原因/解析 IP
+        DNS 解析通过事件循环线程池执行，并复用 TTL 缓存，不阻塞调用方所在的
+        事件循环。参数与返回值含义同 `is_safe_url`；需要失败原因/解析 IP
         等结构化信息时调用 `evaluate_url_safety_async`。
         """
         diagnosis = await SecurityUtils.evaluate_url_safety_async(
@@ -730,37 +660,6 @@ class SecurityUtils:
             allowed_private_ranges=allowed_private_ranges,
         )
         return diagnosis.allowed
-
-    @staticmethod
-    def _url_safety_prelude(
-        url: str,
-        allowed_domains: Union[Set[str], List[str]],
-        strict: bool,
-        block_private: bool,
-    ) -> tuple[Optional[str], Optional["UrlSafetyDiagnosis"]]:
-        """统一协议/域名白名单与无需 DNS 场景的终态诊断。"""
-        hostname = SecurityUtils._check_url_allowlist(url, allowed_domains, strict)
-        if hostname is None:
-            return None, UrlSafetyDiagnosis(
-                allowed=False,
-                reason=UrlSafetyReason.DOMAIN_NOT_ALLOWED,
-            )
-        if not block_private:
-            return hostname, UrlSafetyDiagnosis(
-                allowed=True,
-                reason=UrlSafetyReason.ALLOWED,
-                host=hostname,
-            )
-        return hostname, None
-
-    @staticmethod
-    def _url_safety_failed(error: Exception) -> "UrlSafetyDiagnosis":
-        """统一记录 URL 校验异常并返回默认拒绝诊断。"""
-        logger.debug(f"Error occurred while validating URL: {error}")
-        return UrlSafetyDiagnosis(
-            allowed=False,
-            reason=UrlSafetyReason.DOMAIN_NOT_ALLOWED,
-        )
 
     @staticmethod
     def evaluate_url_safety(
@@ -779,18 +678,28 @@ class SecurityUtils:
         归类为 `DOMAIN_NOT_ALLOWED`，避免任何解析路径漏过 SSRF 校验。
         """
         try:
-            hostname, diagnosis = SecurityUtils._url_safety_prelude(
-                url, allowed_domains, strict, block_private
-            )
-            if diagnosis is not None:
-                return diagnosis
-            hostname = cast(str, hostname)
+            hostname = SecurityUtils._check_url_allowlist(url, allowed_domains, strict)
+            if hostname is None:
+                return UrlSafetyDiagnosis(
+                    allowed=False,
+                    reason=UrlSafetyReason.DOMAIN_NOT_ALLOWED,
+                )
+            if not block_private:
+                return UrlSafetyDiagnosis(
+                    allowed=True,
+                    reason=UrlSafetyReason.ALLOWED,
+                    host=hostname,
+                )
             addresses = SecurityUtils._hostname_addresses(hostname)
             return SecurityUtils._diagnose_resolved_addresses(
                 url, hostname, addresses, allowed_private_ranges
             )
         except Exception as e:  # noqa: BLE001 - 默认拒绝，避免漏过 SSRF 校验
-            return SecurityUtils._url_safety_failed(e)
+            logger.debug(f"Error occurred while validating URL: {e}")
+            return UrlSafetyDiagnosis(
+                allowed=False,
+                reason=UrlSafetyReason.DOMAIN_NOT_ALLOWED,
+            )
 
     @staticmethod
     async def evaluate_url_safety_async(
@@ -803,22 +712,32 @@ class SecurityUtils:
         """
         输出与 `evaluate_url_safety` 完全一致的结构化诊断结果。
 
-        DNS 解析通过已注入的异步 Port 执行，并复用 TTL 缓存，不阻塞调用方所在
-        的事件循环；校验顺序、字段含义、异常归类均与同步版本相同。
+        DNS 解析通过事件循环线程池执行，并复用 TTL 缓存，不阻塞调用方所在的
+        事件循环；校验顺序、字段含义、异常归类均与同步版本相同。
         """
         try:
-            hostname, diagnosis = SecurityUtils._url_safety_prelude(
-                url, allowed_domains, strict, block_private
-            )
-            if diagnosis is not None:
-                return diagnosis
-            hostname = cast(str, hostname)
+            hostname = SecurityUtils._check_url_allowlist(url, allowed_domains, strict)
+            if hostname is None:
+                return UrlSafetyDiagnosis(
+                    allowed=False,
+                    reason=UrlSafetyReason.DOMAIN_NOT_ALLOWED,
+                )
+            if not block_private:
+                return UrlSafetyDiagnosis(
+                    allowed=True,
+                    reason=UrlSafetyReason.ALLOWED,
+                    host=hostname,
+                )
             addresses = await SecurityUtils._hostname_addresses_async(hostname)
             return SecurityUtils._diagnose_resolved_addresses(
                 url, hostname, addresses, allowed_private_ranges
             )
         except Exception as e:  # noqa: BLE001 - 默认拒绝，避免漏过 SSRF 校验
-            return SecurityUtils._url_safety_failed(e)
+            logger.debug(f"Error occurred while validating URL: {e}")
+            return UrlSafetyDiagnosis(
+                allowed=False,
+                reason=UrlSafetyReason.DOMAIN_NOT_ALLOWED,
+            )
 
     @staticmethod
     async def is_safe_image_url_async(

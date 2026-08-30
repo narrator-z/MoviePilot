@@ -8,8 +8,12 @@ from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.tags import ToolTag
 from app.application.subscription.delete import (
     SubscribeDeletionActor,
+    get_delete_subscribe_scope,
 )
-from app.application.subscription.mutation import SubscriptionActor
+from app.application.subscription.mutation import (
+    SubscriptionActor,
+    get_subscription_mutation_scope,
+)
 from app.runtime.log import logger
 
 
@@ -45,7 +49,7 @@ class DeleteSubscribeTool(MoviePilotTool):
         logger.info(f"执行工具: {self.name}, 参数: subscribe_id={subscribe_id}")
 
         try:
-            async with self.data.subscription_mutation_scope() as mutation:
+            async with get_subscription_mutation_scope() as mutation:
                 subscribe = await mutation.get_accessible(
                     subscribe_id,
                     SubscriptionActor(name="agent", is_superuser=True),
@@ -53,7 +57,7 @@ class DeleteSubscribeTool(MoviePilotTool):
             if not subscribe:
                 return f"订阅 ID {subscribe_id} 不存在"
 
-            async with self.data.subscription_delete_scope() as command:
+            async with get_delete_subscribe_scope() as command:
                 deleted = await command.execute(
                     subscribe_id,
                     SubscribeDeletionActor(username="agent", is_superuser=True),

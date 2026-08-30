@@ -28,7 +28,7 @@ V3t 的目标不是让所有请求都更快。它主要改善可并行的 Python
 - `runtime-free-threaded`
 
 `tool.uv.conflicts` 保证两个组不能同时解析。Docker 的两个构建 stage 分别固定选择对应组；源码升级、
-启动恢复和插件安装后的宿主恢复由 `app.runtime.dependencies.profile.runtime_dependency_group()` 根据当前
+启动恢复和插件安装后的宿主恢复由 `app.runtime.dependencies.runtime_dependency_group()` 根据当前
 解释器的 `Py_GIL_DISABLED` 构建标志选择 profile。
 
 依赖选择不得改为镜像标签判断，也不得在业务模块中按包名散落 V3/V3t 分支。Dockerfile 只选择运行
@@ -41,16 +41,14 @@ profile，依赖名称、版本和 source 语义全部由 `pyproject.toml` 与 `
 | 能力 | 标准 V3 | V3t | 当前处理与上游解除条件 |
 | --- | --- | --- | --- |
 | Python | CPython 3.14 | CPython 3.14t | 跟随同一 Python 3.14 patch 版本；升级后必须重新验证解释器 ABI、GIL 状态、启动与完整测试。 |
-| `moviepilot-rust` | `cp314-abi3` | `cp314t` | V3 两套 ABI 使用同一包版本并按 wheel tag 选择；V2 继续使用已发布的 0.2.x `cp311-abi3` 制品，不随 V3 的 0.3.x 更新。 |
+| `moviepilot-rust` | `cp314-abi3` | `cp314t` | 同一包版本按 wheel tag 选择；两套 ABI 和 V2 使用的 `cp311-abi3` 必须在发布链中保持独立可用。 |
 | `bcrypt` | 4.x | 5.x | V3t 使用提供 free-threaded 制品的版本；当同一稳定版本同时满足两套 ABI 与密码合同后可合并约束。 |
 | Brotli | 1.2.0 wheel | 同版本固定源码构建 | V3t 当前只对该 profile 使用固定上游源码。上游提供可复现的稳定 `cp314t` wheel 后，验证导入、压缩结果、并发与 GIL，再删除 source 覆盖。 |
 | CRC 加速 | `crcmod-plus` 2.3.1 | `crcmod-plus` 2.3.1 | 两套镜像统一使用继续维护且兼容 `crcmod` 导入接口的实现。`oss2` 的陈旧元数据仍声明不再维护的 `crcmod`，由 uv 在解析时排除该传递依赖；宿主不在运行时映射、卸载或替插件兼容旧分发包。 |
 | `lxml` | 6.1.2 | 7.0.0b1 | V3t 暂用提供目标 ABI 的预发布版本，是当前最高风险项。稳定版提供 `cp314t` wheel 后，需通过 XML、HTML、RSS、站点解析、并发和内存验证再替换。 |
 | PostgreSQL 同步驱动 | `psycopg2-binary` 2.x | `psycopg[c]` 3.3.4 | 当前分叉同时受 ABI 与实测性能影响，不要求仅为版本统一而收敛。若上游能力或性能变化，必须重跑三方案 PostgreSQL A/B 后再决策。异步路径继续使用 `asyncpg`。 |
-| Windows PostgreSQL 客户端 | `psycopg2-binary` 自包含 libpq | `psycopg[c]` 链接本机 libpq | Windows 3.14t 源码环境必须安装 PostgreSQL 客户端开发工具并提供有效 `PGBIN`；启动时只为 free-threaded 解释器注册该 DLL 目录。上游发布自包含的 `cp314t` Windows wheel 后，应优先移除此宿主前提。 |
-| Windows Docker SDK | `pywin32` 312 | 不安装 `pywin32` | 标准 Windows 保留 Docker named-pipe transport；V3t 仅提供不依赖 pywin32 的 Docker SDK 路径。Docker 或 pywin32 提供兼容 `cp314t` 的组合后，重新验证 named-pipe 再解除排除。 |
 | `orjson` | 3.12.0 wheel | 同版本源码构建 | V3t 使用同一锁定版本并启用 free-threaded 构建变量。上游发布覆盖 Linux amd64/arm64 的稳定 `cp314t` wheel 后可删除本地构建要求。 |
-| 中文转换 | `moviepilot-rust.zhconv_fast()` | `moviepilot-rust.zhconv_fast()` | 从 0.3.3 起两套 ABI 使用同一 MediaWiki 转换实现；主程序统一经 `app.foundation.text.convert()`，插件统一经 SDK，不再安装独立 `zhconv-rs`。 |
+| 中文转换 | `zhconv-rs` | `moviepilot-rust.zhconv_fast()` | 主程序统一经 `app.foundation.text.convert()`，插件统一经 SDK；不得让调用方感知后端差异。只有语义、性能、体积和 ABI 均更优时才考虑统一实现。 |
 | 站点资源 | `cpython-314` | `cpython-314t` | 资源文件必须按解释器 ABI 独立构建和选取，不能让 V3t 复用普通 CPython 扩展，也不能影响 V2 的历史 ABI 制品。 |
 
 表中差异不是全部都要消除。只有临时 source 构建、预发布依赖或第三方元数据兼容适合在上游成熟后
@@ -73,10 +71,6 @@ profile，依赖名称、版本和 source 语义全部由 `pyproject.toml` 与 `
 
 源码更新事务中的依赖同步和失败回滚使用同一 profile 选择入口。否则 V3t 在恢复时可能被普通默认组
 覆盖，得到“3.14t 解释器 + 标准原生依赖”的无效组合。
-
-如果启动时发现更新事务停留在 `dependencies` 阶段，恢复流程保留当前 `/app`，只执行启动前依赖自愈，
-不会自动切回旧代际。这样即使当前程序已经完成过数据库迁移，也不会把包含新结构的数据库交给缺少对应
-Alembic revision 文件的旧程序；依赖自愈成功后再清理旧代际备份和事务标记。
 
 ### 4.2 插件安装后的宿主恢复
 
@@ -198,21 +192,6 @@ GIL、working set、RSS/PSS/USS、API p50/p95、SQLite 同步/异步结果和 1/
 插件仍为单实例 `active`，V3t GIL 仍关闭。该路径的价值是让受污染共享环境能够恢复启动，不是性能
 优化；它只在核心导入失败时执行，正常重启不会承担这段解析成本。
 
-### 6.6 已加载原生依赖的在线更新边界
-
-`scripts/probe_native_dependency_update.py` 使用最小 C 扩展构建具有相同模块名的 v1/v2 wheel，分别
-通过历史 `requirements.txt` 和现代 `pyproject.toml` 插件清单执行三阶段验证：先安装并加载 v1，
-在该进程内调用生产 `PluginHelper` 更新到 v2，再由独立解释器读取磁盘载荷。Linux x86_64、macOS
-arm64 和 Windows x64 的结论一致：安装器能够把磁盘扩展替换为 v2，原进程仍执行已加载的 v1，
-新进程才执行 v2。这是原生模块的进程激活边界，不是 Windows 独有的文件锁问题。
-
-`Native Dependency Update Probe` workflow 使用生产安装入口运行三平台专项任务，并把包含宿主平台、
-解释器 ABI、安装器版本、wheel SHA-256、在线阶段分类和恢复阶段结果的 JSON 上传为 artifact。自动运行
-只跟随探针及生产插件安装、uv 执行和依赖健康边界变化；Python ABI、free-threaded profile 或安装器
-升级前通过手工入口复验，不因普通依赖锁、Dockerfile 或业务代码变化消耗三平台 Runner。探针同时保留
-`pip` 对照入口，用于复核历史安装器差异；长期 CI 默认只验证 MoviePilot 实际使用的 `PluginHelper`。
-一次性扩展矩阵的原始结果按候选运行独立留存，仓库只维护可复用脚本、测试和结论。
-
 ## 7. 上游能力的渐进式接入
 
 第三方上游发布新版本或新 wheel 后，按以下顺序处理，不能看到文件名包含 `cp314t` 就直接删除本地兼容：
@@ -239,7 +218,7 @@ arm64 和 Windows x64 的结论一致：安装器能够把磁盘扩展替换为 
 ## 8. 插件生态边界
 
 - 插件不得直接依赖 V3/V3t 的内部实现选择，应使用 `app.sdk` 暴露的文本、网络和运行时能力。
-- 插件不得直接导入 `zhconv_rs`；V3 与 V3t 均不再提供该分发包，中文转换统一使用 `app.sdk.utilities.convert`，宿主不伪造第三方模块。
+- 插件直接导入 `zhconv_rs` 等标准 V3 专属包时，V3t 可以明确判定为不兼容；宿主不伪造第三方模块。
 - 插件若自行声明不再维护的 `crcmod`，必须由插件迁移到 `crcmod-plus`；宿主不映射分发包、不增加插件
   特判，也不在运行期卸载插件声明的依赖。
 - 插件携带原生 wheel 时必须匹配当前解释器和平台 ABI。缺少 `cp314` 或 `cp314t` 制品属于插件依赖
@@ -261,6 +240,5 @@ V3 `3.0.0` 的依赖集合随镜像交付。相同版本 Tag 的 `release` 自�
 - [ ] amd64、arm64 的 Python、Rust 和站点资源 ABI 匹配。
 - [ ] SQLite、PostgreSQL、插件安装/恢复、源码升级/回滚和启动自愈通过。
 - [ ] 动态 GIL API、启动日志、插件归因和前端告警保持一致。
-- [ ] 已加载原生依赖的更新探针在目标平台通过，JSON artifact 的平台和解释器 ABI 与矩阵一致。
 - [ ] 安全扫描结果已按实际安装制品、利用面和上游修复状态审计。
 - [ ] 上游已成熟的临时兼容已删除，仍保留的例外在本文有明确解除条件。

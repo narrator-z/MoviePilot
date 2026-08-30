@@ -1,34 +1,19 @@
-from app.application.workflow import configure_workflow_runtime, reset_workflow_runtime
-from app.workflow import WorkflowManager
+from app.application.workflow import configure_workflow_runtime
+from app.workflow import WorkFlowManager
 
-
-def configure_workflow_ports() -> None:
-    """在工作流生命周期启动阶段登记 concrete manager provider。"""
-    configure_workflow_runtime(lambda: WorkflowManager())
-
-
-def reset_workflow_ports() -> None:
-    """清除工作流 manager provider，支持重复 lifespan。"""
-    reset_workflow_runtime()
+# 启动模块是 concrete WorkFlowManager 的唯一宿主装配边界。
+configure_workflow_runtime(lambda: WorkFlowManager())
 
 
 def init_workflow():
     """
     初始化工作流
     """
-    configure_workflow_ports()
-    try:
-        WorkflowManager()
-    except Exception:
-        reset_workflow_ports()
-        raise
+    WorkFlowManager()
 
 
 def stop_workflow() -> bool:
     """
     停止工作流并返回全部活动执行是否收敛。
     """
-    converged = WorkflowManager().stop()
-    if converged is not False:
-        reset_workflow_ports()
-    return converged
+    return WorkFlowManager().stop()

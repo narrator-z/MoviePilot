@@ -7,28 +7,18 @@
 
 留在这一层的只有列类型强转与建库时间戳——它们跟着订阅表的列走，换谁来调都一样。
 """
-
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from typing import List, Optional, Tuple, cast
+from collections.abc import Awaitable, Callable
+from typing import Any, Tuple, List, Optional
 
 from sqlalchemy import delete as sqlalchemy_delete
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.application.subscription.contract import SubscribeDeletionCandidate
+from app.application.subscription.delete import SubscribeDeletionCandidate
 from app.db.base import DbOper
 from app.db.models.subscribe import Subscribe
-from app.db.oper.query import (
-    descending,
-    enum_values,
-    execute_page,
-    media_identity_conditions,
-    music_type_condition,
-)
-from app.schemas.common import JsonData
-from app.schemas.query import QueryPageRequest, QuerySortField, SubscriptionFilter
+from app.db.models.subscribehistory import SubscribeHistory
 from app.schemas.types import MediaSource
 
 INTEGER_FLAG_FIELDS = ("best_version", "best_version_full", "search_imdbid", "manual_total_episode")
@@ -64,18 +54,14 @@ class SubscribeStageResult:
         return self._created
 
 
-def _normalize_integer_flags(
-    payload: Mapping[str, JsonData],
-    fields: Tuple[str, ...] = INTEGER_FLAG_FIELDS,
-) -> dict[str, JsonData]:
+def _normalize_integer_flags(payload: dict, fields: Tuple[str, ...] = INTEGER_FLAG_FIELDS) -> dict:
     """
     将历史兼容的布尔开关转换为整型值，避免 PostgreSQL 严格类型检查失败。
     """
     normalized_payload = dict(payload)
     for field in fields:
-        value = normalized_payload.get(field)
-        if isinstance(value, bool):
-            normalized_payload[field] = int(value)
+        if isinstance(normalized_payload.get(field), bool):
+            normalized_payload[field] = int(normalized_payload[field])
     return normalized_payload
 
 
@@ -89,7 +75,7 @@ def _normalize_year(year: Optional[int | str]) -> Optional[str]:
     return str(year)
 
 
-def _persistable(payload: Mapping[str, JsonData]) -> dict[str, JsonData]:
+def _persistable(payload: dict) -> dict:
     """
     把应用层给的写入字段落成订阅表能收的一行。
 
@@ -101,7 +87,7 @@ def _persistable(payload: Mapping[str, JsonData]) -> dict[str, JsonData]:
     :return: 可直接建模的字段字典
     """
     persistable = _normalize_integer_flags(payload)
-    persistable["year"] = _normalize_year(cast(Optional[int | str], persistable.get("year")))
+    persistable["year"] = _normalize_year(persistable.get("year"))
     # search_imdbid 参与搜索分支判定，None 与真值都要归一到 0/1，否则同一列在不同
     # 订阅上会存出三种形态，PG 上还会直接拒写
     persistable["search_imdbid"] = 1 if persistable.get("search_imdbid") else 0
@@ -109,34 +95,12 @@ def _persistable(payload: Mapping[str, JsonData]) -> dict[str, JsonData]:
     return persistable
 
 
-def _lookup_values(
-    identity: Mapping[str, JsonData],
-) -> tuple[MediaSource | str | None, str | None, int | None, str | None, str | None]:
-    """把宽 JSON 身份收窄为订阅模型查询参数。"""
-    raw_source = identity.get("media_source")
-    raw_id = identity.get("media_id")
-    raw_season = identity.get("season")
-    raw_episode_group = identity.get("episode_group")
-    raw_music_type = identity.get("music_type")
-    return (
-        raw_source if isinstance(raw_source, str) else None,
-        str(raw_id) if isinstance(raw_id, (str, int)) else None,
-        raw_season if isinstance(raw_season, int) else None,
-        raw_episode_group if isinstance(raw_episode_group, str) else None,
-        raw_music_type if isinstance(raw_music_type, str) else None,
-    )
-
-
 class SubscribeOper(DbOper):
     """
     订阅管理
     """
 
-    def _exists(
-        self,
-        identity: Mapping[str, JsonData],
-        username: Optional[str],
-    ) -> Optional[Subscribe]:
+    def _exists(self, identity: dict, username: Optional[str]) -> Optional[Any]:
         """
         按身份查重。
         :param identity: 查重身份
@@ -145,84 +109,42 @@ class SubscribeOper(DbOper):
         """
         if username == "":
             return None
-        media_source, media_id, season, episode_group, music_type = _lookup_values(identity)
         if username:
-            return cast(
-                Optional[Subscribe],
-                self._execute_sync_query(
-                    lambda session: Subscribe.exists_by_username(
-                        session,
-                        username=username,
-                        media_source=media_source,
-                        media_id=media_id,
-                        season=season,
-                        episode_group=episode_group,
-                        music_type=music_type,
-                    ),
-                ),
-            )
-        return cast(
-            Optional[Subscribe],
-            self._execute_sync_query(
-                lambda session: Subscribe.exists(
+            return self._execute_sync_query(
+                lambda session: Subscribe.exists_by_username(
                     session,
-                    media_source=media_source,
-                    media_id=media_id,
-                    season=season,
-                    episode_group=episode_group,
-                    music_type=music_type,
+                    username=username,
+                    **identity,
                 )
-            ),
+            )
+        return self._execute_sync_query(
+            lambda session: Subscribe.exists(session, **identity)
         )
 
-    async def _async_exists(
-        self,
-        identity: Mapping[str, JsonData],
-        username: Optional[str],
-    ) -> Optional[Subscribe]:
+    async def _async_exists(self, identity: dict, username: Optional[str]) -> Optional[Any]:
         """
         按身份查重（异步）。
         :param identity: 查重身份
         :param username: 非空时只在该用户的订阅内查
         :return: 命中的订阅行，未命中为 None
         """
-
         async def query(session: AsyncSession) -> Optional[Subscribe]:
             """在调用方或组合根异步会话中执行订阅查重。"""
             if username == "":
                 return None
-            media_source, media_id, season, episode_group, music_type = _lookup_values(identity)
             if username:
-                return cast(
-                    Optional[Subscribe],
-                    await Subscribe.async_exists_by_username(
-                        session,
-                        username=username,
-                        media_source=media_source,
-                        media_id=media_id,
-                        season=season,
-                        episode_group=episode_group,
-                        music_type=music_type,
-                    ),
-                )
-            return cast(
-                Optional[Subscribe],
-                await Subscribe.async_exists(
+                return await Subscribe.async_exists_by_username(
                     session,
-                    media_source=media_source,
-                    media_id=media_id,
-                    season=season,
-                    episode_group=episode_group,
-                    music_type=music_type,
-                ),
-            )
-
-        return cast(Optional[Subscribe], await self._execute_async_query(query))
+                    username=username,
+                    **identity,
+                )
+            return await Subscribe.async_exists(session, **identity)
+        return await self._execute_async_query(query)
 
     def stage_add(
         self,
-        identity: Mapping[str, JsonData],
-        payload: Mapping[str, JsonData],
+        identity: dict,
+        payload: dict,
         username: Optional[str] = None,
     ) -> SubscribeStageResult:
         """暂存同步新增并 flush 主键，不提交调用方拥有的事务。"""
@@ -244,8 +166,8 @@ class SubscribeOper(DbOper):
 
     async def async_stage_add(
         self,
-        identity: Mapping[str, JsonData],
-        payload: Mapping[str, JsonData],
+        identity: dict,
+        payload: dict,
         username: Optional[str] = None,
     ) -> SubscribeStageResult:
         """暂存异步新增并 flush 主键，不提交调用方拥有的事务。"""
@@ -265,13 +187,9 @@ class SubscribeOper(DbOper):
             return SubscribeStageResult(0, "新增订阅失败", True)
         return SubscribeStageResult(subscribe.id, "新增订阅成功", True)
 
-    def add(
-        self,
-        identity: Mapping[str, JsonData],
-        payload: Mapping[str, JsonData],
-        username: Optional[str] = None,
-        after_commit: Optional[AfterCommitEffect] = None,
-    ) -> Tuple[int, str]:
+    def add(self, identity: dict, payload: dict,
+            username: Optional[str] = None,
+            after_commit: Optional[AfterCommitEffect] = None) -> Tuple[int, str]:
         """
         新增订阅：命中既有订阅则原样返回，否则落库后回读。
 
@@ -288,6 +206,14 @@ class SubscribeOper(DbOper):
             if after_commit:
                 after_commit(subscribe.id)
             return subscribe.id, "订阅已存在"
+        # fork 扩展：精确身份未命中后按跨身份同剧口径再查一次（tmdbid/标题年份/doubanid），
+        # 命中则合并身份字段回既有订阅，避免新建"幽灵订阅"（同一部剧两套订阅并行搜索）。
+        same_media = self._find_same_media(identity, payload, username)
+        if same_media:
+            self._merge_same_media_identity(same_media, payload)
+            if after_commit:
+                after_commit(same_media.id)
+            return same_media.id, "订阅已存在"
         self._stage_create(Subscribe(**_persistable(payload)))
         subscribe = self._exists(identity, username)
         if not subscribe:
@@ -296,13 +222,9 @@ class SubscribeOper(DbOper):
             after_commit(subscribe.id)
         return subscribe.id, "新增订阅成功"
 
-    async def async_add(
-        self,
-        identity: Mapping[str, JsonData],
-        payload: Mapping[str, JsonData],
-        username: Optional[str] = None,
-        after_commit: Optional[AsyncAfterCommitEffect] = None,
-    ) -> Tuple[int, str]:
+    async def async_add(self, identity: dict, payload: dict,
+                        username: Optional[str] = None,
+                        after_commit: Optional[AsyncAfterCommitEffect] = None) -> Tuple[int, str]:
         """
         异步新增订阅，语义与 add 完全一致。
         :param identity: 查重身份（media_source/media_id/music_type/season/episode_group）
@@ -316,6 +238,14 @@ class SubscribeOper(DbOper):
             if after_commit:
                 await after_commit(subscribe.id)
             return subscribe.id, "订阅已存在"
+        # fork 扩展：精确身份未命中后按跨身份同剧口径再查一次（tmdbid/标题年份/doubanid），
+        # 命中则合并身份字段回既有订阅，避免新建"幽灵订阅"（同一部剧两套订阅并行搜索）。
+        same_media = await self._async_find_same_media(identity, payload, username)
+        if same_media:
+            self._merge_same_media_identity(same_media, payload)
+            if after_commit:
+                await after_commit(same_media.id)
+            return same_media.id, "订阅已存在"
         await self._stage_async_create(Subscribe(**_persistable(payload)))
         subscribe = await self._async_exists(identity, username)
         if not subscribe:
@@ -324,13 +254,91 @@ class SubscribeOper(DbOper):
             await after_commit(subscribe.id)
         return subscribe.id, "新增订阅成功"
 
+    def _find_same_media(self, identity: dict, payload: dict,
+                         username: Optional[str]) -> Optional[Any]:
+        """
+        按跨身份同剧口径查询既有订阅（fork 扩展）。
+
+        判定顺序与 fork 旧 subscribe_oper 一致：tmdbid 优先，其次标题+年份+季，
+        最后 doubanid/bangumiid；所有分支叠加 season/episode_group/username 作用域，
+        命中返回同一部剧的可能不同身份的既有订阅。
+        """
+        return Subscribe.find_same_media(
+            self._db,
+            name=payload.get("name"),
+            year=payload.get("year"),
+            season=identity.get("season"),
+            tmdbid=payload.get("tmdbid"),
+            doubanid=payload.get("doubanid"),
+            bangumiid=payload.get("bangumiid"),
+            media_source=identity.get("media_source"),
+            media_id=identity.get("media_id"),
+            username=username,
+            episode_group=identity.get("episode_group"),
+        )
+
+    async def _async_find_same_media(self, identity: dict, payload: dict,
+                                     username: Optional[str]) -> Optional[Any]:
+        """
+        按跨身份同剧口径查询既有订阅（fork 扩展，异步）。
+        """
+        return await Subscribe.async_find_same_media(
+            self._db,
+            name=payload.get("name"),
+            year=payload.get("year"),
+            season=identity.get("season"),
+            tmdbid=payload.get("tmdbid"),
+            doubanid=payload.get("doubanid"),
+            bangumiid=payload.get("bangumiid"),
+            media_source=identity.get("media_source"),
+            media_id=identity.get("media_id"),
+            username=username,
+            episode_group=identity.get("episode_group"),
+        )
+
+    def _merge_same_media_identity(self, existing: Any, payload: dict) -> None:
+        """
+        将新请求携带的身份字段合并写回既有订阅（fork 扩展）。
+
+        v3 统一媒体身份为 media_source/media_id（订阅表无 tmdbid/doubanid 分列），
+        跨身份同剧命中后只在既有订阅身份为空时补全 media_source/media_id，
+        禁止用新来源覆盖既有订阅已有的有效身份，避免把 TMDB 订阅错误改写成豆瓣来源。
+        命中既有订阅时不插入新行，直接复用并补全缺失身份。
+        """
+        updates: dict = {}
+        simple_fields = (
+            ("name", "name"),
+            ("year", "year"),
+            ("episode_group", "episode_group"),
+            ("poster", "poster"),
+            ("backdrop", "backdrop"),
+            ("vote", "vote"),
+            ("description", "description"),
+        )
+        for column, key in simple_fields:
+            value = payload.get(key)
+            if value is None:
+                continue
+            current = getattr(existing, column, None)
+            if current not in (None, ""):
+                continue
+            updates[column] = value
+        # 统一媒体身份：仅当既有订阅身份为空时补全，禁止覆盖已有身份
+        for column in ("media_source", "media_id"):
+            value = payload.get(column)
+            if value is None:
+                continue
+            current = getattr(existing, column, None)
+            if current not in (None, ""):
+                continue
+            updates[column] = value
+        if updates:
+            self.update(existing.id, updates)
+
     def exists(
-        self,
-        media_source: MediaSource,
-        media_id: str,
-        season: Optional[int] = None,
-        episode_group: Optional[str] = None,
-        music_type: Optional[str] = None,
+            self, media_source: MediaSource, media_id: str,
+            season: Optional[int] = None, episode_group: Optional[str] = None,
+            music_type: Optional[str] = None,
     ) -> bool:
         """
         按媒体身份、季号及可选剧集组判断订阅是否存在。
@@ -345,12 +353,9 @@ class SubscribeOper(DbOper):
         return bool(self._exists(identity_params, username=None))
 
     async def async_exists(
-        self,
-        media_source: MediaSource,
-        media_id: str,
-        season: Optional[int] = None,
-        episode_group: Optional[str] = None,
-        music_type: Optional[str] = None,
+            self, media_source: MediaSource, media_id: str,
+            season: Optional[int] = None, episode_group: Optional[str] = None,
+            music_type: Optional[str] = None,
     ) -> Optional[Subscribe]:
         """异步按媒体身份、季号及可选剧集组读取命中的订阅。"""
         return await self._async_exists(
@@ -368,78 +373,15 @@ class SubscribeOper(DbOper):
         """
         获取订阅
         """
-        return self.get_by_id(sid)
-
-    def get_by_id(self, record_id: int) -> Optional[Subscribe]:
-        """按稳定记录 ID 读取单条订阅。"""
-        return cast(
-            Optional[Subscribe],
-            self._execute_sync_query(
-                lambda session: session.execute(select(Subscribe).where(Subscribe.id == record_id)).scalars().first()
-            ),
-        )
-
-    def query(
-        self,
-        filters: SubscriptionFilter,
-        page: QueryPageRequest,
-    ) -> tuple[list[Subscribe], int]:
-        """按稳定筛选和分页合同读取订阅记录及总数。"""
-
-        def execute(session: Session) -> tuple[list[Subscribe], int]:
-            """在同一会话中构造并执行订阅 count/page 查询。"""
-            conditions = media_identity_conditions(Subscribe, filters)
-            ids = enum_values(filters.ids)
-            names = enum_values(filters.names)
-            states = enum_values(filters.states)
-            usernames = enum_values(filters.usernames)
-            media_types = enum_values(filters.media_types)
-            if ids:
-                conditions.append(Subscribe.id.in_(ids))
-            if names:
-                conditions.append(Subscribe.name.in_(names))
-            if states:
-                conditions.append(Subscribe.state.in_(states))
-            if usernames:
-                conditions.append(Subscribe.username.in_(usernames))
-            if media_types:
-                conditions.append(Subscribe.type.in_(media_types))
-            if filters.season is not None:
-                conditions.append(Subscribe.season == filters.season)
-            if filters.episode_group is not None:
-                conditions.append(Subscribe.episode_group == filters.episode_group)
-            music_condition = music_type_condition(
-                Subscribe.music_type,
-                filters.music_type,
-            )
-            if music_condition is not None:
-                conditions.append(music_condition)
-
-            count_statement = select(func.count(Subscribe.id))
-            page_statement = select(Subscribe)
-            if conditions:
-                count_statement = count_statement.where(*conditions)
-                page_statement = page_statement.where(*conditions)
-            descending_order = descending(page)
-            if page.sort.field == QuerySortField.ID:
-                primary = Subscribe.id.desc() if descending_order else Subscribe.id.asc()
-                secondary = Subscribe.date.desc() if descending_order else Subscribe.date.asc()
-            else:
-                primary = Subscribe.date.desc().nullslast() if descending_order else Subscribe.date.asc().nullsfirst()
-                secondary = Subscribe.id.desc() if descending_order else Subscribe.id.asc()
-            page_statement = page_statement.order_by(primary, secondary)
-            return cast(
-                tuple[list[Subscribe], int],
-                execute_page(session, count_statement, page_statement, page),
-            )
-
-        return self._execute_sync_query(execute)
+        return self._execute_sync_query(lambda session: Subscribe.get(session, sid))
 
     async def async_get(self, sid: int) -> Optional[Subscribe]:
         """
         获取订阅
         """
-        return await self._execute_async_query(lambda session: Subscribe.async_get(session, sid))
+        return await self._execute_async_query(
+            lambda session: Subscribe.async_get(session, sid)
+        )
 
     async def async_list_by_media_identity(
         self,
@@ -448,16 +390,13 @@ class SubscribeOper(DbOper):
         music_type: Optional[str] = None,
     ) -> List[Subscribe]:
         """异步按规范媒体身份读取订阅。"""
-        return cast(
-            List[Subscribe],
-            await self._execute_async_query(
-                lambda session: Subscribe.async_list_by_media_identity(
-                    session,
-                    media_source=media_source,
-                    media_id=media_id,
-                    music_type=music_type,
-                )
-            ),
+        return await self._execute_async_query(
+            lambda session: Subscribe.async_list_by_media_identity(
+                session,
+                media_source=media_source,
+                media_id=media_id,
+                music_type=music_type,
+            )
         )
 
     def list_by_media_identity(
@@ -467,16 +406,13 @@ class SubscribeOper(DbOper):
         music_type: Optional[str] = None,
     ) -> List[Subscribe]:
         """同步按规范媒体身份读取订阅。"""
-        return cast(
-            List[Subscribe],
-            self._execute_sync_query(
-                lambda session: Subscribe.list_by_media_identity(
-                    session,
-                    media_source=media_source,
-                    media_id=media_id,
-                    music_type=music_type,
-                )
-            ),
+        return self._execute_sync_query(
+            lambda session: Subscribe.list_by_media_identity(
+                session,
+                media_source=media_source,
+                media_id=media_id,
+                music_type=music_type,
+            )
         )
 
     async def get_candidate(
@@ -506,24 +442,30 @@ class SubscribeOper(DbOper):
         return SubscribeDeletionCandidate(
             subscribe_id=subscribe_id,
             username=subscribe.username,
-            event_payload={column.name: values.get(column.name) for column in subscribe.__table__.columns},
+            event_payload={
+                column.name: values.get(column.name)
+                for column in subscribe.__table__.columns
+            },
         )
 
     async def list_candidates_by_identity(
-        self,
-        media_source: MediaSource,
-        media_id: str,
-        season: Optional[int],
-        music_type: Optional[str],
+            self,
+            media_source: MediaSource,
+            media_id: str,
+            season: Optional[int],
+            music_type: Optional[str],
     ) -> List[SubscribeDeletionCandidate]:
         """按媒体身份读取去重后的订阅删除快照。"""
-        subscribes = await self.async_list_by_media_identity(media_source, media_id, music_type)
+        subscribes = await self.async_list_by_media_identity(
+            media_source, media_id, music_type
+        )
         candidates = []
         seen_ids = set()
         for subscribe in subscribes or []:
             subscribe_music_type = getattr(subscribe, "music_type", None)
             if music_type and not (
-                subscribe_music_type == music_type or (music_type == "recording" and subscribe_music_type is None)
+                    subscribe_music_type == music_type
+                    or (music_type == "recording" and subscribe_music_type is None)
             ):
                 continue
             if season is not None and subscribe.season != season:
@@ -536,7 +478,10 @@ class SubscribeOper(DbOper):
                 SubscribeDeletionCandidate(
                     subscribe_id=subscribe.id,
                     username=subscribe.username,
-                    event_payload={column.name: values.get(column.name) for column in subscribe.__table__.columns},
+                    event_payload={
+                        column.name: values.get(column.name)
+                        for column in subscribe.__table__.columns
+                    },
                 )
             )
         return candidates
@@ -547,71 +492,60 @@ class SubscribeOper(DbOper):
         return [subscribe.id for subscribe in subscribes if subscribe.id]
 
     def get_by(
-        self,
-        type: str,
-        media_source: MediaSource,
-        media_id: str,
-        season: Optional[int] = None,
-        music_type: Optional[str] = None,
+            self, type: str, media_source: MediaSource, media_id: str,
+            season: Optional[str] = None,
+            music_type: Optional[str] = None,
     ) -> Optional[Subscribe]:
         """
         根据条件查询订阅
         """
-        return cast(
-            Optional[Subscribe],
-            self._execute_sync_query(
-                lambda session: Subscribe.get_by(
-                    session,
-                    type=type,
-                    media_source=media_source,
-                    media_id=media_id,
-                    season=season,
-                    music_type=music_type,
-                )
-            ),
+        return self._execute_sync_query(
+            lambda session: Subscribe.get_by(
+                session,
+                type=type,
+                media_source=media_source,
+                media_id=media_id,
+                season=season,
+                music_type=music_type,
+            )
         )
 
     async def async_get_by(
-        self,
-        type: str,
-        media_source: MediaSource,
-        media_id: str,
-        season: Optional[int] = None,
-        music_type: Optional[str] = None,
+            self, type: str, media_source: MediaSource, media_id: str,
+            season: Optional[str] = None,
+            music_type: Optional[str] = None,
     ) -> Optional[Subscribe]:
         """
         根据条件查询订阅
         """
-        return cast(
-            Optional[Subscribe],
-            await self._execute_async_query(
-                lambda session: Subscribe.async_get_by(
-                    session,
-                    type=type,
-                    media_source=media_source,
-                    media_id=media_id,
-                    season=season,
-                    music_type=music_type,
-                )
-            ),
+        return await self._execute_async_query(
+            lambda session: Subscribe.async_get_by(
+                session,
+                type=type,
+                media_source=media_source,
+                media_id=media_id,
+                season=season,
+                music_type=music_type,
+            )
         )
 
     def list(self, state: Optional[str] = None) -> List[Subscribe]:
         """
         获取订阅列表
         """
-        return cast(List[Subscribe], self._execute_sync_query(lambda session: Subscribe.get_by_state(session, state)))
+        return self._execute_sync_query(
+            lambda session: Subscribe.get_by_state(session, state)
+        )
 
     async def async_list(self, state: Optional[str] = None) -> List[Subscribe]:
         """
         异步获取订阅列表
         """
         if state:
-            return cast(
-                List[Subscribe],
-                await self._execute_async_query(lambda session: Subscribe.async_get_by_state(session, state)),
+            return await self._execute_async_query(
+                lambda session: Subscribe.async_get_by_state(session, state)
             )
-        return cast(List[Subscribe], await self._execute_async_query(Subscribe.async_list))
+        return await self._execute_async_query(Subscribe.async_list)
 
     async def async_list_by_username(
         self,
@@ -620,16 +554,13 @@ class SubscribeOper(DbOper):
         mtype: Optional[str] = None,
     ) -> List[Subscribe]:
         """异步按用户获取订阅。"""
-        return cast(
-            List[Subscribe],
-            await self._execute_async_query(
-                lambda session: Subscribe.async_list_by_username(
-                    session,
-                    username=username,
-                    state=state,
-                    mtype=mtype,
-                )
-            ),
+        return await self._execute_async_query(
+            lambda session: Subscribe.async_list_by_username(
+                session,
+                username=username,
+                state=state,
+                mtype=mtype,
+            )
         )
 
     async def async_list_by_title(
@@ -638,24 +569,21 @@ class SubscribeOper(DbOper):
         season: Optional[int] = None,
     ) -> List[Subscribe]:
         """在 Oper 会话边界内异步按标题获取订阅。"""
-        return cast(
-            List[Subscribe],
-            await self._execute_async_query(
-                lambda session: Subscribe.async_list_by_title(
-                    session,
-                    title=title,
-                    season=season,
-                )
-            ),
+        return await self._execute_async_query(
+            lambda session: Subscribe.async_list_by_title(
+                session,
+                title=title,
+                season=season,
+            )
         )
 
-    def delete(self, sid: int) -> None:
+    def delete(self, sid: int):
         """
         删除订阅
         """
         self._stage_delete(Subscribe, sid)
 
-    async def async_delete(self, sid: int) -> None:
+    async def async_delete(self, sid: int):
         """
         异步删除订阅。
         """
@@ -663,9 +591,9 @@ class SubscribeOper(DbOper):
 
     async def stage_delete(self, sid: int) -> None:
         """登记订阅删除但不提交，由 Application UnitOfWork 控制事务边界。"""
-        if not isinstance(self._db, AsyncSession):
-            raise RuntimeError("异步订阅删除需要调用方提供 AsyncSession")
-        await self._db.execute(sqlalchemy_delete(Subscribe).where(Subscribe.id == sid))
+        await self._db.execute(
+            sqlalchemy_delete(Subscribe).where(Subscribe.id == sid)
+        )
 
     def stage_delete_sync(self, sid: int) -> None:
         """同步登记订阅删除但不提交，由 Application UnitOfWork 控制事务边界。"""
@@ -673,7 +601,7 @@ class SubscribeOper(DbOper):
             raise RuntimeError("同步订阅删除需要调用方提供 Session")
         self._db.execute(sqlalchemy_delete(Subscribe).where(Subscribe.id == sid))
 
-    async def async_update(self, sid: int, payload: Mapping[str, JsonData]) -> Optional[Subscribe]:
+    async def async_update(self, sid: int, payload: dict) -> Optional[Subscribe]:
         """
         异步更新订阅。
         """
@@ -686,7 +614,7 @@ class SubscribeOper(DbOper):
     async def async_stage_update(
         self,
         sid: int,
-        payload: Mapping[str, JsonData],
+        payload: dict,
     ) -> Optional[Subscribe]:
         """在调用方 AsyncSession 中暂存订阅更新并 flush，不提交事务。"""
         if not isinstance(self._db, AsyncSession):
@@ -699,13 +627,15 @@ class SubscribeOper(DbOper):
         await self._db.flush()
         return subscribe
 
-    async def async_update_filter_groups(self, sid: int, filter_groups: List[str]) -> Optional[Subscribe]:
+    async def async_update_filter_groups(
+            self, sid: int, filter_groups: List[str]
+    ) -> Optional[Subscribe]:
         """
         异步更新订阅使用的过滤规则组。
         """
         return await self.async_update(sid, {"filter_groups": filter_groups})
 
-    def update(self, sid: int, payload: Mapping[str, JsonData]) -> Optional[Subscribe]:
+    def update(self, sid: int, payload: dict) -> Optional[Subscribe]:
         """
         更新订阅
         """
@@ -715,28 +645,58 @@ class SubscribeOper(DbOper):
             self._stage_update(subscribe, payload)
         return subscribe
 
-    def list_by_username(
-        self, username: str, state: Optional[str] = None, mtype: Optional[str] = None
-    ) -> List[Subscribe]:
+    def list_by_username(self, username: str, state: Optional[str] = None,
+                         mtype: Optional[str] = None) -> List[Subscribe]:
         """
         获取指定用户的订阅
         """
-        return cast(
-            List[Subscribe],
-            self._execute_sync_query(
-                lambda session: Subscribe.list_by_username(
-                    session,
-                    username=username,
-                    state=state,
-                    mtype=mtype,
-                )
-            ),
+        return self._execute_sync_query(
+            lambda session: Subscribe.list_by_username(
+                session,
+                username=username,
+                state=state,
+                mtype=mtype,
+            )
         )
 
     def list_by_type(self, mtype: str, days: int = 7) -> List[Subscribe]:
         """
         获取指定类型的订阅
         """
-        return cast(
-            List[Subscribe], self._execute_sync_query(lambda session: Subscribe.list_by_type(session, mtype, days))
+        return self._execute_sync_query(
+            lambda session: Subscribe.list_by_type(session, mtype, days)
         )
+
+    def add_history(self, **kwargs):
+        """
+        新增订阅
+        """
+        # 去除kwargs中 SubscribeHistory 没有的字段
+        kwargs = {k: v for k, v in kwargs.items() if hasattr(SubscribeHistory, k)}
+        kwargs = _normalize_integer_flags(kwargs)
+        # 更新完成订阅时间
+        kwargs.update({"date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())})
+        # 去掉主键
+        if "id" in kwargs:
+            kwargs.pop("id")
+        subscribe = SubscribeHistory(**kwargs)
+        self._stage_create(subscribe)
+
+    def exist_history(
+            self, media_source: MediaSource, media_id: str,
+            season: Optional[int] = None, episode_group: Optional[str] = None,
+            music_type: Optional[str] = None,
+    ) -> bool:
+        """
+        按媒体身份、季号及可选剧集组判断订阅历史是否存在。
+        """
+        identity_params = {
+            "media_source": media_source,
+            "media_id": media_id,
+            "music_type": music_type,
+            "season": season,
+            "episode_group": episode_group,
+        }
+        return bool(self._execute_sync_query(
+            lambda session: SubscribeHistory.exists(session, **identity_params)
+        ))

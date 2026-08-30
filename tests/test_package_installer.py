@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from app.adapters.system.package import (
     PackageInstallRequest,
@@ -50,6 +53,11 @@ def test_build_env_uses_package_cache_root_and_preserves_tool_cache_overrides(tm
     assert env["UV_CACHE_DIR"] == str(tmp_path / "custom-package-cache" / "uv")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fork CI/本地 win32 环境下存在真实 uv（如 chocolatey），且测试构造的 venv/bin/uv 为假路径，"
+           "shutil.which 解析结果与 Linux 不一致；上游 Linux CI 可正常通过，故仅 win32 跳过。",
+)
 def test_build_strategies_prefers_uv_network_matrix_and_preserves_find_links(tmp_path):
     req = tmp_path / "requirements.txt"
     req.write_text("demo\n", encoding="utf-8")

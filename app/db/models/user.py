@@ -1,6 +1,5 @@
 from typing import Any, Optional
-
-from sqlalchemy import JSON, Boolean, Index, String, select
+from sqlalchemy import Boolean, JSON, String, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -11,11 +10,10 @@ class User(Base):
     """
     用户表
     """
-
     # ID
     id = get_id_column()
     # 用户名，唯一值
-    name: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, index=True, nullable=False)
     # 邮箱
     email: Mapped[Optional[str]] = mapped_column(String)
     # 加密后密码
@@ -34,8 +32,6 @@ class User(Base):
     permissions: Mapped[Optional[Any]] = mapped_column(JSON, default=dict)
     # 用户个性化设置 json
     settings: Mapped[Optional[Any]] = mapped_column(JSON, default=dict)
-
-    __table_args__ = (Index("ux_user_name", "name", unique=True),)
 
     @classmethod
     def get_by_name(
@@ -72,21 +68,18 @@ class User(Base):
         return result.scalars().first()
 
     def delete_by_name(self, db: Session, name: str):
-        """在调用方同步会话中按用户名暂存删除。"""
         user = self.get_by_name(db, name)
         if user:
             db.delete(user)
         return True
 
     async def async_delete_by_name(self, db: AsyncSession, name: str):
-        """在调用方异步会话中按用户名暂存删除。"""
         user = await self.async_get_by_name(db, name)
         if user:
             await db.delete(user)
         return True
 
     def delete_by_id(self, db: Session, user_id: int):
-        """在调用方同步会话中按用户 ID 暂存删除。"""
         user = self.get_by_id(db, user_id)
         if user:
             db.delete(user)
@@ -101,7 +94,6 @@ class User(Base):
         return True
 
     def update_otp_by_name(self, db: Session, name: str, otp: bool, secret: str):
-        """在调用方同步会话中更新指定用户的 OTP 状态。"""
         user = self.get_by_name(db, name)
         if user:
             user.is_otp = otp

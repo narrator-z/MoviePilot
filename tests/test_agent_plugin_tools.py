@@ -16,13 +16,13 @@ from app.agent.tools.impl.query_market_plugins import QueryMarketPluginsTool
 from app.agent.tools.impl.query_plugin_config import QueryPluginConfigTool
 from app.agent.tools.impl.query_plugin_data import QueryPluginDataTool
 from app.agent.tools.impl.reload_plugin import ReloadPluginTool
+from app.schemas.plugin import PluginRuntimeStatus
 from app.agent.tools.impl.uninstall_plugin import UninstallPluginTool
 from app.agent.tools.impl.update_plugin_config import UpdatePluginConfigTool
 from app.runtime.extensions.plugin.admission import (
     PluginMutationAdmission,
     PluginMutationRejectedError,
 )
-from app.schemas.plugin import PluginRuntimeStatus
 
 
 def _plugin_snapshot(state: bool = True) -> dict:
@@ -435,65 +435,26 @@ def test_sealed_agent_uninstall_rejects_before_persistence() -> None:
     config_oper.async_set.assert_not_called()
 
 
-def test_agent_clone_uninstall_delegates_directory_removal_to_package_owner() -> None:
-    """Agent 分身卸载与 HTTP 入口共用唯一包文件删除 owner。"""
-    plugin_manager = MagicMock()
-    plugin_manager.get_plugin_instance.return_value = None
-    plugin_manager.get_plugin_source_instances.return_value = []
-    plugin_manager.plugins = {"DemoPluginwork": MagicMock(is_clone=True)}
-    plugin_manager.remove_plugin_package.return_value = True
-    config_oper = MagicMock()
-    config_oper.get.return_value = ["DemoPluginwork"]
-    config_oper.async_set = AsyncMock()
-    blocking = AsyncMock(return_value=True)
-
-    with (
-        patch(
-            "app.agent.tools.impl._plugin_tool_utils.get_plugin_manager",
-            return_value=plugin_manager,
-        ),
-        patch(
-            "app.agent.tools.impl._plugin_tool_utils.get_configured_system_config",
-            return_value=config_oper,
-        ),
-        patch(
-            "app.application.plugin.folders.remove_plugin_from_folders",
-        ),
-        patch("app.application.plugin.routes.remove_plugin_api"),
-        patch("app.application.scheduling.remove_plugin_job"),
-        patch("app.agent.tools.base.run_agent_blocking", blocking),
-    ):
-        result = asyncio.run(uninstall_plugin_runtime("DemoPluginwork"))
-
-    assert result == {"was_clone": True, "clone_files_removed": True}
-    blocking.assert_awaited_once_with(
-        "plugin",
-        plugin_manager.remove_plugin_package,
-        "DemoPluginwork",
-    )
-    assert "DemoPluginwork" not in plugin_manager.plugins
-
-
 def test_query_plugin_data_truncates_large_payload() -> None:
     """
     查询插件数据会截断超长内容并返回预览。
     """
+    tool = QueryPluginDataTool(session_id="session-1", user_id="10001")
     plugin_data_oper = MagicMock()
-    plugin_data_oper.list = AsyncMock(
-        return_value={"payload": {"text": "x" * 5000}}
-    )
+    plugin_data_oper.async_get_data_all = AsyncMock(return_value=[
+        SimpleNamespace(key="payload", value={"text": "x" * 5000})
+    ])
 
     with (
         patch(
             "app.agent.tools.impl.query_plugin_data.get_plugin_snapshot",
             return_value=_plugin_snapshot(),
         ),
+        patch(
+            "app.agent.tools.impl.query_plugin_data.get_agent_plugin_data_port",
+            return_value=plugin_data_oper,
+        ),
     ):
-        tool = QueryPluginDataTool(
-            session_id="session-1",
-            user_id="10001",
-            data=SimpleNamespace(plugin_data=plugin_data_oper),
-        )
         result = asyncio.run(tool.run(plugin_id="DemoPlugin", max_chars=200))
 
     payload = json.loads(result)

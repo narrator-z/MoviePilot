@@ -1,12 +1,12 @@
 from typing import Any, Optional
 
-from app.chain.base import ChainBase
+from app.chain import ChainBase
 from app.domain.context import MusicAlbumInfo, MusicArtistInfo, MusicInfo
 from app.domain.meta.metamusic import MetaMusic
 from app.schemas.types import MediaSource, MediaType
 
 
-class MusicMetadataSourceChain(ChainBase):
+class _MusicMetadataSourceChain(ChainBase):
     """固定音乐元数据来源链的共用端口适配。"""
 
     source: MediaSource
@@ -253,7 +253,7 @@ class MusicMetadataSourceChain(ChainBase):
         return artists[:limit] if limit else artists
 
 
-class MusicBrainzChain(MusicMetadataSourceChain):
+class MusicBrainzChain(_MusicMetadataSourceChain):
     """MusicBrainz 音乐搜索、识别与详情来源链。"""
 
     source = MediaSource.MusicBrainz

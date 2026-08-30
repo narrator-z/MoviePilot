@@ -1,20 +1,19 @@
-from collections.abc import Callable
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import pytest
 
-from app.application.transfer.workflow import (
+from app.chain import transfer as transfer_module
+from app.chain.transfer import TransferChain
+from app.application.transfer import (
     TransferFailureNotification,
     TransferFailureNotificationAggregator,
     TransferTask,
     build_transfer_failure_group_key,
 )
-from app.chain.transfer import TransferChain
 from app.domain.context import MediaInfo
 from app.domain.metainfo import MetaInfo
 from app.runtime.config import ConfigModel
-from app.runtime.loop import main_loop_registry
 from app.schemas.file import FileItem
 from app.schemas.transfer import TransferInfo
 from app.schemas.types import MediaSource, MediaType
@@ -45,31 +44,11 @@ class _Loop:
         """同步执行本应投递到事件循环的回调。"""
         callback(*args)
 
-    @staticmethod
-    def is_running() -> bool:
-        """模拟可接收任务的运行中事件循环。"""
-        return True
-
-    @staticmethod
-    def is_closed() -> bool:
-        """模拟尚未关闭的事件循环。"""
-        return False
-
     def call_later(self, _delay, callback, *args):
         """保存延迟回调并返回可取消句柄。"""
         timer = _Timer(callback, args)
         self.timers.append(timer)
         return timer
-
-
-@pytest.fixture
-def replace_main_loop() -> Callable[[object], None]:
-    """临时替换主循环登记，并在用例结束后恢复原值。"""
-    original = main_loop_registry.current
-    try:
-        yield main_loop_registry.replace_compat
-    finally:
-        main_loop_registry.replace_compat(original)
 
     @staticmethod
     def is_running() -> bool:
@@ -268,7 +247,7 @@ def test_aggregator_close_observes_flush_callback_error():
         loop=loop,
     )
 
-    with patch("app.application.transfer.workflow.logger.error") as log_error:
+    with patch("app.application.transfer.logger.error") as log_error:
         aggregator.close()
 
     callback.assert_called_once_with([notice])
@@ -301,7 +280,7 @@ def test_aggregated_message_contains_count_reason_stats_and_batch_entry():
     }]]
 
 
-def test_enabled_queue_uses_shared_group_key(replace_main_loop):
+def test_enabled_queue_uses_shared_group_key():
     """开启聚合后公开通知入口应投递到聚合器而不是立即发送。"""
     chain = object.__new__(TransferChain)
     chain.runtime_config = SimpleNamespace(
@@ -317,12 +296,12 @@ def test_enabled_queue_uses_shared_group_key(replace_main_loop):
         transfer_type="copy",
     )
     loop = _Loop()
-    replace_main_loop(loop)
-    chain.queue_failed_transfer_notification(
-        task=task,
-        transferinfo=transferinfo,
-        history_id=22,
-    )
+    with patch.object(transfer_module.global_vars, "CURRENT_EVENT_LOOP", loop):
+        chain.queue_failed_transfer_notification(
+            task=task,
+            transferinfo=transferinfo,
+            history_id=22,
+        )
 
     chain.failure_notification_aggregator.schedule.assert_called_once()
     kwargs = chain.failure_notification_aggregator.schedule.call_args.kwargs

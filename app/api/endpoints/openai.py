@@ -10,18 +10,18 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from app.adapters.web.security.access import openai_bearer_scheme
 from app.agent.contracts import ReplyMode
-from app.agent.loader import get_moviepilot_agent_type
+from app.agent.runtime_loader import get_moviepilot_agent_type
 from app.api.context import (
     get_background_task_registry_compat,
     resolve_background_task_registry,
 )
-from app.api.presentation.sse import build_sse_response, encode_data_event
-from app.api.protocol import (
+from app.api.openai_utils import (
     build_completion_payload,
     build_prompt,
     build_responses_input,
     build_session_id,
 )
+from app.api.presentation.sse import build_sse_response, encode_data_event
 from app.application.agent import get_running_agent_manager
 from app.application.configuration import get_api_runtime_config_snapshot
 from app.runtime.tasks import TaskRegistry

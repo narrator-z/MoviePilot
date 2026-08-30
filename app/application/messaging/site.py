@@ -1,6 +1,7 @@
 import re
-from typing import Callable, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Protocol, Tuple, Union
 
+from app.domain import site as site_rules
 from app.application.messaging.interaction import (
     MessageGateway,
     SlashInteractionManager,
@@ -11,17 +12,25 @@ from app.application.messaging.interaction import (
     supports_markdown,
     update_or_post_message,
 )
-from app.application.site.contract import (
-    SiteMutation,
-    SiteRepository,
-    SiteSnapshot,
-)
-from app.domain import site as site_rules
 from app.runtime.log import logger
 from app.schemas.message import Message
 from app.schemas.types import NotificationChannel
 
+
 site_interaction_manager = SlashInteractionManager()
+
+
+class SiteInteractionRepository(Protocol):
+    """站点消息交互所需的同步数据端口。"""
+
+    def list(self) -> List[Any]:
+        """返回站点列表。"""
+
+    def get(self, site_id: int) -> Optional[Any]:
+        """按 ID 返回站点。"""
+
+    def update(self, site_id: int, payload: dict) -> Optional[Any]:
+        """更新站点。"""
 
 
 class SiteInteractionHandler:
@@ -36,7 +45,7 @@ class SiteInteractionHandler:
             self,
             messenger: MessageGateway,
             cookie_updater: Callable[..., Tuple[bool, str]],
-            repository: SiteRepository,
+            repository: SiteInteractionRepository,
     ):
         """
         注入消息投递接口和站点 Cookie 更新动作。
@@ -478,8 +487,7 @@ class SiteInteractionHandler:
 
     @staticmethod
     def _format_site_list(
-            site_list: list[SiteSnapshot],
-            channel: Optional[NotificationChannel],
+            site_list: List[Any], channel: Optional[NotificationChannel]
     ) -> str:
         """
         根据渠道能力格式化站点列表。
@@ -539,7 +547,7 @@ class SiteInteractionHandler:
         )
 
     @staticmethod
-    def _parse_site_ids(arg_str: str) -> list[int]:
+    def _parse_site_ids(arg_str: str) -> List[int]:
         """
         从输入中提取站点 ID。
         """
@@ -560,10 +568,7 @@ class SiteInteractionHandler:
             if not site:
                 missing.append(str(site_id))
                 continue
-            self._repository.update(
-                site_id,
-                SiteMutation({"is_active": enabled}),
-            )
+            self._repository.update(site_id, {"is_active": enabled})
             changed.append(site.name)
 
         action = "启用" if enabled else "禁用"

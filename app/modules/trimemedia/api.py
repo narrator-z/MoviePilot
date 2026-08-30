@@ -7,9 +7,10 @@ from enum import Enum
 from typing import List, Optional, Union
 from urllib.parse import quote
 
-from app.adapters.network.http import RequestUtils
-from app.runtime.log import logger
 from app.runtime.settings import get_runtime_setting
+
+from app.runtime.log import logger
+from app.adapters.network.http import RequestUtils, requests
 
 
 @dataclass
@@ -113,6 +114,7 @@ class Api:
         "_api_path",
         "_request_utils",
         "_version",
+        "_session",
     )
 
     @property
@@ -136,7 +138,7 @@ class Api:
         """
         当前会话的Cookies，开启访问码后包含访问码校验凭证
         """
-        return self._request_utils.get_cookies()
+        return self._session.cookies.get_dict()
 
     def __init__(self, host: str, apikey: str, access_code: Optional[str] = None):
         """
@@ -149,7 +151,8 @@ class Api:
         self._access_code = access_code
         self._token: Optional[str] = None
         self._version: Optional[Version] = None
-        self._request_utils = RequestUtils(use_session=True, timeout=10)
+        self._session = requests.Session()
+        self._request_utils = RequestUtils(session=self._session, timeout=10)
 
     def verify_access_code(self) -> bool:
         """
@@ -610,4 +613,5 @@ class Api:
         """
         关闭API会话
         """
-        self._request_utils.close()
+        if self._session:
+            self._session.close()

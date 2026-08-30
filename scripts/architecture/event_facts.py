@@ -11,7 +11,7 @@ from typing import Any, Literal, TypeAlias
 _DEFAULT_IDENTITY = "<default>"
 _DYNAMIC_IDENTITY = "<dynamic>"
 _EVENT_MANAGER_METHODS = {"add_event_listener", "register"}
-_PRODUCER_METHODS = {"async_send_event", "send_event", "send_event_strict"}
+_PRODUCER_METHODS = {"async_send_event", "send_event"}
 _COMPREHENSION_SCOPES = (
     ast.ListComp,
     ast.SetComp,
@@ -61,7 +61,6 @@ class _BoundEventMethod:
         "add_event_listener",
         "register",
         "send_event",
-        "send_event_strict",
         "async_send_event",
     ]
     receiver_kind: str
@@ -338,196 +337,18 @@ def _function_parameter_symbols(
 _InjectedFieldKey: TypeAlias = tuple[str, str]
 
 
-def _resolve_import_from_module(
-    module_name: str,
-    node: ast.ImportFrom,
-    package_modules: set[str],
-) -> str:
-    """把绝对或相对 from-import 解析为 canonical 来源模块。"""
-    if not node.level:
-        return node.module or ""
-    current_parts = module_name.split(".")
-    package_parts = (
-        current_parts
-        if module_name in package_modules
-        else current_parts[:-1]
-    )
-    ascend = node.level - 1
-    if ascend > len(package_parts):
-        return ""
-    base_parts = package_parts[:len(package_parts) - ascend]
-    if node.module:
-        base_parts.extend(node.module.split("."))
-    return ".".join(base_parts)
-
-
-def _statement_bound_names(statement: ast.stmt) -> set[str]:
-    """返回模块语句直接或条件分支可能绑定的名称。"""
-    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return {statement.name}
-    if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-        targets = (
-            statement.targets
-            if isinstance(statement, ast.Assign)
-            else (statement.target,)
-        )
-        return {name for target in targets for name in _bound_names(target)}
-    if isinstance(statement, ast.Import):
-        return {item.asname or item.name.split(".", 1)[0] for item in statement.names}
-    if isinstance(statement, ast.ImportFrom):
-        return {item.asname or item.name for item in statement.names}
-    if isinstance(statement, ast.If):
-        return {
-            name
-            for branch in (statement.body, statement.orelse)
-            for child in branch
-            for name in _statement_bound_names(child)
-        }
-    return set()
-
-
-def _runtime_module_statements(tree: ast.Module) -> list[ast.stmt]:
-    """展开可证明的 TYPE_CHECKING 运行期分支，保留其余顶层语句。"""
-    type_checking_names: set[str] = set()
-    typing_modules: set[str] = set()
-    runtime_statements: list[ast.stmt] = []
-
-    def runtime_value(test: ast.expr) -> bool | None:
-        """判断表达式是否是当前未遮蔽的 typing.TYPE_CHECKING。"""
-        negate = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
-        target = test.operand if negate else test
-        name = _expression_name(target)
-        proven = name in type_checking_names or any(
-            name == f"{module}.TYPE_CHECKING" for module in typing_modules
-        )
-        return negate if proven else None
-
-    def visit(statements: list[ast.stmt]) -> None:
-        """按模块执行顺序收集可证明会运行的语句。"""
-        for statement in statements:
-            if isinstance(statement, ast.If):
-                value = runtime_value(statement.test)
-                if value is not None:
-                    visit(statement.body if value else statement.orelse)
-                    continue
-                rebound = _statement_bound_names(statement)
-                type_checking_names.difference_update(rebound)
-                typing_modules.difference_update(rebound)
-                runtime_statements.append(statement)
-                continue
-
-            rebound = _statement_bound_names(statement)
-            type_checking_names.difference_update(rebound)
-            typing_modules.difference_update(rebound)
-            runtime_statements.append(statement)
-            if isinstance(statement, ast.Import):
-                for item in statement.names:
-                    if item.name == "typing":
-                        typing_modules.add(item.asname or "typing")
-            elif isinstance(statement, ast.ImportFrom) and statement.module == "typing":
-                for item in statement.names:
-                    if item.name == "TYPE_CHECKING":
-                        type_checking_names.add(item.asname or item.name)
-
-    visit(tree.body)
-    return runtime_statements
-
-
-def _module_import_aliases(
-    statements: list[ast.stmt],
-    *,
-    module_name: str,
-    package_modules: set[str],
-) -> dict[str, str]:
+def _module_import_aliases(tree: ast.Module) -> dict[str, str]:
     """收集解析类继承关系所需的模块级 import 别名。"""
     aliases: dict[str, str] = {}
-    for node in statements:
+    for node in tree.body:
         if isinstance(node, ast.Import):
             for item in node.names:
                 bound = item.asname or item.name.split(".", 1)[0]
                 aliases[bound] = item.name if item.asname else bound
-        elif isinstance(node, ast.ImportFrom):
-            source_module = _resolve_import_from_module(
-                module_name,
-                node,
-                package_modules,
-            )
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
             for item in node.names:
                 if item.name != "*":
-                    canonical = ".".join(
-                        part for part in (source_module, item.name) if part
-                    )
-                    aliases[item.asname or item.name] = canonical
-    return aliases
-
-
-def _module_class_aliases(
-    statements: list[ast.stmt],
-    *,
-    module_name: str,
-    package_modules: set[str],
-) -> dict[str, str]:
-    """收集运行期可证明的模块级简单类别名及其 canonical 目标。"""
-    aliases: dict[str, str] = {}
-    bindings: dict[str, str] = {}
-
-    def resolve(node: ast.expr) -> str:
-        """仅从当前未遮蔽绑定解析类别名右值。"""
-        name = _expression_name(node)
-        if not name:
-            return ""
-        head, *tail = name.split(".")
-        if head not in bindings:
-            return ""
-        return ".".join((bindings[head], *tail))
-
-    for statement in statements:
-        bound_names = _statement_bound_names(statement)
-        target = (
-            resolve(statement.value)
-            if isinstance(statement, (ast.Assign, ast.AnnAssign))
-            and statement.value is not None
-            else ""
-        )
-        for name in bound_names:
-            bindings.pop(name, None)
-            aliases.pop(f"{module_name}.{name}", None)
-
-        if isinstance(statement, ast.Import):
-            for item in statement.names:
-                bound = item.asname or item.name.split(".", 1)[0]
-                bindings[bound] = item.name if item.asname else bound
-            continue
-        if isinstance(statement, ast.ImportFrom):
-            source_module = _resolve_import_from_module(
-                module_name,
-                statement,
-                package_modules,
-            )
-            for item in statement.names:
-                if item.name != "*":
-                    canonical = ".".join(
-                        part for part in (source_module, item.name) if part
-                    )
-                    bindings[item.asname or item.name] = canonical
-            continue
-        if isinstance(statement, ast.ClassDef):
-            bindings[statement.name] = f"{module_name}.{statement.name}"
-            continue
-        if isinstance(statement, ast.Assign):
-            targets = statement.targets
-        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
-            targets = (statement.target,)
-        else:
-            continue
-        target_names = [
-            target.id for target in targets if isinstance(target, ast.Name)
-        ]
-        if len(target_names) != len(targets) or not target:
-            continue
-        for name in target_names:
-            bindings[name] = target
-            aliases[f"{module_name}.{name}"] = target
+                    aliases[item.asname or item.name] = f"{node.module}.{item.name}"
     return aliases
 
 
@@ -564,44 +385,17 @@ def _canonical_class_name(
 
 def _discover_injected_event_fields(
     trees: dict[str, ast.Module],
-    package_modules: set[str],
 ) -> dict[_InjectedFieldKey, dict[str, _Symbol]]:
     """按 owning class 发现构造注入字段，并沿已知继承关系传播。"""
-    runtime_statements = {
-        module_name: _runtime_module_statements(tree)
-        for module_name, tree in trees.items()
-    }
     classes = {
         f"{module_name}.{qualname}": (module_name, qualname, node)
-        for module_name, statements in runtime_statements.items()
-        for qualname, node in _iter_classes(statements)
+        for module_name, tree in trees.items()
+        for qualname, node in _iter_classes(tree.body)
     }
     aliases = {
-        module_name: _module_import_aliases(
-            runtime_statements[module_name],
-            module_name=module_name,
-            package_modules=package_modules,
-        )
-        for module_name in trees
+        module_name: _module_import_aliases(tree)
+        for module_name, tree in trees.items()
     }
-    class_aliases = {
-        alias: target
-        for module_name, statements in runtime_statements.items()
-        for alias, target in _module_class_aliases(
-            statements,
-            module_name=module_name,
-            package_modules=package_modules,
-        ).items()
-    }
-
-    def resolve_class_alias(canonical: str) -> str:
-        """传递解析简单类别名，并拒绝循环别名。"""
-        visited: set[str] = set()
-        while canonical in class_aliases and canonical not in visited:
-            visited.add(canonical)
-            canonical = class_aliases[canonical]
-        return "" if canonical in visited else canonical
-
     fields: dict[str, dict[str, _Symbol]] = {
         canonical: {} for canonical in classes
     }
@@ -618,7 +412,6 @@ def _discover_injected_event_fields(
                 module_name=module_name,
                 aliases=aliases[module_name],
             )
-            base_name = resolve_class_alias(base_name)
             if base_name in classes:
                 bases_by_class[canonical].add(base_name)
                 descendants_by_class[base_name].add(canonical)
@@ -664,7 +457,7 @@ def _discover_injected_event_fields(
                         )
                         if (
                             symbol is None
-                            and module_name == "app.chain.base"
+                            and module_name == "app.chain"
                             and qualname == "ChainBase"
                             and target.attr == "eventmanager"
                             and isinstance(value, ast.Attribute)
@@ -1601,15 +1394,7 @@ def collect_event_facts(
         if module_name != "app.plugins"
         and not module_name.startswith("app.plugins.")
     }
-    package_modules = {
-        module_name
-        for module_name, path in modules.items()
-        if path.name == "__init__.py"
-    }
-    injected_fields = _discover_injected_event_fields(
-        trees,
-        package_modules,
-    )
+    injected_fields = _discover_injected_event_fields(trees)
     producers: list[dict[str, Any]] = []
     consumers: list[dict[str, Any]] = []
     for module_name, tree in sorted(trees.items()):

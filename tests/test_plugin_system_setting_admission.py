@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,24 +12,13 @@ from app.api.endpoints import system as system_endpoint
 from app.application.plugin import runtime as plugin_runtime
 from app.runtime.extensions.plugin.admission import PluginMutationAdmission
 from app.schemas.types import SystemConfigKey
-from app.startup.composition.system import compose_system_service
+
 
 PLUGIN_RUNTIME_KEYS = (
     SystemConfigKey.UserInstalledPlugins,
     SystemConfigKey.PluginInstances,
     SystemConfigKey.PluginFolders,
 )
-
-
-def _runtime(config, *, rule_group_mutation=None):
-    """构造注入指定配置仓储的最小系统运行时。"""
-    return SimpleNamespace(
-        system=compose_system_service(
-            settings=SimpleNamespace(contains=lambda _key: False),
-            system_config=config,
-            rule_group_mutation=rule_group_mutation or SimpleNamespace(),
-        )
-    )
 
 
 @pytest.mark.asyncio
@@ -49,9 +37,18 @@ async def test_system_http_rejects_plugin_keys_after_admission_seal(
         "get_plugin_manager",
         lambda: SimpleNamespace(mutation=admission.hold),
     )
-    response = await system_endpoint.set_setting(
-        config_key.value, {}, None, runtime=_runtime(config)
+    monkeypatch.setattr(
+        system_endpoint,
+        "get_runtime_settings",
+        lambda: SimpleNamespace(contains=lambda _key: False),
     )
+    monkeypatch.setattr(
+        system_endpoint,
+        "get_configured_system_config",
+        lambda: config,
+    )
+
+    response = await system_endpoint.set_setting(config_key.value, {}, None)
 
     assert response.success is False
     assert "停机阶段" in response.message
@@ -111,15 +108,22 @@ async def test_system_http_plugin_write_remains_owned_until_settled(
         lambda: SimpleNamespace(mutation=admission.hold),
     )
     monkeypatch.setattr(
-        "app.startup.composition.system.eventmanager.async_send_event", AsyncMock()
+        system_endpoint,
+        "get_runtime_settings",
+        lambda: SimpleNamespace(contains=lambda _key: False),
     )
+    monkeypatch.setattr(
+        system_endpoint,
+        "get_configured_system_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(system_endpoint.eventmanager, "async_send_event", AsyncMock())
 
     task = asyncio.create_task(
         system_endpoint.set_setting(
             SystemConfigKey.UserInstalledPlugins.value,
             ["DemoPlugin"],
             None,
-            runtime=_runtime(config),
         )
     )
     await write_started.wait()
@@ -202,14 +206,21 @@ async def test_non_plugin_system_config_does_not_resolve_plugin_runtime(
 
     monkeypatch.setattr(plugin_runtime, "get_plugin_manager", fail_runtime_resolution)
     monkeypatch.setattr(
-        "app.startup.composition.system.eventmanager.async_send_event", AsyncMock()
+        system_endpoint,
+        "get_runtime_settings",
+        lambda: SimpleNamespace(contains=lambda _key: False),
     )
+    monkeypatch.setattr(
+        system_endpoint,
+        "get_configured_system_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(system_endpoint.eventmanager, "async_send_event", AsyncMock())
 
     response = await system_endpoint.set_setting(
         SystemConfigKey.Directories.value,
         [],
         None,
-        runtime=_runtime(config),
     )
 
     assert response.success is True
@@ -222,37 +233,27 @@ async def test_rule_group_setting_reconciles_stale_references_when_unchanged(
 ) -> None:
     """重复保存规则组也应按有效名称对账，修复旧版本遗留的悬空订阅引用。"""
     config = MagicMock()
-    definitions = [{"name": "keep", "rule_string": "4K"}]
-    config.get.return_value = definitions
-    config.async_set = AsyncMock()
-    mutation = MagicMock()
-    mutation.apply = AsyncMock()
-
-    @asynccontextmanager
-    async def mutation_scope():
-        """提供可观测的异步规则组事务作用域。"""
-        yield mutation
-
-    send_event = AsyncMock()
+    config.async_set = AsyncMock(return_value=None)
     monkeypatch.setattr(
-        "app.startup.composition.system.eventmanager.async_send_event", send_event
+        system_endpoint,
+        "get_runtime_settings",
+        lambda: SimpleNamespace(contains=lambda _key: False),
     )
-    runtime = _runtime(config, rule_group_mutation=mutation_scope)
+    monkeypatch.setattr(
+        system_endpoint,
+        "get_configured_system_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(system_endpoint.eventmanager, "async_send_event", AsyncMock())
 
     response = await system_endpoint.set_setting(
         SystemConfigKey.UserFilterRuleGroups.value,
-        definitions,
+        [{"name": "keep", "rule_string": "4K"}],
         None,
-        runtime=runtime,
     )
 
     assert response.success is True
-    mutation.apply.assert_awaited_once_with(
-        definitions,
-        expected_rule_groups=definitions,
-    )
-    config.async_set.assert_not_awaited()
-    send_event.assert_awaited_once()
+    system_endpoint.eventmanager.async_send_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio

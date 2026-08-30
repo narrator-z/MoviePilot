@@ -1,19 +1,16 @@
-import copy
 import secrets
 import threading
 import time
-from collections.abc import Mapping
 from datetime import timedelta
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Optional, Protocol
 
-from app.application.configuration import get_api_runtime_config_snapshot, get_chain_runtime_config_snapshot
-from app.application.security.token import create_access_token
-from app.application.security.user import FrozenJson
-from app.application.site.sites import SitesHelper  # pylint: disable=import-error,no-name-in-module
-from app.foundation.singleton import Singleton
 from app.schemas.token import Token as _SchemaToken
 from app.schemas.token import TokenPayload as _SchemaTokenPayload
-from app.schemas.user import UserPermissions
+from app.application.security.token import create_access_token
+from app.application.configuration import get_api_runtime_config_snapshot, get_chain_runtime_config_snapshot
+from app.application.site.sites import SitesHelper  # pylint: disable=import-error,no-name-in-module
+from app.schemas.types import SystemConfigKey
+from app.foundation.singleton import Singleton
 
 
 class AuthTicketStore(metaclass=Singleton):
@@ -43,13 +40,13 @@ class AuthTicketStore(metaclass=Singleton):
         ticket = secrets.token_urlsafe(32)
         now = time.time()
         with self._lock:
+            self._cleanup(now)
             self._tickets[ticket] = {
                 "user_id": int(user_id),
                 "provider_id": provider_id,
-                "metadata": copy.deepcopy(metadata) if metadata is not None else {},
+                "metadata": metadata or {},
                 "created_at": now,
             }
-            self._cleanup(now)
         return ticket
 
     def consume(self, ticket: str) -> Optional[dict[str, Any]]:
@@ -69,7 +66,7 @@ class AuthTicketStore(metaclass=Singleton):
             return None
         if now - float(data.get("created_at") or 0) > self._ttl_seconds:
             return None
-        return copy.deepcopy(data)
+        return data
 
     def _cleanup(self, now: Optional[float] = None) -> None:
         """
@@ -77,7 +74,7 @@ class AuthTicketStore(metaclass=Singleton):
 
         :param now: 当前时间戳，未传入时自动读取
         """
-        current = time.time() if now is None else now
+        current = now or time.time()
         expired = [
             key
             for key, value in self._tickets.items()
@@ -120,29 +117,12 @@ def consume_plugin_auth_ticket(ticket: str) -> Optional[dict[str, Any]]:
 class AuthUser(Protocol):
     """认证服务需要的最小用户投影。"""
 
-    @property
-    def id(self) -> int:
-        """返回用户 ID。"""
-
-    @property
-    def name(self) -> str:
-        """返回用户名。"""
-
-    @property
-    def is_active(self) -> bool:
-        """返回账号启用状态。"""
-
-    @property
-    def is_superuser(self) -> bool:
-        """返回超级用户状态。"""
-
-    @property
-    def avatar(self) -> Optional[str]:
-        """返回用户头像。"""
-
-    @property
-    def permissions(self) -> Mapping[str, FrozenJson]:
-        """返回只读权限快照。"""
+    id: int
+    name: str
+    is_active: bool
+    is_superuser: bool
+    avatar: Optional[str]
+    permissions: Optional[dict]
 
 
 class AuthUserRepository(Protocol):
@@ -208,6 +188,10 @@ class AuthService:
         """使用统一逻辑构造登录 Token 响应。"""
         level = SitesHelper().auth_level
         config = get_api_runtime_config_snapshot()
+        show_wizard = (
+            not self._config.get(SystemConfigKey.SetupWizardState)
+            and not config.advanced_mode
+        )
         return _SchemaToken(
             access_token=create_access_token(
                 userid=user.id,
@@ -222,7 +206,8 @@ class AuthService:
             user_name=user.name,
             avatar=user.avatar,
             level=level,
-            permissions=cast(UserPermissions, dict(user.permissions)),
+            permissions=user.permissions or {},
+            wizard=show_wizard,
         )
 
 
@@ -233,12 +218,6 @@ def configure_auth_service(service: AuthService) -> None:
     """由启动组合根登记认证应用服务。"""
     global _configured_auth_service
     _configured_auth_service = service
-
-
-def reset_auth_service() -> None:
-    """清除当前 lifespan 的认证应用服务。"""
-    global _configured_auth_service
-    _configured_auth_service = None
 
 
 def _get_auth_service() -> AuthService:

@@ -2,17 +2,11 @@
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, call
 
+from app.agent.tools.impl import search_subscribe as search_subscribe_module
 from app.agent.tools.impl.search_subscribe import SearchSubscribeTool
-
-
-@asynccontextmanager
-async def _scope(value):
-    """把测试替身包装成工具使用的异步作用域。"""
-    yield value
 
 
 def _subscribe(*, state: str = "R") -> SimpleNamespace:
@@ -44,6 +38,7 @@ def test_search_subscribe_uses_async_data_port(monkeypatch) -> None:
     class _AsyncSubscribePort:
         def __init__(self) -> None:
             self.async_get = AsyncMock(side_effect=[record, updated])
+            self.async_update = AsyncMock()
 
         def get(self, _subscribe_id):
             raise AssertionError("async 工具不应调用同步订阅查询")
@@ -52,7 +47,7 @@ def test_search_subscribe_uses_async_data_port(monkeypatch) -> None:
             raise AssertionError("async 工具不应调用同步订阅更新")
 
     port = _AsyncSubscribePort()
-    mutation = SimpleNamespace(update=AsyncMock())
+    monkeypatch.setattr(search_subscribe_module, "get_agent_subscribe_port", lambda: port)
 
     async def _run_blocking(*_args, **_kwargs):
         await asyncio.sleep(0)
@@ -60,14 +55,7 @@ def test_search_subscribe_uses_async_data_port(monkeypatch) -> None:
     monkeypatch.setattr(SearchSubscribeTool, "run_blocking", _run_blocking)
 
     result = asyncio.run(
-        SearchSubscribeTool(
-            session_id="test",
-            user_id="1",
-            data=SimpleNamespace(
-                subscriptions=port,
-                subscription_mutation_scope=lambda: _scope(mutation),
-            ),
-        ).run(
+        SearchSubscribeTool(session_id="test", user_id="1").run(
             subscribe_id=record.id,
             filter_groups=["default"],
         )
@@ -76,14 +64,10 @@ def test_search_subscribe_uses_async_data_port(monkeypatch) -> None:
     payload = json.loads(result)
     assert payload["success"] is True
     assert port.async_get.await_args_list == [call(record.id), call(record.id)]
-    mutation.update.assert_awaited_once()
-    mutation_args = mutation.update.await_args.args
-    assert mutation_args[:2] == (record.id, {"filter_groups": ["default"]})
-    assert mutation_args[2].is_superuser is True
-    assert mutation.update.await_args.kwargs == {
-        "existing": record,
-        "scene": "agent_search",
-    }
+    port.async_update.assert_awaited_once_with(
+        record.id,
+        {"filter_groups": ["default"]},
+    )
 
 
 def test_search_subscribe_rejects_paused_subscription_without_search(monkeypatch) -> None:
@@ -92,20 +76,15 @@ def test_search_subscribe_rejects_paused_subscription_without_search(monkeypatch
 
     class _AsyncSubscribePort:
         async_get = AsyncMock(return_value=record)
+        async_update = AsyncMock()
 
     port = _AsyncSubscribePort()
+    monkeypatch.setattr(search_subscribe_module, "get_agent_subscribe_port", lambda: port)
     run_blocking = AsyncMock()
     monkeypatch.setattr(SearchSubscribeTool, "run_blocking", run_blocking)
 
     result = asyncio.run(
-        SearchSubscribeTool(
-            session_id="test",
-            user_id="1",
-            data=SimpleNamespace(
-                subscriptions=port,
-                subscription_mutation_scope=MagicMock(),
-            ),
-        ).run(
+        SearchSubscribeTool(session_id="test", user_id="1").run(
             subscribe_id=record.id,
         )
     )

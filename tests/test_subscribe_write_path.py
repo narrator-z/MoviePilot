@@ -27,10 +27,8 @@ import asyncio
 import pytest
 
 from app.application.subscription.write import add_subscribe, async_add_subscribe
-from app.db.adapters.subscription import TransactionalSubscriptionRepository
 from app.db.models.subscribe import Subscribe
 from app.db.oper.subscribe import SubscribeOper
-from app.db.session import SessionFactory, async_session_scope
 from app.domain.context import MediaInfo, MusicInfo
 from app.schemas.types import MediaSource, MediaType
 
@@ -70,15 +68,11 @@ def _musicinfo(media_id: str, music_type: str, **kwargs) -> MusicInfo:
                      music_type=music_type, **kwargs)
 
 
-def _add(_oper: SubscribeOper, is_async: bool, **kwargs):
-    """显式注入短事务仓储并分派同步或异步新增。"""
-    writer = TransactionalSubscriptionRepository(
-        sync_session=SessionFactory,
-        async_session=async_session_scope,
-    )
+def _add(oper: SubscribeOper, is_async: bool, **kwargs):
+    """按链路分派到同步或异步新增，让同一份字段契约跑两遍。"""
     if is_async:
-        return asyncio.run(async_add_subscribe(subscribe_oper=writer, **kwargs))
-    return add_subscribe(subscribe_oper=writer, **kwargs)
+        return asyncio.run(async_add_subscribe(subscribe_oper=oper, **kwargs))
+    return add_subscribe(subscribe_oper=oper, **kwargs)
 
 
 def _row(db, subscribe_id: int) -> Subscribe:

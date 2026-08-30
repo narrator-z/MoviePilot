@@ -699,8 +699,6 @@ import app.schemas.types as schema_types
 receiver = eventmanager
 emit = receiver.send_event
 emit(EventType.Alpha)
-strict_emit = receiver.send_event_strict
-strict_emit(EventType.Beta)
 EventManager().send_event(EventType.Gamma)
 EventManager.get_existing_instance().send_event(ChainEventType.Delta)
 
@@ -712,7 +710,7 @@ async def publish():
     )
 
     assert facts["consumers"] == []
-    assert len(facts["producers"]) == 5
+    assert len(facts["producers"]) == 4
     assert {
         (
             fact["qualname"],
@@ -723,12 +721,6 @@ async def publish():
         for fact in facts["producers"]
     } == {
         ("<module>", "send_event", "canonical_singleton", ("EventType.Alpha",)),
-        (
-            "<module>",
-            "send_event_strict",
-            "canonical_singleton",
-            ("EventType.Beta",),
-        ),
         ("<module>", "send_event", "constructed_manager", ("EventType.Gamma",)),
         ("<module>", "send_event", "existing_manager", ("ChainEventType.Delta",)),
         ("publish", "async_send_event", "canonical_singleton", ("EventType.Beta",)),
@@ -873,195 +865,7 @@ class EventManager:
     assert facts["consumers"] == []
     assert len(facts["producers"]) == 1
     assert facts["producers"][0]["receiver_kind"] == "event_manager_self"
-
-
-def test_collect_event_facts_tracks_chain_base_context_event_manager(
-    tmp_path: Path,
-) -> None:
-    """ChainBase 迁入 canonical base 模块后仍应识别上下文注入的事件管理器。"""
-    facts = _collect_facts(
-        tmp_path,
-        '''
-from app.schemas.types import EventType
-
-class ChainBase:
-    def __init__(self, context):
-        self.eventmanager = context.event_manager
-
-    def publish(self):
-        self.eventmanager.send_event(EventType.Alpha)
-''',
-        module_name="app.chain.base",
-    )
-
-    assert len(facts["producers"]) == 1
     assert facts["producers"][0]["events"] == ["EventType.Alpha"]
-    assert facts["producers"][0]["receiver_kind"] == "injected_event_manager"
-    assert facts["producers"][0]["events"] == ["EventType.Alpha"]
-
-
-def test_collect_event_facts_tracks_relative_imported_chain_owner(
-    tmp_path: Path,
-) -> None:
-    """相对导入的 Chain owner 也应继承 facade 组合得到的事件端口。"""
-    base_path = tmp_path / "base.py"
-    owner_path = tmp_path / "owner.py"
-    facade_path = tmp_path / "facade.py"
-    base_path.write_text(
-        '''
-class ChainBase:
-    def __init__(self, context):
-        self.eventmanager = context.event_manager
-''',
-        encoding="utf-8",
-    )
-    owner_path.write_text(
-        '''
-from app.schemas.types import EventType
-
-class SettlementOwner:
-    def publish(self):
-        self.eventmanager.send_event(EventType.Alpha)
-''',
-        encoding="utf-8",
-    )
-    facade_path.write_text(
-        '''
-from app.chain.base import ChainBase
-from .owner import SettlementOwner
-
-class TransferChain(SettlementOwner, ChainBase):
-    pass
-''',
-        encoding="utf-8",
-    )
-
-    facts = collect_event_facts(
-        {
-            "app.chain.base": base_path,
-            "app.chain.transfer.owner": owner_path,
-            "app.chain.transfer.facade": facade_path,
-        },
-        EVENT_MEMBERS,
-    )
-
-    assert len(facts["producers"]) == 1
-    producer = facts["producers"][0]
-    assert producer["caller"] == "app.chain.transfer.owner"
-    assert producer["qualname"] == "SettlementOwner.publish"
-    assert producer["events"] == ["EventType.Alpha"]
-    assert producer["receiver_kind"] == "injected_event_manager"
-
-
-def test_collect_event_facts_tracks_runtime_type_checking_base_alias(
-    tmp_path: Path,
-) -> None:
-    """Owner 经 TYPE_CHECKING 的运行期基类别名仍应继承事件端口。"""
-    base_path = tmp_path / "base.py"
-    contract_path = tmp_path / "contract.py"
-    owner_path = tmp_path / "owner.py"
-    base_path.write_text(
-        '''
-class ChainBase:
-    def __init__(self, context):
-        self.eventmanager = context.event_manager
-''',
-        encoding="utf-8",
-    )
-    contract_path.write_text(
-        '''
-from typing import TYPE_CHECKING
-from app.chain.base import ChainBase
-
-_RuntimeBase = ChainBase
-
-if TYPE_CHECKING:
-    class _OwnerBase(_RuntimeBase):
-        pass
-else:
-    _OwnerBase = _RuntimeBase
-''',
-        encoding="utf-8",
-    )
-    owner_path.write_text(
-        '''
-from app.schemas.types import EventType
-from .contract import _OwnerBase
-
-class SettlementOwner(_OwnerBase):
-    def publish(self):
-        self.eventmanager.send_event(EventType.Alpha)
-''',
-        encoding="utf-8",
-    )
-
-    facts = collect_event_facts(
-        {
-            "app.chain.base": base_path,
-            "app.chain.sample.contract": contract_path,
-            "app.chain.sample.owner": owner_path,
-        },
-        EVENT_MEMBERS,
-    )
-
-    assert len(facts["producers"]) == 1
-    producer = facts["producers"][0]
-    assert producer["caller"] == "app.chain.sample.owner"
-    assert producer["qualname"] == "SettlementOwner.publish"
-    assert producer["events"] == ["EventType.Alpha"]
-    assert producer["receiver_kind"] == "injected_event_manager"
-
-
-def test_collect_event_facts_rejects_shadowed_type_checking_base_alias(
-    tmp_path: Path,
-) -> None:
-    """被重绑定的 TYPE_CHECKING 分支不能作为静态继承证据。"""
-    base_path = tmp_path / "base.py"
-    contract_path = tmp_path / "contract.py"
-    owner_path = tmp_path / "owner.py"
-    base_path.write_text(
-        '''
-class ChainBase:
-    def __init__(self, context):
-        self.eventmanager = context.event_manager
-''',
-        encoding="utf-8",
-    )
-    contract_path.write_text(
-        '''
-from typing import TYPE_CHECKING
-from app.chain.base import ChainBase
-
-TYPE_CHECKING = True
-if TYPE_CHECKING:
-    _OwnerBase = ChainBase
-else:
-    _OwnerBase = object
-''',
-        encoding="utf-8",
-    )
-    owner_path.write_text(
-        '''
-from app.schemas.types import EventType
-from .contract import _OwnerBase
-
-class SettlementOwner(_OwnerBase):
-    def publish(self):
-        self.eventmanager.send_event(EventType.Alpha)
-''',
-        encoding="utf-8",
-    )
-
-    facts = collect_event_facts(
-        {
-            "app.chain.base": base_path,
-            "app.chain.sample.contract": contract_path,
-            "app.chain.sample.owner": owner_path,
-        },
-        EVENT_MEMBERS,
-    )
-
-    assert facts["producers"] == []
 
 
 def test_collect_event_facts_consumer_schema_and_fingerprint_are_stable(
@@ -1142,7 +946,7 @@ def handler(event):
 
 
 def test_collect_event_facts_matches_current_host_inventory() -> None:
-    """统一事实覆盖当前 90 个 producer 调用与 17 个 consumer 调用。"""
+    """统一事实覆盖当前 97 个 producer 调用与 17 个 consumer 调用。"""
     from scripts.architecture.baseline import (
         _event_enum_members,
         discover_modules,
@@ -1158,15 +962,15 @@ def test_collect_event_facts_matches_current_host_inventory() -> None:
     producers = facts["producers"]
     consumers = facts["consumers"]
 
-    assert len(producers) == 90
-    assert sum(not fact["dynamic"] and not fact["invalid"] for fact in producers) == 89
+    assert len(producers) == 97
+    assert sum(not fact["dynamic"] and not fact["invalid"] for fact in producers) == 96
     assert sum(fact["dynamic"] for fact in producers) == 1
     assert sum(fact["invalid"] for fact in producers) == 0
-    assert sum(len(fact["events"]) for fact in producers) == 91
-    assert len(consumers) == 17
-    assert sum(not fact["dynamic"] and not fact["invalid"] for fact in consumers) == 16
+    assert sum(len(fact["events"]) for fact in producers) == 98
+    assert len(consumers) == 18
+    assert sum(not fact["dynamic"] and not fact["invalid"] for fact in consumers) == 17
     assert sum(fact["dynamic"] for fact in consumers) == 1
     assert sum(fact["invalid"] for fact in consumers) == 0
-    assert sum(len(fact["events"]) for fact in consumers) == 16
+    assert sum(len(fact["events"]) for fact in consumers) == 17
     consumer_fingerprints = [fact["fingerprint"] for fact in consumers]
     assert len(consumer_fingerprints) == len(set(consumer_fingerprints))

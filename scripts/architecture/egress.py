@@ -217,6 +217,18 @@ class _EgressVisitor(ast.NodeVisitor):
             dict(module_final_scope) if module_final_scope is not None else None
         )
         self._collecting_class_bindings = False
+        self._visit_depth = 0
+
+    def visit(self, node: ast.AST) -> None:  # type: ignore[override]
+        """带递归深度上限的访问入口，防御异常 AST 导致的无限递归。"""
+        self._visit_depth += 1
+        if self._visit_depth > 2000:
+            self._visit_depth -= 1
+            return
+        try:
+            super().visit(node)
+        finally:
+            self._visit_depth -= 1
 
     def _qualname(self) -> str:
         """返回当前调用所在的稳定限定名。"""
@@ -291,7 +303,18 @@ class _EgressVisitor(ast.NodeVisitor):
 
         def is_module_level(node: ast.AST) -> bool:
             parent = parents.get(node)
+            seen: set[ast.AST] = set()
+            depth = 0
             while parent is not None and parent is not tree:
+                if parent in seen:
+                    # parent 链成环(异常 AST 结构),按非模块级处理,避免无限循环
+                    return False
+                seen.add(parent)
+                if depth > 1000:
+                    # 防御:正常模块级节点父链不会超过数千层,
+                    # 超过则视为异常 AST(parent 映射异常),按非模块级处理
+                    return False
+                depth += 1
                 if isinstance(
                     parent,
                     (

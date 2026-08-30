@@ -3,11 +3,11 @@ from pathlib import Path
 from typing import Any, List, Dict, Tuple, Optional, Type
 
 from app.chain import ChainBase
-from app.core.config import settings
-from app.core.event import EventManager
+from app.runtime.config import settings
+from app.runtime.events import EventManager
 from app.db.oper.plugindata import PluginDataOper
 from app.db.oper.systemconfig import SystemConfigOper
-from app.helper.message import MessageHelper
+from app.application.messaging.message import MessageHelper
 from app.schemas import Notification, NotificationType, MessageChannel
 
 

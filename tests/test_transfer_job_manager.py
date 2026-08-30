@@ -1,5 +1,4 @@
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,17 +8,8 @@ from app.application.history import (
     failed_retry_count,
     record_transfer_failure,
 )
-from app.application.transfer.execution import (
-    TransferExecutionCheckpoint,
-    TransferSettlementResult,
-)
-from app.application.transfer.workflow import (
-    JobManager,
-    TransferAdmission,
-    TransferPlanningInput,
-    TransferTask,
-)
-from app.chain.transfer import TransferChain
+from app.application.transfer import TransferPlanningInput, TransferTask
+from app.chain.transfer import JobManager, TransferChain
 from app.domain.context import MediaInfo
 from app.domain.meta.metabase import MetaBase
 from app.domain.meta.metavideo import MetaVideo
@@ -161,11 +151,7 @@ def make_task(episode: int, season: int = 1) -> TransferTask:
 
 
 def make_transfer_chain() -> TransferChain:
-    """构造带内存 durable admission 契约的整理链测试骨架。"""
     chain = object.__new__(TransferChain)
-    chain.transfer_history_repository = MagicMock()
-    chain.download_history_repository = MagicMock()
-    chain.transfer_execution_repository = MagicMock()
     chain.jobview = JobManager()
     chain._media_exts = settings.RMT_MEDIAEXT
     chain._subtitle_exts = settings.RMT_SUBEXT
@@ -175,134 +161,7 @@ def make_transfer_chain() -> TransferChain:
     )
     chain._success_target_files = {}
     chain._scrape_batches = {}
-    admissions = MagicMock()
-    admissions_by_identity = {}
-    admissions_by_id = {}
-
-    def admit(*, storage, src_path, planning_input=None):
-        """按源身份幂等返回测试用 durable admission。"""
-        identity = storage, src_path
-        existing = admissions_by_identity.get(identity)
-        if existing is not None:
-            return existing
-        admission = TransferAdmission(
-            task_id=f"test-task-{len(admissions_by_id) + 1}",
-            storage=storage,
-            src_path=src_path,
-            state="accepted",
-            created_at="2026-08-27 10:00:00",
-            updated_at="2026-08-27 10:00:00",
-            planning_input=planning_input,
-        )
-        admissions_by_identity[identity] = admission
-        admissions_by_id[admission.task_id] = admission
-        return admission
-
-    def claim_task(*, task_id, owner_id, lease_seconds):
-        """为测试任务返回唯一 token，并保留正式 claim 的参数约束。"""
-        assert lease_seconds > 0
-        admission = admissions_by_id[task_id]
-        claimed = replace(
-            admission,
-            lease_owner=owner_id,
-            lease_token=f"lease-{task_id}",
-            lease_expires_at="2026-08-27 10:02:00.000000",
-            heartbeat_at="2026-08-27 10:00:00.000000",
-            attempt_count=admission.attempt_count + 1,
-        )
-        admissions_by_identity[(claimed.storage, claimed.src_path)] = claimed
-        admissions_by_id[task_id] = claimed
-        return claimed
-
-    def checkpoint_plan(*, task_id, lease_token, input_fingerprint, checkpoint):
-        """回读带检查点的持久投影，供同步整理测试执行真实编排。"""
-        del input_fingerprint
-        admission = admissions_by_id[task_id]
-        assert admission.lease_token == lease_token
-        planned = replace(
-            admission,
-            state="provider_pending" if checkpoint.is_provider_pending else "planned",
-            checkpoint=checkpoint,
-        )
-        admissions_by_identity[(planned.storage, planned.src_path)] = planned
-        admissions_by_id[task_id] = planned
-        return planned
-
-    admissions.admit.side_effect = admit
-    admissions.claim_task.side_effect = claim_task
-    admissions.checkpoint_plan.side_effect = checkpoint_plan
-    admissions.abandon_unstarted.return_value = 1
-    admissions.release_claim.return_value = True
-    chain._transfer_admissions = admissions
-    chain._TransferChain__ensure_lease_heartbeat_owner = MagicMock()
-
-    class ImmediateStepRunner:
-        """为 JobManager 测试提交纯内存步骤与聚合执行检查点。"""
-
-        def run(self, *, phase, kind, payload, execute, observe):
-            """立即执行确定性测试步骤，不使用恢复探测。"""
-            del phase, kind, payload, observe
-            return execute()
-
-        def checkpoint(self, transferinfo):
-            """把测试整理结果冻结为可供 task-aware writer 使用的检查点。"""
-            return TransferExecutionCheckpoint.create(
-                payload={
-                    "outcome": "succeeded" if transferinfo.success else "failed",
-                    "transferinfo": transferinfo.model_dump(mode="json"),
-                },
-                operation_ids=("job-test-operation",),
-            )
-
-    step_runner = ImmediateStepRunner()
-    chain._TransferChain__build_durable_step_runner = MagicMock(
-        return_value=step_runner
-    )
-
-    def transfer_result(**kwargs):
-        """执行测试历史暂存与发布，并返回已删除 pending 的原子回执。"""
-        staging = SimpleNamespace(
-            get_success_by_src=lambda *_args, **_kwargs: SimpleNamespace(
-                id=99,
-                status=True,
-            )
-        )
-        history = kwargs["stage_history"](staging)
-        if kwargs["publish"] is not None:
-            kwargs["publish"](kwargs["event_payload"])
-        return TransferSettlementResult(
-            history_id=getattr(history, "id", 1) if history is not None else 1,
-            settlement_revision=1,
-            pending_deleted=True,
-        )
-
-    chain.durable_event_writer = MagicMock()
-    chain.durable_event_writer.transfer_result.side_effect = transfer_result
     return chain
-
-
-def bind_terminal_checkpoint(
-        task: TransferTask,
-        transferinfo: TransferInfo,
-) -> None:
-    """为直接回调测试绑定 task identity、lease 与聚合执行检查点。"""
-    task_id = f"terminal-{abs(hash(task.fileitem.path))}"
-    task.bind_admission_task_id(task_id)
-    task.bind_execution_lease(
-        owner_id="job-test-owner",
-        lease_token=f"lease-{task_id}",
-    )
-    task.bind_execution_checkpoint(TransferExecutionCheckpoint.create(
-        payload={
-            "outcome": (
-                "overwrite_skipped"
-                if transferinfo.overwrite_skipped
-                else "succeeded" if transferinfo.success else "failed"
-            ),
-            "transferinfo": transferinfo.model_dump(mode="json"),
-        },
-        operation_ids=("job-test-operation",),
-    ))
 
 
 def make_fileitem(path: str, size: int = 1024) -> FileItem:
@@ -620,11 +479,11 @@ class TransferJobManagerTest(unittest.TestCase):
             need_scrape=True,
             need_notify=False,
         )
-        bind_terminal_checkpoint(task, transferinfo)
-        chain.transfer_history_repository = SimpleNamespace()
 
         with patch(
-            "app.chain.transfer.settlement.add_transfer_success",
+            "app.chain.transfer.get_chain_transfer_history_port", return_value=SimpleNamespace()
+        ), patch(
+            "app.chain.transfer.add_transfer_success",
             lambda **kwargs: SimpleNamespace(id=1),
         ):
             state, errmsg = chain._TransferChain__default_callback(task, transferinfo)
@@ -665,13 +524,14 @@ class TransferJobManagerTest(unittest.TestCase):
             get_file_by_fullpath=lambda fullpath: None,
             get_files_by_savepath=lambda savepath: [],
             get_by_path=lambda path: None,
+            get_files_by_hash=lambda download_hash: None,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
-        chain.transfer_history_repository = transfer_history_oper
-        chain.download_history_repository = download_history_oper
 
-        with patch("app.chain.transfer.workflow.get_configured_system_config", return_value=system_config_oper), \
-                patch("app.chain.transfer.request.MetaInfoPath", lambda *args, **kwargs: FakeMeta(14)):
+        with patch("app.chain.transfer.get_chain_transfer_history_port", return_value=transfer_history_oper), \
+                patch("app.chain.transfer.get_chain_download_history_port", return_value=download_history_oper), \
+                patch("app.chain.transfer.get_configured_system_config", return_value=system_config_oper), \
+                patch("app.chain.transfer.MetaInfoPath", lambda *args, **kwargs: FakeMeta(14)):
             state, errmsg = chain.do_transfer(
                 fileitem=source_fileitem,
                 mediainfo=FakeMedia(),
@@ -841,10 +701,12 @@ class TransferJobManagerTest(unittest.TestCase):
             get_success_by_src=lambda src, storage=None: history,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
-        chain.transfer_history_repository = transfer_history_oper
 
         with patch(
-            "app.chain.transfer.workflow.get_configured_system_config",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=transfer_history_oper,
+        ), patch(
+            "app.chain.transfer.get_configured_system_config",
             return_value=system_config_oper,
         ):
             state, errmsg = TransferChain.do_transfer(
@@ -903,15 +765,20 @@ class TransferJobManagerTest(unittest.TestCase):
             get_file_by_fullpath=lambda fullpath: None,
             get_files_by_savepath=lambda savepath: [],
             get_by_path=lambda path: None,
+            get_files_by_hash=lambda download_hash: None,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
 
         _reset_failed_retries(fileitem.path, fileitem.storage)
-        chain.transfer_history_repository = transfer_history_oper
-        chain.download_history_repository = download_history_oper
         try:
             with patch(
-                "app.chain.transfer.workflow.get_configured_system_config",
+                "app.chain.transfer.get_chain_transfer_history_port",
+                return_value=transfer_history_oper,
+            ), patch(
+                "app.chain.transfer.get_chain_download_history_port",
+                return_value=download_history_oper,
+            ), patch(
+                "app.chain.transfer.get_configured_system_config",
                 return_value=system_config_oper,
             ):
                 state, errmsg = TransferChain.do_transfer(
@@ -974,6 +841,7 @@ class TransferJobManagerTest(unittest.TestCase):
             get_file_by_fullpath=lambda fullpath: None,
             get_files_by_savepath=lambda savepath: [],
             get_by_path=lambda path: None,
+            get_files_by_hash=lambda download_hash: None,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
 
@@ -983,10 +851,14 @@ class TransferJobManagerTest(unittest.TestCase):
                 settings, "TRANSFER_MAX_FAILED_RETRIES", 1,
             ):
                 record_transfer_failure(fileitem.path, fileitem.storage)
-                chain.transfer_history_repository = transfer_history_oper
-                chain.download_history_repository = download_history_oper
                 with patch(
-                    "app.chain.transfer.workflow.get_configured_system_config",
+                    "app.chain.transfer.get_chain_transfer_history_port",
+                    return_value=transfer_history_oper,
+                ), patch(
+                    "app.chain.transfer.get_chain_download_history_port",
+                    return_value=download_history_oper,
+                ), patch(
+                    "app.chain.transfer.get_configured_system_config",
                     return_value=system_config_oper,
                 ):
                     state, errmsg = TransferChain.do_transfer(
@@ -1034,11 +906,12 @@ class TransferJobManagerTest(unittest.TestCase):
                 transfer_type="copy",
                 need_notify=False,
             )
-            bind_terminal_checkpoint(task, failed_transferinfo)
             failed_history_oper = SimpleNamespace()
-            chain.transfer_history_repository = failed_history_oper
             with patch(
-                "app.chain.transfer.settlement.add_transfer_fail",
+                "app.chain.transfer.get_chain_transfer_history_port",
+                return_value=failed_history_oper,
+            ), patch(
+                "app.chain.transfer.add_transfer_fail",
                 lambda **kwargs: SimpleNamespace(id=1),
             ), patch(
                 "app.runtime.config.settings.AI_AGENT_ENABLE", False
@@ -1074,10 +947,10 @@ class TransferJobManagerTest(unittest.TestCase):
                 need_scrape=False,
                 need_notify=False,
             )
-            bind_terminal_checkpoint(task, success_transferinfo)
-            chain.transfer_history_repository = SimpleNamespace()
             with patch(
-                "app.chain.transfer.settlement.add_transfer_success",
+                "app.chain.transfer.get_chain_transfer_history_port", return_value=SimpleNamespace()
+            ), patch(
+                "app.chain.transfer.add_transfer_success",
                 lambda **kwargs: SimpleNamespace(id=2),
             ):
                 state, _ = chain._TransferChain__default_callback(task, success_transferinfo)
@@ -1087,8 +960,7 @@ class TransferJobManagerTest(unittest.TestCase):
         finally:
             _reset_failed_retries(src_path, storage)
 
-    def test_unrecognized_task_waits_for_durable_settlement_before_completion(self):
-        """拒绝检查点建立后、writer 结算前不得提前完成下载种子或移除作业。"""
+    def test_unrecognized_task_marks_downloader_hash_completed(self):
         chain = make_transfer_chain()
         chain.post_message = lambda *_args, **_kwargs: None
         completed = []
@@ -1099,18 +971,24 @@ class TransferJobManagerTest(unittest.TestCase):
         chain.transfer_completed = fake_transfer_completed
         chain.list_torrents = lambda **kwargs: [SimpleNamespace(progress=100)]
         task = make_task(1)
+        # 文件名兜底仅对“有可用名称”的介质生效；无可用名称时识别仍应失败，
+        # 并保持“标记下载器哈希已完成”的健壮性契约（避免无限重试）。
+        # 命名介质走文件名兜底的逻辑由 test_media_recog_transfer 单独覆盖。
+        task.meta.name = ""
         task.downloader = "qbittorrent"
         task.download_hash = "abc123"
         self.assertTrue(chain.jobview.add_task(task))
 
         transfer_history_oper = SimpleNamespace()
-        chain.transfer_history_repository = transfer_history_oper
 
         with patch(
-            "app.chain.transfer.settlement.add_transfer_fail",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=transfer_history_oper,
+        ), patch(
+            "app.chain.transfer.add_transfer_fail",
             lambda **kwargs: SimpleNamespace(id=1),
         ), patch(
-            "app.chain.transfer.execution.MediaChain"
+            "app.chain.transfer.MediaChain"
         ) as media_chain_cls, patch(
             "app.runtime.config.settings.AI_AGENT_ENABLE", False
         ), patch(
@@ -1121,14 +999,15 @@ class TransferJobManagerTest(unittest.TestCase):
 
         self.assertFalse(state)
         self.assertEqual("未识别到媒体信息", errmsg)
-        self.assertEqual([], completed)
-        self.assertIsNotNone(task.plan_checkpoint)
-        self.assertIsNotNone(task.execution_checkpoint)
-        self.assertEqual(1, len(chain.jobview.list_jobs()))
-        chain.durable_event_writer.transfer_result.assert_not_called()
+        self.assertEqual([("abc123", "qbittorrent")], completed)
+        self.assertEqual([], chain.jobview.list_jobs())
 
-    def test_unrecognized_task_does_not_read_history_before_writer(self):
-        """拒绝步骤完成但 writer 未调用时，不得读取失败历史或发送通知。"""
+    def test_unrecognized_task_survives_missing_failure_history(self):
+        """
+        写整理历史失败（``add_transfer_fail`` 返回 None）时，未识别分支仍须走完
+        通知、作业清理与种子完成标记：历史落库是通知的附属信息，不是前置条件。
+        通知正文只省去 ``/redo`` 指引，不得因读取 ``his.id`` 抛 NoneType。
+        """
         chain = make_transfer_chain()
         notifications = []
         chain.post_message = lambda message, **_kwargs: notifications.append(message)
@@ -1140,16 +1019,20 @@ class TransferJobManagerTest(unittest.TestCase):
         chain.transfer_completed = fake_transfer_completed
         chain.list_torrents = lambda **kwargs: [SimpleNamespace(progress=100)]
         task = make_task(1)
+        # 文件名兜底仅对“有可用名称”的介质生效；无可用名称时识别仍应失败。
+        task.meta.name = ""
         task.downloader = "qbittorrent"
         task.download_hash = "abc123"
         self.assertTrue(chain.jobview.add_task(task))
-        chain.transfer_history_repository = SimpleNamespace()
 
         with patch(
-            "app.chain.transfer.settlement.add_transfer_fail",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "app.chain.transfer.add_transfer_fail",
             lambda **kwargs: None,
         ), patch(
-            "app.chain.transfer.execution.MediaChain"
+            "app.chain.transfer.MediaChain"
         ) as media_chain_cls, patch(
             "app.runtime.config.settings.AI_AGENT_ENABLE", False
         ), patch(
@@ -1160,29 +1043,42 @@ class TransferJobManagerTest(unittest.TestCase):
 
         self.assertFalse(state)
         self.assertEqual("未识别到媒体信息", errmsg)
-        self.assertEqual([], completed)
-        self.assertEqual([], notifications)
-        self.assertEqual(1, len(chain.jobview.list_jobs()))
-        chain.durable_event_writer.transfer_result.assert_not_called()
+        # 种子完成标记与作业清理都排在通知之后，通知崩掉会把它们一并跳过
+        self.assertEqual([("abc123", "qbittorrent")], completed)
+        self.assertEqual([], chain.jobview.list_jobs())
+        # 通知照发，但不含无法使用的 /redo 指引
+        self.assertEqual(1, len(notifications))
+        notification = notifications[0]
+        self.assertIn("未识别到媒体信息", notification.text)
+        self.assertNotIn("/redo", notification.text)
+        self.assertIsNone(notification.buttons)
 
-    def test_unrecognized_task_does_not_publish_redo_before_writer(self):
-        """即使历史函数可用，未经过 task-aware writer 也不得发布 redo。"""
+    def test_unrecognized_task_keeps_redo_hint_when_history_written(self):
+        """
+        整理历史正常落库时，未识别通知须保留两条 ``/redo`` 指引与操作按钮，
+        防止上一条用例被「一律删掉 /redo」这种偷懒实现蒙混过关。
+        """
         chain = make_transfer_chain()
         notifications = []
         chain.post_message = lambda message, **_kwargs: notifications.append(message)
         chain.transfer_completed = lambda *args, **kwargs: None
         chain.list_torrents = lambda **kwargs: [SimpleNamespace(progress=100)]
         task = make_task(1)
+        # 文件名兜底仅对“有可用名称”的介质生效；无可用名称时识别仍应失败，
+        # 走未识别通知分支（命名介质走文件名兜底的逻辑由 test_media_recog_transfer 覆盖）。
+        task.meta.name = ""
         task.downloader = "qbittorrent"
         task.download_hash = "abc123"
         self.assertTrue(chain.jobview.add_task(task))
-        chain.transfer_history_repository = SimpleNamespace()
 
         with patch(
-            "app.chain.transfer.settlement.add_transfer_fail",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "app.chain.transfer.add_transfer_fail",
             lambda **kwargs: SimpleNamespace(id=77),
         ), patch(
-            "app.chain.transfer.execution.MediaChain"
+            "app.chain.transfer.MediaChain"
         ) as media_chain_cls, patch(
             "app.runtime.config.settings.AI_AGENT_ENABLE", False
         ), patch(
@@ -1191,8 +1087,22 @@ class TransferJobManagerTest(unittest.TestCase):
             media_chain_cls.return_value.recognize_by_meta.return_value = None
             chain._TransferChain__handle_transfer(task)
 
-        self.assertEqual([], notifications)
-        chain.durable_event_writer.transfer_result.assert_not_called()
+        self.assertEqual(1, len(notifications))
+        notification = notifications[0]
+        self.assertIn("/redo 77\n", notification.text)
+        self.assertIn("/redo 77 [media_source]|[media_id]|[类型]", notification.text)
+        self.assertEqual(
+            [
+                [
+                    {"text": "重试", "callback_data": "transfer_retry_77"},
+                    {
+                        "text": "智能助手接管",
+                        "callback_data": "transfer_ai_retry_77",
+                    },
+                ]
+            ],
+            notification.buttons,
+        )
 
     def test_do_transfer_syncs_same_stem_extra_files_by_default(self):
         chain = make_transfer_chain()
@@ -1222,6 +1132,7 @@ class TransferJobManagerTest(unittest.TestCase):
             get_file_by_fullpath=lambda fullpath: None,
             get_files_by_savepath=lambda savepath: [],
             get_by_path=lambda path: None,
+            get_files_by_hash=lambda download_hash: None,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
         storage_chain = SimpleNamespace(
@@ -1236,14 +1147,18 @@ class TransferJobManagerTest(unittest.TestCase):
                 subtitle_fileitem,
             ],
         )
-        chain.transfer_history_repository = transfer_history_oper
-        chain.download_history_repository = download_history_oper
 
         with patch(
-            "app.chain.transfer.workflow.get_configured_system_config",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=transfer_history_oper,
+        ), patch(
+            "app.chain.transfer.get_chain_download_history_port",
+            return_value=download_history_oper,
+        ), patch(
+            "app.chain.transfer.get_configured_system_config",
             return_value=system_config_oper,
         ), patch(
-            "app.chain.transfer.request.StorageChain",
+            "app.chain.transfer.StorageChain",
             return_value=storage_chain,
         ):
             state, errmsg = TransferChain.do_transfer(
@@ -1328,20 +1243,25 @@ class TransferJobManagerTest(unittest.TestCase):
             get_file_by_fullpath=lambda fullpath: None,
             get_files_by_savepath=lambda savepath: [],
             get_by_path=lambda path: None,
+            get_files_by_hash=lambda download_hash: None,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
         storage_chain = SimpleNamespace(get_item=lambda fileitem: subtitle_fileitem)
-        chain.transfer_history_repository = transfer_history_oper
-        chain.download_history_repository = download_history_oper
 
         with patch(
-            "app.chain.transfer.workflow.get_configured_system_config",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=transfer_history_oper,
+        ), patch(
+            "app.chain.transfer.get_chain_download_history_port",
+            return_value=download_history_oper,
+        ), patch(
+            "app.chain.transfer.get_configured_system_config",
             return_value=system_config_oper,
         ), patch(
-            "app.chain.transfer.request.StorageChain",
+            "app.chain.transfer.StorageChain",
             return_value=storage_chain,
         ), patch(
-            "app.chain.transfer.request.MetaInfoPath",
+            "app.chain.transfer.MetaInfoPath",
             side_effect=lambda path, custom_words=None, **kwargs: FakeMeta(1),
         ):
             state, errmsg = TransferChain.do_transfer(
@@ -1399,6 +1319,7 @@ class TransferJobManagerTest(unittest.TestCase):
             get_file_by_fullpath=lambda fullpath: None,
             get_files_by_savepath=lambda savepath: [],
             get_by_path=lambda path: None,
+            get_files_by_hash=lambda download_hash: None,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
         storage_chain = SimpleNamespace(
@@ -1408,17 +1329,21 @@ class TransferJobManagerTest(unittest.TestCase):
                 subtitle_fileitem,
             ],
         )
-        chain.transfer_history_repository = transfer_history_oper
-        chain.download_history_repository = download_history_oper
 
         with patch(
-            "app.chain.transfer.workflow.get_configured_system_config",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=transfer_history_oper,
+        ), patch(
+            "app.chain.transfer.get_chain_download_history_port",
+            return_value=download_history_oper,
+        ), patch(
+            "app.chain.transfer.get_configured_system_config",
             return_value=system_config_oper,
         ), patch(
-            "app.chain.transfer.request.StorageChain",
+            "app.chain.transfer.StorageChain",
             return_value=storage_chain,
         ), patch(
-            "app.chain.transfer.request.MetaInfoPath",
+            "app.chain.transfer.MetaInfoPath",
             side_effect=lambda path, custom_words=None, **kwargs: FakeMeta(1),
         ):
             state, errmsg = TransferChain.do_transfer(
@@ -1490,6 +1415,7 @@ class TransferJobManagerTest(unittest.TestCase):
             get_file_by_fullpath=lambda fullpath: None,
             get_files_by_savepath=lambda savepath: [],
             get_by_path=lambda path: None,
+            get_files_by_hash=lambda download_hash: None,
         )
         system_config_oper = SimpleNamespace(get=lambda key: None)
         list_files_calls = []
@@ -1509,14 +1435,18 @@ class TransferJobManagerTest(unittest.TestCase):
             get_parent_item=lambda fileitem: parent_fileitem,
             list_files=fake_list_files,
         )
-        chain.transfer_history_repository = transfer_history_oper
-        chain.download_history_repository = download_history_oper
 
         with patch(
-            "app.chain.transfer.workflow.get_configured_system_config",
+            "app.chain.transfer.get_chain_transfer_history_port",
+            return_value=transfer_history_oper,
+        ), patch(
+            "app.chain.transfer.get_chain_download_history_port",
+            return_value=download_history_oper,
+        ), patch(
+            "app.chain.transfer.get_configured_system_config",
             return_value=system_config_oper,
         ), patch(
-            "app.chain.transfer.request.StorageChain",
+            "app.chain.transfer.StorageChain",
             return_value=storage_chain,
         ):
             state, errmsg = TransferChain.do_transfer(
@@ -1603,17 +1533,17 @@ class TransferJobManagerTest(unittest.TestCase):
                 need_notify=False,
             ),
         ]
-        chain.transfer_history_repository = SimpleNamespace()
 
         with patch(
-            "app.chain.transfer.settlement.add_transfer_success",
+            "app.chain.transfer.get_chain_transfer_history_port", return_value=SimpleNamespace()
+        ), patch(
+            "app.chain.transfer.add_transfer_success",
             lambda **kwargs: SimpleNamespace(id=1),
         ), patch(
-            "app.chain.transfer.settlement.StorageChain"
+            "app.chain.transfer.StorageChain"
         ) as storage_chain_cls:
             storage_chain_cls.return_value.is_bluray_folder.return_value = False
             for task, transferinfo in zip(tasks, transferinfos):
-                bind_terminal_checkpoint(task, transferinfo)
                 chain._TransferChain__default_callback(task, transferinfo)
                 chain._finish_scrape_batch_task(task)
 
@@ -1669,14 +1599,14 @@ class TransferJobManagerTest(unittest.TestCase):
             need_scrape=True,
             need_notify=False,
         )
-        bind_terminal_checkpoint(task, transferinfo)
-        chain.transfer_history_repository = SimpleNamespace()
 
         with patch(
-            "app.chain.transfer.settlement.add_transfer_success",
+            "app.chain.transfer.get_chain_transfer_history_port", return_value=SimpleNamespace()
+        ), patch(
+            "app.chain.transfer.add_transfer_success",
             lambda **kwargs: SimpleNamespace(id=1),
         ), patch(
-            "app.chain.transfer.settlement.StorageChain"
+            "app.chain.transfer.StorageChain"
         ) as storage_chain_cls:
             storage_chain_cls.return_value.is_bluray_folder.return_value = False
             chain._TransferChain__default_callback(task, transferinfo)

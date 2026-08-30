@@ -1,17 +1,16 @@
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
+
+from app.modules._base.media_auxiliary import MediaAuxiliaryProviderMixin
+from app.runtime.settings import get_runtime_setting
+from app.schemas.context import MediaPerson as _SchemaMediaPerson
 
 from app.domain.context import MediaInfo
 from app.domain.media import is_media_source_enabled
 from app.domain.meta.metabase import MetaBase
-from app.domain.projection.anilist import format_date as format_anilist_date
 from app.domain.scraper import MediaScraperHelper
 from app.modules import _ModuleBase
-from app.modules._base.media import MediaAuxiliaryProviderMixin
 from app.modules.anilist.anilist import AniListApi
 from app.runtime.log import logger
-from app.runtime.settings import get_runtime_setting
-from app.schemas.context import MediaPerson as _SchemaMediaPerson
 from app.schemas.types import (
     MediaRecognizeType,
     MediaSource,
@@ -19,29 +18,6 @@ from app.schemas.types import (
     MediaType,
     ModuleType,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _AniListRecognitionPlan:
-    """描述一次 AniList 识别应走显式详情还是标题搜索。"""
-
-    media_id: Optional[int]
-    meta: Optional[MetaBase]
-    label: str
-
-    def require_meta(self) -> MetaBase:
-        """返回标题搜索计划必有的解析元数据。"""
-        if self.meta is None:
-            raise RuntimeError("AniList 标题识别计划缺少解析元数据")
-        return self.meta
-
-
-@dataclass(frozen=True, slots=True)
-class _AniListSearchPlan:
-    """保存 AniList 搜索来源准入结果和有效查询元数据。"""
-
-    enabled: bool
-    meta: Optional[MetaBase]
 
 
 class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
@@ -103,44 +79,6 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         """
         return (media_source or get_runtime_setting('RECOGNIZE_SOURCE')) == MediaSource.AniList
 
-    @classmethod
-    def _recognition_plan(
-        cls,
-        meta: Optional[MetaBase],
-        media_source: Optional[MediaSource],
-        media_id: Optional[str],
-        requested_type: Optional[MediaType],
-    ) -> Optional[_AniListRecognitionPlan]:
-        """统一校验来源、媒体类型和显式 AniList ID。"""
-        if requested_type == MediaType.MUSIC or getattr(meta, "type", None) == MediaType.MUSIC:
-            return None
-        if media_source and media_source != MediaSource.AniList:
-            return None
-        if media_id is not None:
-            if media_source != MediaSource.AniList or not str(media_id).isdigit():
-                return None
-            normalized_id = int(media_id)
-            if normalized_id <= 0:
-                return None
-            return _AniListRecognitionPlan(
-                media_id=normalized_id, meta=meta, label=str(normalized_id)
-            )
-        if not meta or not cls._source_enabled(media_source):
-            return None
-        return _AniListRecognitionPlan(media_id=None, meta=meta, label=meta.name)
-
-    @staticmethod
-    def _search_plan(
-        meta: Optional[MetaBase],
-        media_source: Optional[MediaSourceSelection],
-    ) -> _AniListSearchPlan:
-        """统一决定 AniList 搜索是否响应以及是否具备查询标题。"""
-        enabled = is_media_source_enabled(media_source, MediaSource.AniList)
-        return _AniListSearchPlan(
-            enabled=enabled,
-            meta=meta if enabled and meta and meta.name else None,
-        )
-
     @staticmethod
     def _media_type(info: dict) -> MediaType:
         """
@@ -164,39 +102,6 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
             return False
         year = info.get("startDate", {}).get("year") or info.get("seasonYear")
         return not meta.year or not year or str(year) == str(meta.year)
-
-    @classmethod
-    def _select_matching_info(
-        cls, meta: MetaBase, infos: list[dict[str, Any]]
-    ) -> Optional[dict[str, Any]]:
-        """从已获取的候选列表中选择首个类型与年份均匹配的条目。"""
-        return next((info for info in infos if cls._matches_meta(meta, info)), None)
-
-    @classmethod
-    def _build_recognized_media(
-        cls, info: dict[str, Any], meta: Optional[MetaBase]
-    ) -> MediaInfo:
-        """把识别详情投影为统一媒体信息并保留解析季号。"""
-        mediainfo = MediaInfo(anilist_info=cls._enrich_people(info))
-        if meta and meta.begin_season is not None:
-            mediainfo.season = meta.begin_season
-        return mediainfo
-
-    @classmethod
-    def _project_search_results(
-        cls, meta: MetaBase, infos: list[dict[str, Any]]
-    ) -> list[MediaInfo]:
-        """过滤 AniList 搜索候选并投影为统一媒体信息列表。"""
-        return [
-            MediaInfo(anilist_info=cls._enrich_people(info))
-            for info in infos
-            if cls._matches_meta(meta, info)
-        ]
-
-    @staticmethod
-    def _project_media_list(infos: list[dict[str, Any]]) -> list[MediaInfo]:
-        """把 AniList 媒体列表投影为统一媒体信息列表。"""
-        return [MediaInfo(anilist_info=info) for info in infos]
 
     @staticmethod
     def _enrich_people(info: dict) -> dict:
@@ -263,7 +168,7 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param date_info: AniList FuzzyDate 字段
         :return: 日期文本
         """
-        return format_anilist_date(date_info)
+        return MediaInfo._anilist_date(date_info)
 
     @classmethod
     def _build_credit_person(cls, edge: dict) -> Optional[_SchemaMediaPerson]:
@@ -333,21 +238,29 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_id: 数据源原生ID
         :return: 统一媒体信息
         """
-        plan = self._recognition_plan(
-            meta, media_source, media_id, kwargs.get("mtype")
-        )
-        if not plan:
+        # AniList 只处理动画影视，不能在音乐模块未响应时接管音乐请求。
+        if (
+                kwargs.get("mtype") == MediaType.MUSIC
+                or getattr(meta, "type", None) == MediaType.MUSIC
+        ):
             return None
-        info = (
-            self.anilist_api.detail(plan.media_id)
-            if plan.media_id is not None
-            else self._match_by_meta(plan.require_meta())
-        )
+        if media_source and media_source != MediaSource.AniList:
+            return None
+        if media_id is not None and (
+                media_source != MediaSource.AniList or not str(media_id).isdigit()
+        ):
+            return None
+        anilistid = int(media_id) if media_id is not None else None
+        if not anilistid and (not meta or not self._source_enabled(media_source)):
+            return None
+        info = self.anilist_api.detail(anilistid) if anilistid else self._match_by_meta(meta)
         if not info:
             return None
-        mediainfo = self._build_recognized_media(info, plan.meta)
+        mediainfo = MediaInfo(anilist_info=self._enrich_people(info))
+        if meta and meta.begin_season is not None:
+            mediainfo.season = meta.begin_season
         logger.info(
-            f"{plan.label} AniList识别结果：{mediainfo.type.value} "
+            f"{anilistid or meta.name} AniList识别结果：{mediainfo.type.value} "
             f"{mediainfo.title_year}"
         )
         return mediainfo
@@ -367,21 +280,33 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_id: 数据源原生ID
         :return: 统一媒体信息
         """
-        plan = self._recognition_plan(
-            meta, media_source, media_id, kwargs.get("mtype")
-        )
-        if not plan:
+        # 与同步入口保持同一类型边界，音乐请求不得进入 AniList。
+        if (
+                kwargs.get("mtype") == MediaType.MUSIC
+                or getattr(meta, "type", None) == MediaType.MUSIC
+        ):
+            return None
+        if media_source and media_source != MediaSource.AniList:
+            return None
+        if media_id is not None and (
+                media_source != MediaSource.AniList or not str(media_id).isdigit()
+        ):
+            return None
+        anilistid = int(media_id) if media_id is not None else None
+        if not anilistid and (not meta or not self._source_enabled(media_source)):
             return None
         info = (
-            await self.anilist_api.async_detail(plan.media_id)
-            if plan.media_id is not None
-            else await self._async_match_by_meta(plan.require_meta())
+            await self.anilist_api.async_detail(anilistid)
+            if anilistid
+            else await self._async_match_by_meta(meta)
         )
         if not info:
             return None
-        mediainfo = self._build_recognized_media(info, plan.meta)
+        mediainfo = MediaInfo(anilist_info=self._enrich_people(info))
+        if meta and meta.begin_season is not None:
+            mediainfo.season = meta.begin_season
         logger.info(
-            f"{plan.label} AniList识别结果：{mediainfo.type.value} "
+            f"{anilistid or meta.name} AniList识别结果：{mediainfo.type.value} "
             f"{mediainfo.title_year}"
         )
         return mediainfo
@@ -393,7 +318,10 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param meta: 标题解析元数据
         :return: AniList 媒体详情
         """
-        return self._select_matching_info(meta, self.anilist_api.search(meta.name))
+        for info in self.anilist_api.search(meta.name):
+            if self._matches_meta(meta, info):
+                return info
+        return None
 
     async def _async_match_by_meta(self, meta: MetaBase) -> Optional[dict]:
         """
@@ -402,8 +330,10 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param meta: 标题解析元数据
         :return: AniList 媒体详情
         """
-        infos = await self.anilist_api.async_search(meta.name)
-        return self._select_matching_info(meta, infos)
+        for info in await self.anilist_api.async_search(meta.name):
+            if self._matches_meta(meta, info):
+                return info
+        return None
 
     def search_medias(
         self, meta: MetaBase, media_source: Optional[MediaSourceSelection] = None
@@ -415,14 +345,15 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_source: 请求级搜索数据源
         :return: 统一媒体信息列表
         """
-        plan = self._search_plan(meta, media_source)
-        if not plan.enabled:
+        if not is_media_source_enabled(media_source, MediaSource.AniList):
             return None
-        if not plan.meta:
+        if not meta or not meta.name:
             return []
-        return self._project_search_results(
-            plan.meta, self.anilist_api.search(plan.meta.name)
-        )
+        return [
+            MediaInfo(anilist_info=self._enrich_people(info))
+            for info in self.anilist_api.search(meta.name)
+            if self._matches_meta(meta, info)
+        ]
 
     async def async_search_medias(
         self, meta: MetaBase, media_source: Optional[MediaSourceSelection] = None
@@ -434,13 +365,15 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :param media_source: 请求级搜索数据源
         :return: 统一媒体信息列表
         """
-        plan = self._search_plan(meta, media_source)
-        if not plan.enabled:
+        if not is_media_source_enabled(media_source, MediaSource.AniList):
             return None
-        if not plan.meta:
+        if not meta or not meta.name:
             return []
-        infos = await self.anilist_api.async_search(plan.meta.name)
-        return self._project_search_results(plan.meta, infos)
+        return [
+            MediaInfo(anilist_info=self._enrich_people(info))
+            for info in await self.anilist_api.async_search(meta.name)
+            if self._matches_meta(meta, info)
+        ]
 
     def anilist_info(self, anilist_id: int) -> Optional[dict]:
         """
@@ -466,9 +399,10 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
 
         :return: 统一媒体信息列表
         """
-        return self._project_media_list(
-            self.anilist_api.trending(page=page, count=count)
-        )
+        return [
+            MediaInfo(anilist_info=info)
+            for info in self.anilist_api.trending(page=page, count=count)
+        ]
 
     async def async_anilist_trending(self, page: int = 1, count: int = 20) -> List[MediaInfo]:
         """
@@ -476,8 +410,10 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
 
         :return: 统一媒体信息列表
         """
-        infos = await self.anilist_api.async_trending(page=page, count=count)
-        return self._project_media_list(infos)
+        return [
+            MediaInfo(anilist_info=info)
+            for info in await self.anilist_api.async_trending(page=page, count=count)
+        ]
 
     def anilist_popular_this_season(self, page: int = 1, count: int = 20) -> List[MediaInfo]:
         """
@@ -485,9 +421,10 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
 
         :return: 统一媒体信息列表
         """
-        return self._project_media_list(
-            self.anilist_api.popular_this_season(page=page, count=count)
-        )
+        return [
+            MediaInfo(anilist_info=info)
+            for info in self.anilist_api.popular_this_season(page=page, count=count)
+        ]
 
     async def async_anilist_popular_this_season(
         self, page: int = 1, count: int = 20
@@ -498,7 +435,7 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :return: 统一媒体信息列表
         """
         infos = await self.anilist_api.async_popular_this_season(page=page, count=count)
-        return self._project_media_list(infos)
+        return [MediaInfo(anilist_info=info) for info in infos]
 
     def anilist_discover(self, **kwargs) -> List[MediaInfo]:
         """
@@ -506,7 +443,10 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
 
         :return: 统一媒体信息列表
         """
-        return self._project_media_list(self.anilist_api.discover(**kwargs))
+        return [
+            MediaInfo(anilist_info=info)
+            for info in self.anilist_api.discover(**kwargs)
+        ]
 
     async def async_anilist_discover(self, **kwargs) -> List[MediaInfo]:
         """
@@ -514,8 +454,10 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
 
         :return: 统一媒体信息列表
         """
-        infos = await self.anilist_api.async_discover(**kwargs)
-        return self._project_media_list(infos)
+        return [
+            MediaInfo(anilist_info=info)
+            for info in await self.anilist_api.async_discover(**kwargs)
+        ]
 
     def anilist_credits(
         self, anilist_id: int, page: int = 1, count: int = 20
@@ -552,7 +494,7 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :return: 统一媒体信息列表
         """
         infos = self.anilist_api.recommendations(anilist_id, page=page, count=count)
-        return self._project_media_list(infos)
+        return [MediaInfo(anilist_info=info) for info in infos]
 
     async def async_anilist_recommendations(
         self, anilist_id: int, page: int = 1, count: int = 20
@@ -565,7 +507,7 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         infos = await self.anilist_api.async_recommendations(
             anilist_id, page=page, count=count
         )
-        return self._project_media_list(infos)
+        return [MediaInfo(anilist_info=info) for info in infos]
 
     def anilist_person_detail(self, person_id: int) -> Optional[_SchemaMediaPerson]:
         """
@@ -598,7 +540,7 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         :return: 统一媒体信息列表
         """
         infos = self.anilist_api.person_credits(person_id, page=page, count=count)
-        return self._project_media_list(infos)
+        return [MediaInfo(anilist_info=info) for info in infos]
 
     async def async_anilist_person_credits(
         self, person_id: int, page: int = 1, count: int = 20
@@ -611,7 +553,7 @@ class AniListModule(MediaAuxiliaryProviderMixin, _ModuleBase):
         infos = await self.anilist_api.async_person_credits(
             person_id, page=page, count=count
         )
-        return self._project_media_list(infos)
+        return [MediaInfo(anilist_info=info) for info in infos]
 
     def metadata_nfo(
         self,

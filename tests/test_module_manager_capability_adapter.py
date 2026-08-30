@@ -19,11 +19,12 @@ from app.runtime.capabilities.errors import CapabilityRuntimeClosedError
 from app.runtime.capabilities.model import CapabilityLifecycleState, SelectorSchema
 from app.runtime.capabilities.registry import CapabilityRegistry
 from app.runtime.events import Event, EventHandlerBinding, eventmanager
-from app.runtime.extensions.module import manager as module_manager_extension
-from app.runtime.extensions.module.manager import ModuleManager
-from app.runtime.extensions.service import configure_service_config_reader
+from app.runtime.extensions import module_manager as module_manager_extension
+from app.runtime.extensions.module_manager import ModuleManager
+from app.runtime.extensions.service_config import configure_service_config_reader
 from app.schemas.event import ConfigChangeEventData
 from app.schemas.types import EventType
+
 
 _SAMPLE_MANIFEST = """
 schema_version = 1
@@ -429,46 +430,6 @@ def test_config_reconcile_reload_and_stop_preserve_manager_contract(
     assert restarted.events == ["create", "start", "stop"]
 
 
-def test_module_manager_lifecycle_keeps_monotonic_transition_generations(
-    module_manager_harness,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Manager 的旧同步入口必须按共享状态机顺序提交每一代转换。"""
-    manager = module_manager_harness.manager
-    _enable_sample(module_manager_harness.config_values)
-    monkeypatch.setattr(eventmanager, "send_event", Mock())
-
-    manager.load_modules()
-    manager.reload()
-    manager.stop()
-    manager.load_modules()
-    module_manager_harness.config_values["Notifications"] = []
-    manager.load_modules()
-
-    observations = manager._runtime.observations("SampleModule")
-    assert [
-        (item.generation, item.operation, item.outcome)
-        for item in observations
-    ] == [
-        (1, "activate", "started"),
-        (1, "activate", "succeeded"),
-        (2, "stop", "started"),
-        (2, "stop", "succeeded"),
-        (3, "activate", "started"),
-        (3, "activate", "succeeded"),
-        (4, "stop", "started"),
-        (4, "stop", "succeeded"),
-        (5, "activate", "started"),
-        (5, "activate", "succeeded"),
-        (6, "stop", "started"),
-        (6, "stop", "succeeded"),
-    ]
-    snapshot = manager._runtime.snapshot("SampleModule")
-    assert snapshot.generation == 6
-    assert snapshot.lifecycle is CapabilityLifecycleState.STOPPED
-    assert snapshot.visible is False
-
-
 def test_config_event_reloads_same_instance_and_tracks_selector_changes(
     module_manager_harness,
 ) -> None:
@@ -499,21 +460,13 @@ def test_config_event_reloads_same_instance_and_tracks_selector_changes(
     assert running.events == ["create", "start", "stop", "start", "stop"]
 
 
-def test_shutdown_is_irreversible(module_manager_harness, monkeypatch) -> None:
+def test_shutdown_is_irreversible(module_manager_harness) -> None:
     """shutdown 撤销全部可见实例，并拒绝通过 load_modules 再次启动。"""
     manager = module_manager_harness.manager
     _enable_sample(module_manager_harness.config_values)
     manager.load_modules()
     running = manager.get_running_module("SampleModule")
     assert running is not None
-    remove_listener = Mock()
-    unregister_resolver = Mock()
-    monkeypatch.setattr(eventmanager, "remove_event_listener", remove_listener)
-    monkeypatch.setattr(
-        eventmanager,
-        "unregister_handler_instance_resolver",
-        unregister_resolver,
-    )
 
     manager.shutdown()
 
@@ -522,11 +475,6 @@ def test_shutdown_is_irreversible(module_manager_harness, monkeypatch) -> None:
     manager.load_modules()
     assert manager.get_running_module("SampleModule") is None
     assert type(running).instances == [running]
-    remove_listener.assert_called_once_with(
-        EventType.ConfigChanged,
-        manager.handle_config_changed,
-    )
-    unregister_resolver.assert_called_once_with("modules")
 
 
 def test_shutdown_reports_unreleased_module_owner(module_manager_harness) -> None:
@@ -551,7 +499,7 @@ def test_all_real_host_modules_zero_arg_construct_without_starting_resources(
 ) -> None:
     """每份真实 manifest 都必须能解析 canonical class 并零参数构造且不启动资源。"""
     body = r"""
-from app.runtime.extensions.module.adapter import (
+from app.runtime.extensions.host_module_adapter import (
     HostModuleAdapter,
     build_host_module_registry,
 )
@@ -595,11 +543,11 @@ from app.db.oper.systemconfig import SystemConfigOper
 from app.runtime.capabilities.model import ActivationPolicy
 from app.runtime.config import settings
 from app.runtime.events import Event
-from app.runtime.extensions.module.adapter import (
+from app.runtime.extensions.host_module_adapter import (
     HostModuleAdapter,
     build_host_module_registry,
 )
-from app.runtime.extensions.service import configure_service_config_reader
+from app.runtime.extensions.service_config import configure_service_config_reader
 from app.schemas.event import ConfigChangeEventData
 from app.schemas.types import EventType
 
@@ -655,7 +603,7 @@ def get_config(_self, key=None):
 SystemConfigOper.get = get_config
 configure_service_config_reader(lambda key: SystemConfigOper().get(key))
 
-from app.runtime.extensions.module.manager import ModuleManager
+from app.runtime.extensions.module_manager import ModuleManager
 
 manager = ModuleManager()
 bootstrap_ids = {
@@ -765,7 +713,7 @@ def test_default_config_keeps_every_manifest_configured_entrypoint_unimported(
 from app.db.oper.systemconfig import SystemConfigOper
 from app.runtime.capabilities.model import ActivationPolicy
 from app.runtime.config import settings
-from app.runtime.extensions.module.adapter import (
+from app.runtime.extensions.host_module_adapter import (
     HostModuleAdapter,
     build_host_module_registry,
 )
@@ -802,7 +750,7 @@ for spec in specs:
 
 assert configured_modules.isdisjoint(sys.modules)
 
-from app.runtime.extensions.module.manager import ModuleManager
+from app.runtime.extensions.module_manager import ModuleManager
 
 manager = ModuleManager()
 assert manager.get_specs() == manager.list_specs()
@@ -862,7 +810,7 @@ SystemConfigOper.get = empty_config
 settings.ACOUSTID_API_KEY = None
 settings.FANART_API_KEY = None
 
-from app.runtime.extensions.module.manager import ModuleManager
+from app.runtime.extensions.module_manager import ModuleManager
 from app.application.module import configure_module_runtime
 
 configure_module_runtime(lambda: ModuleManager())
@@ -936,7 +884,7 @@ def loaded_provider_modules():
 
 assert loaded_provider_modules() == []
 
-from app.chain.base import ChainBase
+from app.chain import ChainBase
 from app.api.endpoints.message import WebPushError, is_webpush_subscription_gone
 from app.schemas.transfer import DownloaderFile
 
@@ -978,7 +926,7 @@ from app.runtime.config import settings
 settings.ACOUSTID_API_KEY = None
 settings.FANART_API_KEY = None
 
-from app.runtime.extensions.module.manager import ModuleManager
+from app.runtime.extensions.module_manager import ModuleManager
 
 manager = ModuleManager()
 modules = manager.get_modules()

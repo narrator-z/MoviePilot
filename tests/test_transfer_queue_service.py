@@ -2,33 +2,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.application.transfer.workflow import (
-    TransferAdmission,
-    TransferPlanningInput,
-    TransferQueueService,
-)
-from app.db.adapters.transfer.admission import TransactionalTransferAdmissionRepository
-from app.db.models.transferhistory import TransferHistory
+from app.application.transfer import TransferAdmission, TransferQueueService
+from app.db.adapters.transfer import TransactionalTransferAdmissionRepository
 from app.db.models.transferpending import TransferPending
 from app.schemas.file import FileItem
 from tests.test_transfer_job_manager import make_task, make_transfer_chain
-
-
-def _planning_input(path: str = "/tmp/demo.mkv") -> TransferPlanningInput:
-    """构造队列准入测试要求的显式版本化输入。"""
-    return TransferPlanningInput(
-        source_fileitem={
-            "storage": "local",
-            "path": path,
-            "type": "file",
-            "name": path.rsplit("/", 1)[-1],
-        },
-        meta=None,
-        mediainfo=None,
-    )
 
 
 def _service(**overrides):
@@ -42,7 +23,6 @@ def _service(**overrides):
             state="accepted",
             created_at="2026-08-27 10:00:00",
             updated_at="2026-08-27 10:00:00",
-            planning_input=_planning_input(),
         )),
         "enqueue": Mock(),
         "before_enqueue": Mock(),
@@ -67,7 +47,6 @@ def test_transfer_queue_service_put_preserves_registration_order():
             state="accepted",
             created_at="2026-08-27 10:00:00",
             updated_at="2026-08-27 10:00:00",
-            planning_input=_planning_input(),
         ),
         before_enqueue=lambda _task: calls.append("batch"),
         enqueue=lambda _item: calls.append("queue"),
@@ -138,17 +117,13 @@ def test_transfer_queue_service_cleans_up_when_batch_registration_fails():
 def test_transfer_queue_service_commits_admission_before_failed_enqueue(tmp_path):
     """真实仓储已提交后即使内存入队失败，任务也必须带原因留待恢复。"""
     engine = create_engine(f"sqlite:///{tmp_path / 'durable-admission.db'}")
-    TransferHistory.__table__.create(engine)
     TransferPending.__table__.create(engine)
-    factory = sessionmaker(bind=engine)
-    repository = TransactionalTransferAdmissionRepository(factory)
+    repository = TransactionalTransferAdmissionRepository(sessionmaker(bind=engine))
     task = make_task(1)
-    task.bind_planning_input(_planning_input(task.fileitem.path))
     service, _ = _service(
         admit_task=lambda item: repository.admit(
             storage=item.fileitem.storage,
             src_path=item.fileitem.path,
-            planning_input=item.planning_input,
         ),
         enqueue=Mock(side_effect=RuntimeError("queue closed")),
         enqueue_failed=lambda item, error: repository.record_enqueue_failure(
@@ -160,13 +135,10 @@ def test_transfer_queue_service_commits_admission_before_failed_enqueue(tmp_path
     with pytest.raises(RuntimeError, match="queue closed"):
         service.put(task, Mock())
 
-    with factory() as session:
-        pending = session.execute(
-            select(TransferPending).where(
-                TransferPending.task_id == task.admission_task_id
-            )
-        ).scalar_one()
-        assert pending.last_error == "queue closed"
+    admissions = repository.list_accepted()
+    assert len(admissions) == 1
+    assert admissions[0].task_id == task.admission_task_id
+    assert admissions[0].last_error == "queue closed"
     engine.dispose()
 
 
@@ -201,11 +173,15 @@ def test_do_transfer_reports_durable_admission_failure():
         get_files_by_savepath=lambda _path: [],
         get_by_path=lambda _path: None,
     )
-    chain.transfer_history_repository = no_history
-    chain.download_history_repository = no_download
 
     with patch(
-        "app.chain.transfer.workflow.get_configured_system_config",
+        "app.chain.transfer.get_chain_transfer_history_port",
+        return_value=no_history,
+    ), patch(
+        "app.chain.transfer.get_chain_download_history_port",
+        return_value=no_download,
+    ), patch(
+        "app.chain.transfer.get_configured_system_config",
         return_value=SimpleNamespace(get=lambda _key: None),
     ):
         state, message = chain.do_transfer(fileitem=fileitem, background=True)

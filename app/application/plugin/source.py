@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, TypeAlias
+from urllib.parse import unquote, urlsplit
 
 from app.application.plugin.identity import (
     PluginIdentity,
@@ -552,13 +553,13 @@ def select_plugin_candidate(
     allow_source_change: bool = False,
 ) -> PluginSelection:
     """
-    按在线绑定、本地候选、运行代际和版本选择一个插件载荷。
+    按允许来源、运行代际和同源版本选择一个插件载荷。
 
     :param inventory: 本轮市场读取快照
     :param plugin_id: 要选择的物理插件 ID
     :param generations: 调用方按优先级传入的代际顺序
     :param identity: 已安装插件来源身份；为空表示未安装
-    :param local_candidates: 可选的本地载荷候选；已有在线绑定时参与代际和版本比较
+    :param local_candidates: 可选的本地载荷候选，优先于在线候选
     :param requested_source_key: 调用方提供的规范在线来源；非显式调用不能绕过本地载荷
     :param explicit_source: 本次调用是否代表管理员明确选源
     :param allow_source_change: 是否是带 revision 的显式换源命令
@@ -571,7 +572,6 @@ def select_plugin_candidate(
         if requested_source_key is not None
         else None
     )
-    local_selection: PluginSelection | None = None
     if requested_source is None or not (explicit_source or allow_source_change):
         local_selection = _select_local_candidate(
             inventory,
@@ -580,22 +580,11 @@ def select_plugin_candidate(
             generation_order=generation_order,
             local_candidates=local_candidates,
         )
-        if (
-            local_selection is not None
-            and local_selection.status is PluginSelectionStatus.INCOMPLETE
-        ):
+        if local_selection is not None:
             return local_selection
-        # 精确本地来源用于开发同步；未指定来源的启动与更新才参与在线版本协调。
-        if explicit_source and local_candidates is not None:
-            return local_selection or PluginSelection(
-                status=PluginSelectionStatus.UNAVAILABLE,
-                reason="所选本地仓库中没有该插件",
-            )
 
     online = inventory.candidates_for(plugin_id)
     if not online:
-        if local_selection is not None:
-            return local_selection
         return PluginSelection(
             status=PluginSelectionStatus.UNAVAILABLE,
             reason=f"没有找到插件 {plugin_id} 的可用安装包",
@@ -638,24 +627,34 @@ def select_plugin_candidate(
                 ),
             )
     if allowed_source is not None:
-        return _select_bound_source_candidate(
-            online=online,
-            allowed_source=allowed_source,
-            local_selection=local_selection,
-            identity=identity,
-            generation_order=generation_order,
+        source_type, source_key = allowed_source
+        online = tuple(
+            candidate
+            for candidate in online
+            if candidate.source_type is source_type and candidate.source_key == source_key
+        )
+        if not online:
+            return PluginSelection(
+                status=PluginSelectionStatus.UNAVAILABLE,
+                reason="已绑定仓库中暂无可用插件包",
+            )
+        selected_online = _select_best(online, generation_order)
+        if selected_online is None:
+            return PluginSelection(
+                status=PluginSelectionStatus.UNAVAILABLE,
+                reason="已绑定仓库没有适用于当前 MoviePilot 版本的插件包",
+            )
+        return PluginSelection(
+            status=PluginSelectionStatus.SELECTED,
+            candidate=selected_online,
+            reason="已使用绑定仓库中的插件包",
         )
 
     if identity is not None:
-        if local_selection is not None:
-            return local_selection
         return PluginSelection(
             status=PluginSelectionStatus.INCOMPLETE,
             reason="当前插件尚未绑定仓库",
         )
-
-    if local_selection is not None:
-        return local_selection
 
     source_pairs = {(candidate.source_type, candidate.source_key) for candidate in online}
     if len(source_pairs) > 1:
@@ -681,102 +680,6 @@ def select_plugin_candidate(
         status=PluginSelectionStatus.SELECTED,
         candidate=selected_online,
         reason="已找到唯一可用仓库",
-    )
-
-
-def _select_bound_source_candidate(
-    *,
-    online: tuple[PluginMarketCandidate, ...],
-    allowed_source: tuple[TrustedPluginSourceType, str],
-    local_selection: PluginSelection | None,
-    identity: PluginIdentity | None,
-    generation_order: tuple[str, ...],
-) -> PluginSelection:
-    """只在已绑定仓库范围内选取在线候选，并与可用本地载荷协调。"""
-    if identity is None:
-        raise PluginSourceSelectionError("已绑定来源选择缺少插件身份")
-    source_type, source_key = allowed_source
-    allowed_online = tuple(
-        candidate
-        for candidate in online
-        if candidate.source_type is source_type and candidate.source_key == source_key
-    )
-    if not allowed_online:
-        if (
-            local_selection is not None
-            and local_selection.status is PluginSelectionStatus.SELECTED
-        ):
-            return local_selection
-        return PluginSelection(
-            status=PluginSelectionStatus.UNAVAILABLE,
-            reason="已绑定仓库中暂无可用插件包",
-        )
-    selected_online = _select_best(allowed_online, generation_order)
-    if selected_online is None:
-        if (
-            local_selection is not None
-            and local_selection.status is PluginSelectionStatus.SELECTED
-        ):
-            return local_selection
-        return PluginSelection(
-            status=PluginSelectionStatus.UNAVAILABLE,
-            reason="已绑定仓库没有适用于当前 MoviePilot 版本的插件包",
-        )
-    return _select_bound_or_local_candidate(
-        local_selection=local_selection,
-        online_candidate=selected_online,
-        identity=identity,
-        generation_order=generation_order,
-    )
-
-
-def _select_bound_or_local_candidate(
-    *,
-    local_selection: PluginSelection | None,
-    online_candidate: Candidate,
-    identity: PluginIdentity,
-    generation_order: tuple[str, ...],
-) -> PluginSelection:
-    """在已绑定在线候选和本地候选之间选择代际、版本更高的载荷。"""
-    if (
-        local_selection is None
-        or local_selection.status is not PluginSelectionStatus.SELECTED
-        or local_selection.candidate is None
-    ):
-        return PluginSelection(
-            status=PluginSelectionStatus.SELECTED,
-            candidate=online_candidate,
-            reason="已使用绑定仓库中的插件包",
-        )
-
-    local_candidate = local_selection.candidate
-    local_generation = generation_order.index(local_candidate.package_generation)
-    online_generation = generation_order.index(online_candidate.package_generation)
-    if local_generation < online_generation:
-        return local_selection
-    if online_generation < local_generation:
-        return PluginSelection(
-            status=PluginSelectionStatus.SELECTED,
-            candidate=online_candidate,
-            reason="绑定仓库提供了更高代际的插件包",
-        )
-
-    local_version = local_candidate.plugin_version or "0"
-    online_version = online_candidate.plugin_version or "0"
-    if compare_version(local_version, ">", online_version):
-        return local_selection
-    if compare_version(online_version, ">", local_version):
-        return PluginSelection(
-            status=PluginSelectionStatus.SELECTED,
-            candidate=online_candidate,
-            reason="绑定仓库提供了更高版本的插件包",
-        )
-    if identity.payload_source_type is PluginPayloadSourceType.LOCAL:
-        return local_selection
-    return PluginSelection(
-        status=PluginSelectionStatus.SELECTED,
-        candidate=online_candidate,
-        reason="当前继续使用绑定仓库中的插件包",
     )
 
 
@@ -822,6 +725,18 @@ def get_effective_local_candidate(
         _normalize_generation_order(generations),
     )
     return candidate if isinstance(candidate, PluginLocalCandidate) else None
+
+
+def parse_local_plugin_reference(repo_url: str) -> str | None:
+    """从不透明本地来源标识中提取插件 ID，不读取或暴露宿主路径。"""
+    if not str(repo_url).startswith("local://"):
+        return None
+    try:
+        parsed = urlsplit(repo_url)
+        plugin_id = unquote(parsed.netloc or parsed.path.strip("/"))
+    except (TypeError, ValueError):
+        return None
+    return plugin_id or None
 
 
 def _coerce_online_source_type(source_type: TrustedPluginSourceType) -> TrustedPluginSourceType:

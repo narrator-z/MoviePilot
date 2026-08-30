@@ -1,8 +1,8 @@
+import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
+from unittest.mock import patch, MagicMock
 # ruff: noqa: E402
 from app.testing import stub_modules
 
@@ -14,17 +14,12 @@ with stub_modules({
     'app.db.oper.systemconfig': _systemconfig_stub,
 }):
     from app import schemas
+    from app.chain.media import MediaChain
     from app.chain.scraping import ScrapingChain, ScrapingConfig, ScrapingOption
     from app.domain.context import MediaInfo
-    from app.domain.metainfo import MetaInfo
     from app.runtime.events import Event
-    from app.schemas.types import (
-        EventType,
-        MediaType,
-        ScrapingMetadata,
-        ScrapingPolicy,
-        ScrapingTarget,
-    )
+    from app.domain.metainfo import MetaInfo
+    from app.schemas.types import EventType, MediaType, ScrapingTarget, ScrapingMetadata, ScrapingPolicy
 
 
 def reset_scraping_chain_singleton():
@@ -417,7 +412,7 @@ class TestMediaScrapingImages(unittest.TestCase):
         self.assertEqual(target_item, fileitem)
         self.assertEqual(target_path, Path("/tv/Show/Season 1/backdrop.jpg"))
 
-    @patch("app.chain.scraping._scraping_http_snapshot")
+    @patch("app.chain.scraping.RequestUtils")
     @patch("app.chain.scraping.NamedTemporaryFile")
     @patch("app.chain.scraping.Path.chmod")
     def test_download_and_save_image(self, mock_chmod, mock_temp_file, mock_request_utils):
@@ -442,17 +437,16 @@ class TestMediaScrapingImages(unittest.TestCase):
 
         mock_instance = mock_request_utils.return_value
         mock_instance.get_stream.return_value.__enter__.return_value = mock_stream
-        mock_instance.stream.return_value.__enter__.return_value = mock_stream
 
         self.media_chain.storagechain.upload_file.return_value = fileitem
 
         self.media_chain._download_and_save_image(fileitem, target_path, url)
 
-        mock_instance.stream.assert_called_with(
-            url,
+        mock_request_utils.assert_called_with(
             proxies=self.media_chain.runtime_config.proxy,
             ua=self.media_chain.runtime_config.normal_user_agent,
         )
+        mock_instance.get_stream.assert_called_with(url=url)
         mock_temp_file.assert_called_once_with(delete=False, suffix=".jpg")
         tmp_mock.write.assert_any_call(b"data1")
         tmp_mock.write.assert_any_call(b"data2")
@@ -463,7 +457,7 @@ class TestMediaScrapingImages(unittest.TestCase):
         self.assertEqual(call_args["new_name"], "poster.jpg")
 
     @patch("app.chain.scraping.NamedTemporaryFile")
-    @patch("app.chain.scraping.Path.chmod")
+    @patch("app.chain.media.Path.chmod")
     def test_save_file_uses_python310_compatible_tempfile(self, mock_chmod, mock_temp_file):
         """保存刮削文件时不应使用 Python 3.12 才支持的 delete_on_close 参数。"""
         self.media_chain = ScrapingChain()
@@ -892,7 +886,7 @@ class TestMediaScrapeEvents(unittest.TestCase):
         fileitem = schemas.FileItem(path="/movies/movie.mkv", name="movie.mkv", type="file", storage="local")
         mock_recognize.return_value = None
 
-        with patch('app.chain.scraping.logger.warn') as mock_logger:
+        with patch('app.chain.media.logger.warn') as mock_logger:
             self.media_chain.scrape_metadata(
                 fileitem=fileitem
             )

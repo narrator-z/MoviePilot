@@ -6,12 +6,13 @@ from typing import Optional, Type
 from pydantic import BaseModel, Field
 
 from app.agent.tools.base import MoviePilotTool
+from app.agent.tools.tags import ToolTag
 from app.agent.tools.impl._plugin_tool_utils import (
     PLUGIN_DATA_KEY_PREVIEW_LIMIT,
     build_preview_payload,
     get_plugin_snapshot,
 )
-from app.agent.tools.tags import ToolTag
+from app.application.agentdata import get_agent_plugin_data_port
 from app.runtime.log import logger
 
 
@@ -55,11 +56,9 @@ class QueryPluginDataTool(MoviePilotTool):
             return f"查询插件数据: {plugin_id}.{key}"
         return f"查询插件全部数据: {plugin_id}"
 
+    @staticmethod
     async def _query_plugin_data(
-            self,
-            plugin_id: str,
-            key: Optional[str] = None,
-            max_chars: Optional[int] = None,
+            plugin_id: str, key: Optional[str] = None, max_chars: Optional[int] = None
     ) -> str:
         """
         插件数据改走异步 ORM 查询，避免再套一层线程池。
@@ -74,8 +73,9 @@ class QueryPluginDataTool(MoviePilotTool):
                 ensure_ascii=False,
             )
 
+        plugin_data_oper = get_agent_plugin_data_port()
         if key:
-            value = await self.data.plugin_data.get(plugin_id, key)
+            value = await plugin_data_oper.async_get_data(plugin_id, key)
             if value is None:
                 return json.dumps(
                     {
@@ -108,7 +108,8 @@ class QueryPluginDataTool(MoviePilotTool):
                 result["value"] = value
             return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
-        data_map = await self.data.plugin_data.list(plugin_id)
+        rows = await plugin_data_oper.async_get_data_all(plugin_id) or []
+        data_map = {row.key: row.value for row in rows}
         keys = list(data_map.keys())
         key_preview = keys[:PLUGIN_DATA_KEY_PREVIEW_LIMIT]
 

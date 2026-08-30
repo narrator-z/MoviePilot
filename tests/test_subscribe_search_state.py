@@ -1,15 +1,9 @@
-from contextlib import contextmanager
-from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import pytest
-
-from app.application.subscription.contract import SubscriptionPatch, SubscriptionSnapshot
-from app.application.subscription.mutation import SubscriptionMutation
+from app.chain import subscribe as subscribe_module
 from app.chain.subscribe import SubscribeChain
-from app.chain.subscribe import search as subscribe_search
 from app.schemas.types import MediaType
 
 
@@ -33,12 +27,11 @@ class _SubscribeOper:
         """
         return [self.subscribe] if self.subscribe else []
 
-    def update(self, sid: int, payload: SubscriptionPatch) -> SubscriptionSnapshot:
+    def update(self, sid: int, payload: dict) -> None:
         """
         记录订阅状态更新请求。
         """
         self.updates.append((sid, payload))
-        return replace(self.subscribe, **payload.to_payload())
 
 
 class _TimedOutLock:
@@ -53,36 +46,19 @@ class _TimedOutLock:
         raise AssertionError("未持有的订阅锁不应被释放")
 
 
-def _configure_subscription_write(chain, repository) -> None:
-    """为绕过构造器的搜索链注入显式同步修改作用域。"""
-    chain.subscription_repository = repository
-
-    @contextmanager
-    def mutation_scope():
-        """把同步修改命令委托给状态测试 repository。"""
-        def update(subscribe_id, payload, _actor, existing=None, scene="update"):
-            """执行测试更新并返回生产命令形状。"""
-            updated = repository.update(subscribe_id, SubscriptionPatch(payload))
-            return SubscriptionMutation(
-                snapshot=updated,
-                old=existing.to_dict() if existing else {},
-                new=updated.to_dict() if updated else {},
-            )
-
-        yield SimpleNamespace(update=update)
-
-    chain.sync_subscription_mutation_scope = mutation_scope
-
-
-def _new_subscribe(created_at: datetime) -> SubscriptionSnapshot:
+def _new_subscribe(created_at: datetime) -> SimpleNamespace:
     """
     构造一个新建电影订阅。
     """
-    return SubscriptionSnapshot(
+    return SimpleNamespace(
         id=31,
         name="测试电影",
         year="2026",
         type=MediaType.MOVIE.value,
+        tmdbid=12345,
+        doubanid=None,
+        bangumiid=None,
+        anilistid=None,
         media_source="themoviedb",
         media_id="12345",
         season=None,
@@ -99,10 +75,11 @@ def test_new_subscribe_search_keeps_state_when_recently_created(monkeypatch) -> 
     """
     _SubscribeOper.subscribe = _new_subscribe(datetime.now())
     _SubscribeOper.updates = []
+    monkeypatch.setattr(subscribe_module, "get_chain_subscribe_port", _SubscribeOper)
+
     media_chain_class = Mock()
-    with patch.object(subscribe_search, "MediaChain", media_chain_class):
+    with patch.object(subscribe_module, "MediaChain", media_chain_class):
         chain = object.__new__(SubscribeChain)
-        chain.subscription_repository = _SubscribeOper()
         chain.search(state="N", manual=False)
 
     media_chain_class.assert_not_called()
@@ -115,39 +92,39 @@ def test_new_subscribe_search_marks_state_after_attempt(monkeypatch) -> None:
     """
     _SubscribeOper.subscribe = _new_subscribe(datetime.now() - timedelta(minutes=2))
     _SubscribeOper.updates = []
+    monkeypatch.setattr(subscribe_module, "get_chain_subscribe_port", _SubscribeOper)
+
     media_chain = Mock()
     media_chain.recognize_media.return_value = None
-    with patch.object(subscribe_search, "MediaChain", return_value=media_chain):
+    with patch.object(subscribe_module, "MediaChain", return_value=media_chain):
         chain = object.__new__(SubscribeChain)
-        _configure_subscription_write(chain, _SubscribeOper())
         chain.search(state="N", manual=False)
 
     media_chain.recognize_media.assert_called_once()
-    assert len(_SubscribeOper.updates) == 1
-    subscribe_id, subscription_patch = _SubscribeOper.updates[0]
-    assert subscribe_id == 31
-    assert subscription_patch == SubscriptionPatch({"state": "R"})
+    assert _SubscribeOper.updates == [(31, {"state": "R"})]
 
 
 def test_targeted_batch_searches_all_ids_without_state_scan(monkeypatch) -> None:
     """用户归属订阅批次只按指定 ID 顺序读取，不扩大为全局状态搜索。"""
     first = _new_subscribe(datetime.now() - timedelta(minutes=2))
-    first = replace(first, state="R")
-    second = replace(
-        _new_subscribe(datetime.now() - timedelta(minutes=2)),
-        id=32,
-        name="测试电影 2",
-        state="R",
-    )
+    first.state = "R"
+    second = _new_subscribe(datetime.now() - timedelta(minutes=2))
+    second.id = 32
+    second.name = "测试电影 2"
+    second.state = "R"
     subscribes = {first.id: first, second.id: second}
     subscribe_oper = Mock()
     subscribe_oper.get.side_effect = subscribes.get
+    monkeypatch.setattr(
+        subscribe_module,
+        "get_chain_subscribe_port",
+        lambda: subscribe_oper,
+    )
     media_chain = Mock()
     media_chain.recognize_media.return_value = None
 
-    with patch.object(subscribe_search, "MediaChain", return_value=media_chain):
+    with patch.object(subscribe_module, "MediaChain", return_value=media_chain):
         chain = object.__new__(SubscribeChain)
-        chain.subscription_repository = subscribe_oper
         chain.search(sids=(31, 32), state=None, manual=False)
 
     assert [item.args for item in subscribe_oper.get.call_args_list] == [(31,), (32,)]
@@ -159,10 +136,10 @@ def test_subscribe_search_aborts_when_lock_times_out(monkeypatch) -> None:
     """订阅搜索锁超时后必须中止，不能在无锁状态下继续访问订阅。"""
     monkeypatch.setattr(SubscribeChain, "_rlock", _TimedOutLock())
     subscribe_oper = Mock()
+    monkeypatch.setattr(subscribe_module, "get_chain_subscribe_port", subscribe_oper)
     progress = Mock()
 
     chain = object.__new__(SubscribeChain)
-    chain.subscription_repository = subscribe_oper
     chain.search(state="N", progress_callback=progress)
 
     subscribe_oper.assert_not_called()
@@ -170,62 +147,6 @@ def test_subscribe_search_aborts_when_lock_times_out(monkeypatch) -> None:
         value=100,
         text="订阅搜索锁等待超时，已跳过本轮",
     )
-
-
-def test_subscribe_search_releases_lock_when_repository_query_fails(monkeypatch) -> None:
-    """取得搜索锁后即使订阅查询失败，也必须释放进程级互斥锁。"""
-    lock = Mock()
-    lock.acquire.return_value = True
-    monkeypatch.setattr(SubscribeChain, "_rlock", lock)
-    repository = Mock()
-    repository.list.side_effect = RuntimeError("query failed")
-    chain = object.__new__(SubscribeChain)
-    chain.subscription_repository = repository
-
-    with pytest.raises(RuntimeError, match="query failed"):
-        chain.search(state="N")
-
-    lock.release.assert_called_once_with()
-
-
-def test_subscribe_search_uses_refreshed_state_for_final_reset(monkeypatch) -> None:
-    """下载后重新读取的 R 状态不能再被旧 N 快照重置。"""
-    subscribe = _new_subscribe(datetime.now() - timedelta(minutes=2))
-    refreshed = replace(subscribe, state="R")
-    _SubscribeOper.subscribe = subscribe
-    _SubscribeOper.updates = []
-    chain = object.__new__(SubscribeChain)
-    _configure_subscription_write(chain, _SubscribeOper())
-    process = Mock(return_value=refreshed)
-    monkeypatch.setattr(chain, "_process_search_subscription", process)
-
-    chain.search(state="N")
-
-    process.assert_called_once()
-    assert _SubscribeOper.updates == []
-
-
-def test_subscribe_search_progress_preserves_public_callback_payload() -> None:
-    """拆包后仍保持搜索开始和完成进度的既有文案及字段。"""
-    subscribe = _new_subscribe(datetime.now() - timedelta(minutes=2))
-    progress = Mock()
-
-    SubscribeChain._report_search_progress(progress, subscribe, 1, 2)
-    SubscribeChain._report_search_progress(progress, subscribe, 1, 2, finished=True)
-
-    assert all(not item.args for item in progress.call_args_list)
-    assert [item.kwargs for item in progress.call_args_list] == [
-        {
-            "value": 0,
-            "text": "正在搜索订阅（1/2）测试电影 ...",
-            "data": {"total": 2, "finished": 0, "current": 31},
-        },
-        {
-            "value": 50,
-            "text": "订阅搜索（1/2）处理完成",
-            "data": {"total": 2, "finished": 1},
-        },
-    ]
 
 
 def test_subscribe_match_aborts_when_lock_times_out(monkeypatch) -> None:

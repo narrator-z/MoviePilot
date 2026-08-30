@@ -15,29 +15,21 @@ app/application/history.py 里整理历史的写入路径同构。
 下方 _translate 单点承担，两条链路只在「怎么查、怎么写」上分叉。
 """
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Optional, Protocol, Tuple
+from typing import Mapping, Optional, Protocol, Tuple
 
-from app.application.outbox import SUBSCRIBE_ADDED_TOPIC, OutboxIntent
-from app.application.subscription.contract import (
-    AfterCommitEffect,
-    AsyncAfterCommitEffect,
-    SubscriptionIdentity,
-    SubscriptionPatch,
-    SubscriptionStagingPort,
-    SubscriptionWritePort,
-    SubscriptionWriteResult,
-)
+from app.application.outbox import OutboxIntent, SUBSCRIBE_ADDED_TOPIC
 from app.domain.context import MediaInfo, MusicInfo
-from app.schemas.common import JsonData
-from app.schemas.media import resolve_media_identity
-from app.schemas.types import MUSIC_ENTITY_ALBUM, MediaSource, MediaType
+from app.utils.media import _resolve_media_identity_fork as resolve_media_identity
+from app.schemas.types import MUSIC_ENTITY_ALBUM, MediaType
 
 # 身份不完整时的固定返回。身份不全的订阅写进去就是一条永远匹配不上资源的僵尸订阅，
 # 而后续按身份去重也会失效，所以必须在查询与建模之前短路
 INCOMPLETE_IDENTITY = (0, "媒体身份不完整")
+
+AfterCommitEffect = Callable[[int], bool | None]
+AsyncAfterCommitEffect = Callable[[int], Awaitable[bool | None]]
 
 
 class SubscriptionOutboxStager(Protocol):
@@ -52,6 +44,71 @@ class AsyncSubscriptionOutboxStager(Protocol):
 
     async def stage(self, intent: OutboxIntent, now: datetime) -> None:
         """把意图加入当前异步业务事务。"""
+
+
+class SubscribeWriter(Protocol):
+    """订阅写入应用服务使用的数据端口。"""
+
+    def add(
+        self,
+        identity: dict,
+        payload: dict,
+        username: Optional[str] = None,
+        after_commit: Optional[AfterCommitEffect] = None,
+        notification: Mapping[str, object] | None = None,
+    ) -> Tuple[int, str]:
+        """同步新增订阅；提交后回调返回 False 时保留统计 intent 待重试。"""
+
+    async def async_add(
+        self,
+        identity: dict,
+        payload: dict,
+        username: Optional[str] = None,
+        after_commit: Optional[AsyncAfterCommitEffect] = None,
+        notification: Mapping[str, object] | None = None,
+    ) -> Tuple[int, str]:
+        """异步新增订阅；提交后回调返回 False 时保留统计 intent 待重试。"""
+
+
+class StagedSubscription(Protocol):
+    """订阅仓储暂存结果的结构化端口，避免 Application 反向约束适配器类型。"""
+
+    @property
+    def subscribe_id(self) -> int:
+        """返回已创建或已存在的订阅 ID。"""
+        ...
+
+    @property
+    def message(self) -> str:
+        """返回兼容旧入口的结果说明。"""
+        ...
+
+    @property
+    def created(self) -> bool:
+        """标识本次是否暂存了一条新记录。"""
+        ...
+
+
+class SubscriptionStagingRepository(Protocol):
+    """新增订阅命令需要的无提交仓储端口。"""
+
+    def stage_add(
+        self,
+        identity: dict,
+        payload: dict,
+        username: Optional[str] = None,
+    ) -> StagedSubscription:
+        """暂存同步新增，命中重复订阅时不写入。"""
+        ...
+
+    async def async_stage_add(
+        self,
+        identity: dict,
+        payload: dict,
+        username: Optional[str] = None,
+    ) -> StagedSubscription:
+        """暂存异步新增，命中重复订阅时不写入。"""
+        ...
 
 
 class UnitOfWork(Protocol):
@@ -83,7 +140,7 @@ class CreateSubscriptionCommand:
 
     def __init__(
         self,
-        repository: SubscriptionStagingPort,
+        repository: SubscriptionStagingRepository,
         unit_of_work: UnitOfWork,
         outbox: SubscriptionOutboxStager | None = None,
     ) -> None:
@@ -94,11 +151,11 @@ class CreateSubscriptionCommand:
 
     def execute(
         self,
-        identity: SubscriptionIdentity,
-        payload: SubscriptionPatch,
+        identity: dict,
+        payload: dict,
         username: Optional[str] = None,
         after_commit: Optional[AfterCommitEffect] = None,
-        notification: Mapping[str, JsonData] | None = None,
+        notification: Mapping[str, object] | None = None,
     ) -> Tuple[int, str]:
         """执行同步新增；事务失败回滚，提交后副作用失败不反向回滚。"""
         try:
@@ -108,7 +165,7 @@ class CreateSubscriptionCommand:
                     now = datetime.now(timezone.utc)
                     for intent in _subscribe_added_intents(
                         staged.subscribe_id,
-                        payload.to_payload(),
+                        payload,
                         username,
                         notification,
                     ):
@@ -127,7 +184,7 @@ class AsyncCreateSubscriptionCommand:
 
     def __init__(
         self,
-        repository: SubscriptionStagingPort,
+        repository: SubscriptionStagingRepository,
         unit_of_work: AsyncUnitOfWork,
         outbox: AsyncSubscriptionOutboxStager | None = None,
     ) -> None:
@@ -138,11 +195,11 @@ class AsyncCreateSubscriptionCommand:
 
     async def execute(
         self,
-        identity: SubscriptionIdentity,
-        payload: SubscriptionPatch,
+        identity: dict,
+        payload: dict,
         username: Optional[str] = None,
         after_commit: Optional[AsyncAfterCommitEffect] = None,
-        notification: Mapping[str, JsonData] | None = None,
+        notification: Mapping[str, object] | None = None,
     ) -> Tuple[int, str]:
         """执行异步新增；事务失败回滚，提交后副作用失败不反向回滚。"""
         try:
@@ -156,7 +213,7 @@ class AsyncCreateSubscriptionCommand:
                     now = datetime.now(timezone.utc)
                     for intent in _subscribe_added_intents(
                         staged.subscribe_id,
-                        payload.to_payload(),
+                        payload,
                         username,
                         notification,
                     ):
@@ -170,106 +227,16 @@ class AsyncCreateSubscriptionCommand:
         return staged.subscribe_id, staged.message
 
 
-@dataclass(frozen=True, slots=True)
-class SubscriptionCreateRequest:
-    """批量新增中的一条订阅写入请求。"""
-
-    identity: SubscriptionIdentity
-    payload: SubscriptionPatch
-    username: Optional[str] = None
-    notification: Mapping[str, JsonData] | None = None
-    after_commit: Optional[AsyncAfterCommitEffect] = None
-
-
-SubscriptionBatchAfterCommitEffect = Callable[
-    [int, SubscriptionCreateRequest],
-    Awaitable[None],
-]
-
-
-class SubscriptionBatchWritePort(Protocol):
-    """Servarr 等批量入口使用的原子异步订阅写端口。"""
-
-    async def async_add(
-        self,
-        requests: Sequence[SubscriptionCreateRequest],
-    ) -> tuple[SubscriptionWriteResult, ...]:
-        """在一个事务内新增全部订阅并返回逐条结果。"""
-        ...
-
-
-class SubscriptionBatchWriteError(RuntimeError):
-    """批量中的任一订阅无法落库时触发整批回滚。"""
-
-
-class AsyncCreateSubscriptionBatchCommand:
-    """在一个异步 UoW 内暂存多条订阅及各自 durable intents。"""
-
-    def __init__(
-        self,
-        repository: SubscriptionStagingPort,
-        unit_of_work: AsyncUnitOfWork,
-        outbox: AsyncSubscriptionOutboxStager,
-    ) -> None:
-        """注入共享 Session 的 staging port、事务所有者和 outbox。"""
-        self._repository = repository
-        self._unit_of_work = unit_of_work
-        self._outbox = outbox
-
-    async def execute(
-        self,
-        requests: Sequence[SubscriptionCreateRequest],
-        after_commit: Optional[SubscriptionBatchAfterCommitEffect] = None,
-    ) -> tuple[SubscriptionWriteResult, ...]:
-        """全部暂存成功后提交一次，失败则回滚且不执行外部副作用。"""
-        if not requests:
-            return ()
-        staged_results: list[SubscriptionWriteResult] = []
-        created_requests: list[tuple[SubscriptionCreateRequest, SubscriptionWriteResult]] = []
-        now = datetime.now(timezone.utc)
-        try:
-            for request in requests:
-                staged = await self._repository.async_stage_add(
-                    request.identity,
-                    request.payload,
-                    request.username,
-                )
-                if not staged.subscribe_id:
-                    raise SubscriptionBatchWriteError(staged.message)
-                staged_results.append(staged)
-                if not staged.created:
-                    continue
-                created_requests.append((request, staged))
-                for intent in _subscribe_added_intents(
-                    staged.subscribe_id,
-                    request.payload.to_payload(),
-                    request.username,
-                    request.notification,
-                ):
-                    await self._outbox.stage(intent, now)
-            if created_requests:
-                await self._unit_of_work.commit()
-        except Exception:
-            await self._unit_of_work.rollback()
-            raise
-
-        if after_commit:
-            for request, staged in created_requests:
-                await after_commit(staged.subscribe_id, request)
-        return tuple(staged_results)
-
-
 def _subscribe_added_intents(
     subscribe_id: int,
-    payload: Mapping[str, JsonData],
+    payload: dict,
     username: str | None,
-    notification: Mapping[str, JsonData] | None = None,
+    notification: Mapping[str, object] | None = None,
 ) -> tuple[OutboxIntent, ...]:
     """构造订阅新增事件、通知与外部统计的同事务 durable intents。"""
     event_key = subscription_added_event_key(subscribe_id, payload)
     event_payload = {
         "subscribe_id": subscribe_id,
-        "idempotency_key": event_key,
         "username": username,
         "mediainfo": dict(payload),
     }
@@ -298,24 +265,13 @@ def _subscribe_added_intents(
         OutboxIntent(
             event_key=subscription_added_report_key(subscribe_id, payload),
             topic="subscribe.added.report",
-            payload={
-                "subscribe_info": {
-                    **dict(payload),
-                    "idempotency_key": subscription_added_report_key(
-                        subscribe_id,
-                        payload,
-                    ),
-                }
-            },
+            payload={"subscribe_info": dict(payload)},
         )
     )
     return tuple(intents)
 
 
-def subscription_added_event_key(
-    subscribe_id: int,
-    payload: Mapping[str, JsonData],
-) -> str:
+def subscription_added_event_key(subscribe_id: int, payload: dict) -> str:
     """由订阅 ID 与媒体身份构造重试期间稳定、重建后不碰撞的幂等键。"""
     return (
         f"subscribe.added:{subscribe_id}:"
@@ -324,20 +280,32 @@ def subscription_added_event_key(
     )
 
 
-def subscription_added_report_key(
-    subscribe_id: int,
-    payload: Mapping[str, JsonData],
-) -> str:
+def subscription_added_report_key(subscribe_id: int, payload: dict) -> str:
     """返回与新增事件身份一致但可独立重试的统计幂等键。"""
     return f"{subscription_added_event_key(subscribe_id, payload)}:report"
 
 
-def subscription_added_notification_key(
-    subscribe_id: int,
-    payload: Mapping[str, JsonData],
-) -> str:
+def subscription_added_notification_key(subscribe_id: int, payload: dict) -> str:
     """构造订阅新增通知的稳定幂等键。"""
     return f"{subscription_added_event_key(subscribe_id, payload)}:notification"
+
+
+_configured_subscribe_writer: Callable[[], SubscribeWriter] | None = None
+
+
+def configure_subscribe_writer(provider: Callable[[], SubscribeWriter]) -> None:
+    """由启动组合根登记订阅写入端口提供器。"""
+    global _configured_subscribe_writer
+    _configured_subscribe_writer = provider
+
+
+def _get_subscribe_writer(writer: Optional[SubscribeWriter]) -> SubscribeWriter:
+    """获取显式传入或启动组合根登记的订阅写入端口。"""
+    if writer is not None:
+        return writer
+    if _configured_subscribe_writer is None:
+        raise RuntimeError("订阅写入端口尚未配置")
+    return _configured_subscribe_writer()
 
 
 def _music_entity(mediainfo: MediaInfo | MusicInfo) -> Optional[str]:
@@ -356,8 +324,8 @@ def _music_entity(mediainfo: MediaInfo | MusicInfo) -> Optional[str]:
 
 def _translate(
     mediainfo: MediaInfo | MusicInfo,
-    kwargs: dict[str, JsonData],
-) -> Optional[Tuple[SubscriptionIdentity, SubscriptionPatch, Optional[str]]]:
+    kwargs: dict,
+) -> Optional[Tuple[dict, dict, Optional[str]]]:
     """
     把识别结果翻译成查重身份与写入字段。
 
@@ -369,73 +337,64 @@ def _translate(
     username = kwargs.get("username") if owner_scope else None
     media_source, media_id = resolve_media_identity(
         media=mediainfo,
-        media_source=kwargs.get("media_source"),
+        source=kwargs.get("media_source"),
         media_id=kwargs.get("media_id"),
     )
-    if not media_source or not media_id:
+    # 显式声明了身份（media_source/media_id）但解析残缺时拒绝：这种订阅写进去就是一条
+    # 永远匹配不上资源的僵尸订阅，后续按身份去重也会失效，必须在查询与建模之前短路。
+    # 反之纯标题订阅（未声明任何身份字段）允许进入 Oper 层，由跨身份同剧去重按标题+年份兜底。
+    declared_source = getattr(mediainfo, "media_source", None) or kwargs.get("media_source")
+    declared_id = getattr(mediainfo, "media_id", None) or kwargs.get("media_id")
+    if (declared_source or declared_id) and (not media_source or not media_id):
         return None
     music_type = _music_entity(mediainfo)
-    identity = SubscriptionIdentity(
-        media_source=MediaSource(media_source),
-        media_id=media_id,
-        music_type=music_type,
-        season=kwargs.get("season") if isinstance(kwargs.get("season"), int) else None,
-        episode_group=mediainfo.episode_group,
-    )
+    identity = {
+        "media_source": str(media_source) if media_source else None,
+        "media_id": media_id,
+        "music_type": music_type,
+        "season": kwargs.get("season"),
+        "episode_group": mediainfo.episode_group,
+    }
     payload = dict(kwargs)
-    payload.update(
-        {
-            "name": mediainfo.title,
-            "year": mediainfo.year,
-            "type": mediainfo.type.value,
-            "media_source": str(media_source),
-            "media_id": media_id,
-            "episode_group": mediainfo.episode_group,
-            "poster": mediainfo.get_poster_image(),
-            "backdrop": mediainfo.get_backdrop_image(),
-            "vote": mediainfo.vote_average,
-            "description": mediainfo.overview,
-            "music_type": music_type,
-            # 整专完成判定拿 total_tracks 当分母，单曲带着专辑的曲目数会永远判不到完成
-            "total_tracks": getattr(mediainfo, "total_tracks", None) if music_type == MUSIC_ENTITY_ALBUM else None,
-        }
-    )
-    return identity, SubscriptionPatch(payload), username if isinstance(username, str) else None
-
-
-def build_subscription_create_request(
-    mediainfo: MediaInfo | MusicInfo,
-    notification: Mapping[str, JsonData] | None = None,
-    after_commit: Optional[AsyncAfterCommitEffect] = None,
-    **kwargs: JsonData,
-) -> Optional[SubscriptionCreateRequest]:
-    """把统一订阅字段映射冻结为一条可参与原子批量写入的请求。"""
-    translated = _translate(mediainfo, kwargs)
-    if translated is None:
-        return None
-    identity, payload, username = translated
-    return SubscriptionCreateRequest(
-        identity=identity,
-        payload=payload,
-        username=username,
-        notification=notification,
-        after_commit=after_commit,
-    )
+    payload.update({
+        "name": mediainfo.title,
+        "year": mediainfo.year,
+        "type": mediainfo.type.value,
+        "media_source": str(media_source) if media_source else None,
+        "media_id": media_id,
+        "episode_group": mediainfo.episode_group,
+        "poster": mediainfo.get_poster_image(),
+        "backdrop": mediainfo.get_backdrop_image(),
+        "vote": mediainfo.vote_average,
+        "description": mediainfo.overview,
+        "music_type": music_type,
+        # 身份 ID 字段：供 Oper 层跨身份同剧去重（tmdbid/标题年份/doubanid 兜底）使用
+        "tmdbid": getattr(mediainfo, "tmdb_id", None),
+        "imdbid": getattr(mediainfo, "imdb_id", None),
+        "tvdbid": getattr(mediainfo, "tvdb_id", None),
+        "doubanid": getattr(mediainfo, "douban_id", None),
+        "bangumiid": getattr(mediainfo, "bangumi_id", None),
+        "anilistid": getattr(mediainfo, "anilist_id", None),
+        # 整专完成判定拿 total_tracks 当分母，单曲带着专辑的曲目数会永远判不到完成
+        "total_tracks": getattr(mediainfo, "total_tracks", None)
+        if music_type == MUSIC_ENTITY_ALBUM else None,
+    })
+    return identity, payload, username
 
 
 def add_subscribe(
     mediainfo: MediaInfo | MusicInfo,
-    subscribe_oper: SubscriptionWritePort,
+    subscribe_oper: Optional[SubscribeWriter] = None,
     after_commit: Optional[AfterCommitEffect] = None,
-    notification: Mapping[str, JsonData] | None = None,
-    **kwargs: JsonData,
+    notification: Mapping[str, object] | None = None,
+    **kwargs,
 ) -> Tuple[int, str]:
     """
     新增订阅。
 
     :param mediainfo: 识别结果
-    :param subscribe_oper: 调用方显式注入的订阅写入端口
-    :param after_commit: 提交后副作用编排；返回 False 表示统计 intent 等待重试
+    :param subscribe_oper: 复用的订阅操作对象，未传时由启动组合根提供
+        :param after_commit: 提交后副作用编排；返回 False 表示统计 intent 等待重试
     :param kwargs: 订阅设置；owner_scope 为真时按用户名限定查重范围
     :return: (订阅 ID, 结果说明)；ID 为 0 表示未新增
     """
@@ -443,35 +402,37 @@ def add_subscribe(
     if translated is None:
         return INCOMPLETE_IDENTITY
     identity, payload, username = translated
+    oper = _get_subscribe_writer(subscribe_oper)
+    extra = {"notification": notification} if notification is not None else {}
     if after_commit is None:
-        return subscribe_oper.add(
+        return oper.add(
             identity=identity,
             payload=payload,
             username=username,
-            notification=notification,
+            **extra,
         )
-    return subscribe_oper.add(
+    return oper.add(
         identity=identity,
         payload=payload,
         username=username,
         after_commit=after_commit,
-        notification=notification,
+        **extra,
     )
 
 
 async def async_add_subscribe(
     mediainfo: MediaInfo | MusicInfo,
-    subscribe_oper: SubscriptionWritePort,
+    subscribe_oper: Optional[SubscribeWriter] = None,
     after_commit: Optional[AsyncAfterCommitEffect] = None,
-    notification: Mapping[str, JsonData] | None = None,
-    **kwargs: JsonData,
+    notification: Mapping[str, object] | None = None,
+    **kwargs,
 ) -> Tuple[int, str]:
     """
     异步新增订阅。
 
     :param mediainfo: 识别结果
-    :param subscribe_oper: 调用方显式注入的订阅写入端口
-    :param after_commit: 异步提交后副作用编排；返回 False 表示统计 intent 等待重试
+    :param subscribe_oper: 复用的订阅操作对象，未传时由启动组合根提供
+        :param after_commit: 异步提交后副作用编排；返回 False 表示统计 intent 等待重试
     :param kwargs: 订阅设置；owner_scope 为真时按用户名限定查重范围
     :return: (订阅 ID, 结果说明)；ID 为 0 表示未新增
     """
@@ -479,35 +440,36 @@ async def async_add_subscribe(
     if translated is None:
         return INCOMPLETE_IDENTITY
     identity, payload, username = translated
+    oper = _get_subscribe_writer(subscribe_oper)
+    extra = {"notification": notification} if notification is not None else {}
     if after_commit is None:
-        return await subscribe_oper.async_add(
+        return await oper.async_add(
             identity=identity,
             payload=payload,
             username=username,
-            notification=notification,
+            **extra,
         )
-    return await subscribe_oper.async_add(
+    return await oper.async_add(
         identity=identity,
         payload=payload,
         username=username,
         after_commit=after_commit,
-        notification=notification,
+        **extra,
     )
 
 
 __all__ = [
     "AfterCommitEffect",
-    "AsyncCreateSubscriptionBatchCommand",
     "AsyncCreateSubscriptionCommand",
     "AsyncAfterCommitEffect",
     "AsyncUnitOfWork",
     "CreateSubscriptionCommand",
     "INCOMPLETE_IDENTITY",
-    "SubscriptionBatchWriteError",
-    "SubscriptionBatchWritePort",
-    "SubscriptionCreateRequest",
+    "StagedSubscription",
+    "SubscriptionStagingRepository",
+    "SubscribeWriter",
     "UnitOfWork",
     "add_subscribe",
     "async_add_subscribe",
-    "build_subscription_create_request",
+    "configure_subscribe_writer",
 ]

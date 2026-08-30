@@ -2,20 +2,8 @@ import asyncio
 import threading
 from types import SimpleNamespace
 
-from app.agent.prompt.transfer import build_manual_redo_template_context
 from app.agent.tools.impl.delete_transfer_history import DeleteTransferHistoryTool
-
-
-def _tool(history_repository, execution_repository=None):
-    """构造显式注入整理仓储的工具。"""
-    return DeleteTransferHistoryTool(
-        session_id="redo-session",
-        user_id="10001",
-        data=SimpleNamespace(
-            transfer_history=history_repository,
-            transfer_execution=execution_repository or SimpleNamespace(),
-        ),
-    )
+from app.agent.prompt.transfer_redo import build_manual_redo_template_context
 
 
 def test_delete_transfer_history_tool_removes_old_dest_file_before_history(monkeypatch):
@@ -53,11 +41,15 @@ def test_delete_transfer_history_tool_removes_old_dest_file_before_history(monke
             return True
 
     monkeypatch.setattr(
+        "app.agent.tools.impl.delete_transfer_history.get_agent_transfer_history_port",
+        FakeTransferHistoryOper,
+    )
+    monkeypatch.setattr(
         "app.agent.tools.impl.delete_transfer_history.StorageChain",
         FakeStorageChain,
     )
 
-    tool = _tool(FakeTransferHistoryOper())
+    tool = DeleteTransferHistoryTool(session_id="redo-session", user_id="10001")
     result = asyncio.run(tool.run(history_id=7))
 
     assert "已删除整理历史记录" in result
@@ -104,11 +96,15 @@ def test_delete_transfer_history_tool_keeps_history_when_old_dest_delete_fails(m
             return False
 
     monkeypatch.setattr(
+        "app.agent.tools.impl.delete_transfer_history.get_agent_transfer_history_port",
+        FakeTransferHistoryOper,
+    )
+    monkeypatch.setattr(
         "app.agent.tools.impl.delete_transfer_history.StorageChain",
         FakeStorageChain,
     )
 
-    tool = _tool(FakeTransferHistoryOper())
+    tool = DeleteTransferHistoryTool(session_id="redo-session", user_id="10001")
     result = asyncio.run(tool.run(history_id=8))
 
     assert "旧媒体库文件删除失败" in result
@@ -154,11 +150,15 @@ def test_delete_transfer_history_tool_deletes_history_when_old_dest_is_missing(m
             return False
 
     monkeypatch.setattr(
+        "app.agent.tools.impl.delete_transfer_history.get_agent_transfer_history_port",
+        FakeTransferHistoryOper,
+    )
+    monkeypatch.setattr(
         "app.agent.tools.impl.delete_transfer_history.StorageChain",
         FakeStorageChain,
     )
 
-    tool = _tool(FakeTransferHistoryOper())
+    tool = DeleteTransferHistoryTool(session_id="redo-session", user_id="10001")
     result = asyncio.run(tool.run(history_id=13))
 
     assert "已删除整理历史记录" in result
@@ -205,11 +205,15 @@ def test_delete_transfer_history_tool_keeps_successful_move_dest_as_reorganize_s
             return True
 
     monkeypatch.setattr(
+        "app.agent.tools.impl.delete_transfer_history.get_agent_transfer_history_port",
+        FakeTransferHistoryOper,
+    )
+    monkeypatch.setattr(
         "app.agent.tools.impl.delete_transfer_history.StorageChain",
         FakeStorageChain,
     )
 
-    tool = _tool(FakeTransferHistoryOper())
+    tool = DeleteTransferHistoryTool(session_id="redo-session", user_id="10001")
     result = asyncio.run(tool.run(history_id=9))
 
     assert "已删除整理历史记录" in result
@@ -254,11 +258,15 @@ def test_delete_transfer_history_tool_only_treats_exact_move_as_reorganize_sourc
             return True
 
     monkeypatch.setattr(
+        "app.agent.tools.impl.delete_transfer_history.get_agent_transfer_history_port",
+        FakeTransferHistoryOper,
+    )
+    monkeypatch.setattr(
         "app.agent.tools.impl.delete_transfer_history.StorageChain",
         FakeStorageChain,
     )
 
-    tool = _tool(FakeTransferHistoryOper())
+    tool = DeleteTransferHistoryTool(session_id="redo-session", user_id="10001")
     result = asyncio.run(tool.run(history_id=11))
 
     assert "已删除旧媒体库文件" in result
@@ -305,12 +313,19 @@ def test_delete_transfer_history_storage_work_runs_outside_event_loop(monkeypatc
             return True
 
     monkeypatch.setattr(
+        "app.agent.tools.impl.delete_transfer_history.get_agent_transfer_history_port",
+        FakeTransferHistoryOper,
+    )
+    monkeypatch.setattr(
         "app.agent.tools.impl.delete_transfer_history.StorageChain",
         FakeStorageChain,
     )
 
     result = asyncio.run(
-        _tool(FakeTransferHistoryOper()).run(history_id=15)
+        DeleteTransferHistoryTool(
+            session_id="redo-session",
+            user_id="10001",
+        ).run(history_id=15)
     )
 
     assert "已删除整理历史记录" in result
@@ -356,13 +371,20 @@ def test_delete_transfer_history_cancellation_keeps_history_record(monkeypatch):
             return True
 
     monkeypatch.setattr(
+        "app.agent.tools.impl.delete_transfer_history.get_agent_transfer_history_port",
+        FakeTransferHistoryOper,
+    )
+    monkeypatch.setattr(
         "app.agent.tools.impl.delete_transfer_history.StorageChain",
         FakeStorageChain,
     )
 
     async def scenario():
         task = asyncio.create_task(
-            _tool(FakeTransferHistoryOper()).run(history_id=16)
+            DeleteTransferHistoryTool(
+                session_id="redo-session",
+                user_id="10001",
+            ).run(history_id=16)
         )
         assert await asyncio.to_thread(started.wait, 1)
         task.cancel()

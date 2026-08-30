@@ -17,7 +17,6 @@ from app.application.plugin.transaction import (
     PluginInstallationRecord,
     PluginPersistenceService,
 )
-from app.runtime.dependencies.native import NativeDependencyChange
 from app.runtime.execution import await_task_to_terminal
 from app.runtime.log import logger
 from app.schemas.exception import (
@@ -33,7 +32,6 @@ PluginReloader = Callable[[str], Awaitable[PluginRuntimeStatus]]
 PluginRegistrationRefresher = Callable[[str], Awaitable[object]]
 PluginMutationAdmission = Callable[[str], ContextManager[None]]
 PluginPackageWriteGuard = Callable[[str], ContextManager[None]]
-RestartRequiredRecorder = Callable[[str, tuple[str, ...]], None]
 T = TypeVar("T")
 
 
@@ -61,7 +59,6 @@ class PluginPackageTransactionPort(Protocol):
         package_version: str | None = None,
         release_version: str | None = None,
         force_install: bool = False,
-        checkpoint: PluginPackageCheckpoint | None = None,
     ) -> tuple[bool, str]:
         """执行已经通过来源准入的原始包安装。"""
 
@@ -95,12 +92,6 @@ class PluginPackageTransactionPort(Protocol):
     async def async_payload_receipt(self, plugin_id: str) -> str:
         """读取当前运行目录的稳定载荷收据。"""
 
-    async def async_native_dependency_changes(
-        self,
-        checkpoint: PluginPackageCheckpoint,
-    ) -> tuple[NativeDependencyChange, ...]:
-        """返回安装期间被替换的已加载原生发行包。"""
-
 
 @dataclass(frozen=True, slots=True)
 class PluginInstallRollback:
@@ -127,7 +118,6 @@ class PluginInstallResult:
     installed_list_persisted: bool = False
     runtime_reloaded: bool = False
     registrations_refreshed: bool = False
-    restart_required: bool = False
     reported: bool = False
     report_error: str = ""
     failure_stage: str | None = None
@@ -148,8 +138,6 @@ class _InstallState:
     package_installed: bool = False
     runtime_touched: bool = False
     registrations_touched: bool = False
-    native_dependencies_checked: bool = False
-    native_dependency_changes: tuple[NativeDependencyChange, ...] = ()
     committed: bool = False
     commit_unknown: bool = False
 
@@ -170,7 +158,6 @@ class PluginInstallCommand:
         registration_refresher: PluginRegistrationRefresher,
         mutation: PluginMutationAdmission,
         package_write_guard: PluginPackageWriteGuard,
-        restart_required_recorder: RestartRequiredRecorder,
         clock: Callable[[], datetime],
         transaction_id_factory: Callable[[], str],
     ) -> None:
@@ -185,7 +172,6 @@ class PluginInstallCommand:
         self.__registration_refresher = registration_refresher
         self.__mutation = mutation
         self.__package_write_guard = package_write_guard
-        self.__restart_required_recorder = restart_required_recorder
         self.__clock = clock
         self.__transaction_id_factory = transaction_id_factory
 
@@ -341,15 +327,10 @@ class PluginInstallCommand:
                     package_version=candidate.package_generation,
                     release_version=release_version,
                     force_install=True,
-                    checkpoint=state.checkpoint,
                 )
             )
             state.package_installed = package_installed
-        except asyncio.CancelledError:
-            await self.__record_native_dependency_changes(plugin_id, state)
-            raise
         except Exception as error:
-            await self.__record_native_dependency_changes(plugin_id, state)
             if isinstance(error, PersistenceUnavailableError):
                 await self.__fail_prepared(plugin_id=plugin_id, state=state)
                 raise
@@ -359,7 +340,6 @@ class PluginInstallCommand:
                 stage="package_install",
                 message=str(error),
             )
-        await self.__record_native_dependency_changes(plugin_id, state)
         if not package_installed:
             return await self.__failure_result(
                 plugin_id=plugin_id,
@@ -368,8 +348,6 @@ class PluginInstallCommand:
                 message=message,
             )
 
-        runtime_reloaded = False
-        registrations_refreshed = False
         try:
             state.stage = "payload_receipt"
             receipt = await self.__await_side_effect(
@@ -403,17 +381,12 @@ class PluginInstallCommand:
 
             state.stage = "runtime_reload"
             state.runtime_touched = True
-            runtime_reloaded = await self.__reload_active(
-                plugin_id,
-                allow_pending_restart=bool(state.native_dependency_changes),
+            await self.__reload_active(plugin_id)
+            state.stage = "registration_refresh"
+            state.registrations_touched = True
+            await self.__await_side_effect(
+                self.__registration_refresher(plugin_id)
             )
-            if runtime_reloaded:
-                state.stage = "registration_refresh"
-                state.registrations_touched = True
-                await self.__await_side_effect(
-                    self.__registration_refresher(plugin_id)
-                )
-                registrations_refreshed = True
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -451,9 +424,8 @@ class PluginInstallCommand:
                         "重启后将自动恢复"
                     ),
                     package_installed=True,
-                    runtime_reloaded=runtime_reloaded,
-                    registrations_refreshed=registrations_refreshed,
-                    restart_required=bool(state.native_dependency_changes),
+                    runtime_reloaded=True,
+                    registrations_refreshed=True,
                     failure_stage="database_commit_unknown",
                 )
             if not outcome:
@@ -481,10 +453,7 @@ class PluginInstallCommand:
                 and not isinstance(candidate, PluginLocalCandidate)
             ),
         )
-        if state.native_dependency_changes:
-            result_message = "插件已安装，重启 MoviePilot 后完成依赖更新"
-        else:
-            result_message = message or "插件安装成功"
+        result_message = message or "插件安装成功"
         if checkpoint_cleanup_error:
             result_message = f"{result_message}；安装事务待下次启动继续清理"
         if report_error:
@@ -494,9 +463,8 @@ class PluginInstallCommand:
             message=result_message,
             package_installed=True,
             installed_list_persisted=True,
-            runtime_reloaded=runtime_reloaded,
-            registrations_refreshed=registrations_refreshed,
-            restart_required=bool(state.native_dependency_changes),
+            runtime_reloaded=True,
+            registrations_refreshed=True,
             reported=reported,
             report_error=report_error,
             checkpoint_cleanup_error=checkpoint_cleanup_error,
@@ -575,57 +543,13 @@ class PluginInstallCommand:
             report_error=report_error,
         )
 
-    async def __reload_active(
-        self,
-        plugin_id: str,
-        *,
-        allow_pending_restart: bool = False,
-    ) -> bool:
-        """重载插件；原生载荷已替换时允许等待新进程完成激活。"""
+    async def __reload_active(self, plugin_id: str) -> None:
+        """重载只有进入 ACTIVE 才能作为安装或刷新成功继续提交。"""
         runtime_status = await self.__await_side_effect(
             self.__target_reloader(plugin_id)
         )
-        if runtime_status is PluginRuntimeStatus.ACTIVE:
-            return True
-        if allow_pending_restart:
-            logger.warning(
-                "插件 %s 的原生依赖已更新，当前进程重载未激活新载荷，"
-                "将在重启后重新加载",
-                plugin_id,
-            )
-            return False
-        raise RuntimeError("插件加载失败，请查看插件日志")
-
-    async def __record_native_dependency_changes(
-        self,
-        plugin_id: str,
-        state: _InstallState,
-    ) -> None:
-        """记录共享依赖越过可回滚边界后的进程级激活要求。"""
-        if state.native_dependencies_checked or state.checkpoint is None:
-            return
-        state.native_dependencies_checked = True
-        try:
-            changes = await self.__await_side_effect(
-                self.__packages.async_native_dependency_changes(state.checkpoint)
-            )
-        except Exception as error:  # noqa: BLE001 - 诊断失败不能改写安装终态
-            logger.warning(
-                "检测插件 %s 原生依赖变更失败，继续使用原安装结果：%s",
-                plugin_id,
-                error,
-            )
-            return
-        state.native_dependency_changes = changes
-        if not changes:
-            return
-        packages = tuple(change.distribution for change in changes)
-        self.__restart_required_recorder(plugin_id, packages)
-        logger.warning(
-            "插件 %s 更新了当前进程已加载的原生依赖，重启后完整生效：%s",
-            plugin_id,
-            ", ".join(packages),
-        )
+        if runtime_status is not PluginRuntimeStatus.ACTIVE:
+            raise RuntimeError("插件加载失败，请查看插件日志")
 
     async def __finish_committed(self, state: _InstallState) -> str:
         """幂等清理 COMMITTED 事务；失败时保留 journal 供启动回放。"""

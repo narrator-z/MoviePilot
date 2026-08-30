@@ -81,8 +81,8 @@ FOUNDATIONAL_SETTINGS_BOUNDARIES = {
     "app/db/session.py": "数据库会话与连接配额必须在应用组合根装配前可用",
 }
 COMPOSITION_ROOT_OPER_BOUNDARIES = {
-    ("app/startup/composition/configuration.py", "SystemConfigOper"):
-        "配置组合 owner 负责构造唯一的系统配置数据库适配器",
+    ("app/startup/initializers/modules.py", "SystemConfigOper"):
+        "启动组合根负责构造唯一的系统配置数据库适配器",
 }
 
 
@@ -1067,76 +1067,17 @@ def git_head(repository: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
-def _plugin_attribute_parts(node: ast.AST) -> tuple[str, ...]:
-    """把插件属性表达式拆成点分片段，动态下标等无法证明的表达式返回空。"""
-    if isinstance(node, ast.Name):
-        return (node.id,)
-    if isinstance(node, ast.Attribute):
-        prefix = _plugin_attribute_parts(node.value)
-        return (*prefix, node.attr) if prefix else ()
-    return ()
-
-
-def collect_plugin_import_contracts(
-    path: Path,
-) -> tuple[set[str], set[str], Counter[str]]:
-    """收集插件模块、from-import 符号及可证明的导入对象属性调用。"""
-    tree = parse_source(path)
+def collect_plugin_imports(path: Path) -> set[str]:
+    """收集单个插件文件直接声明的 app 导入模块。"""
     imports: set[str] = set()
-    from_imports: set[str] = set()
-    imported_bindings: dict[str, set[str]] = defaultdict(set)
-    for node in ast.walk(tree):
+    for node in ast.walk(parse_source(path)):
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if not alias.name.startswith("app."):
-                    continue
-                imports.add(alias.name)
-                if alias.asname:
-                    imported_bindings[alias.asname].add(alias.name)
-                else:
-                    root_name = alias.name.split(".", maxsplit=1)[0]
-                    imported_bindings[root_name].add(root_name)
+            imports.update(
+                alias.name for alias in node.names if alias.name.startswith("app.")
+            )
         elif isinstance(node, ast.ImportFrom) and node.module:
             if node.module.startswith("app."):
                 imports.add(node.module)
-                for alias in node.names:
-                    if alias.name == "*":
-                        continue
-                    target = f"{node.module}.{alias.name}"
-                    from_imports.add(target)
-                    imported_bindings[alias.asname or alias.name].add(target)
-        elif isinstance(node, ast.Call) and node.args:
-            function_name = (
-                node.func.id
-                if isinstance(node.func, ast.Name)
-                else node.func.attr if isinstance(node.func, ast.Attribute) else None
-            )
-            module_arg = node.args[0]
-            if (
-                function_name in {"_optional_import", "import_module", "__import__"}
-                and isinstance(module_arg, ast.Constant)
-                and isinstance(module_arg.value, str)
-                and module_arg.value.startswith("app.")
-            ):
-                imports.add(module_arg.value)
-
-    attribute_calls: Counter[str] = Counter()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        parts = _plugin_attribute_parts(node.func)
-        if len(parts) < 2:
-            continue
-        for imported_target in imported_bindings.get(parts[0], set()):
-            target = ".".join((imported_target, *parts[1:]))
-            if target.startswith("app."):
-                attribute_calls[target] += 1
-    return imports, from_imports, attribute_calls
-
-
-def collect_plugin_imports(path: Path) -> set[str]:
-    """收集单个插件文件静态声明及字面量动态加载的 app 模块。"""
-    imports, _, _ = collect_plugin_import_contracts(path)
     return imports
 
 
@@ -1249,9 +1190,6 @@ def collect_official_plugin_baseline(plugin_repo: Path) -> dict[str, Any]:
         }
     )
     import_files: dict[str, set[str]] = defaultdict(set)
-    from_import_files: dict[str, set[str]] = defaultdict(set)
-    attribute_call_files: dict[str, set[str]] = defaultdict(set)
-    attribute_call_counts: Counter[str] = Counter()
     hook_files: dict[str, set[str]] = defaultdict(set)
     api_contracts: dict[str, list[dict[str, Any]]] = {}
     digest = hashlib.sha256()
@@ -1261,16 +1199,8 @@ def collect_official_plugin_baseline(plugin_repo: Path) -> dict[str, Any]:
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(content)
-        imported_modules, imported_symbols, attribute_calls = (
-            collect_plugin_import_contracts(path)
-        )
-        for imported_module in imported_modules:
+        for imported_module in collect_plugin_imports(path):
             import_files[imported_module].add(relative)
-        for imported_symbol in imported_symbols:
-            from_import_files[imported_symbol].add(relative)
-        for attribute_call, count in attribute_calls.items():
-            attribute_call_files[attribute_call].add(relative)
-            attribute_call_counts[attribute_call] += count
         routes = collect_plugin_api_contracts(path)
         if routes:
             api_contracts[relative] = routes
@@ -1284,7 +1214,7 @@ def collect_official_plugin_baseline(plugin_repo: Path) -> dict[str, Any]:
             if hook in defined_names:
                 hook_files[hook].add(relative)
     return {
-        "schema_version": 4,
+        "schema_version": 3,
         "scope": {
             "repository": "MoviePilot-Plugins",
             "roots": [*[root.name for root in versioned_roots], "plugins"],
@@ -1301,21 +1231,6 @@ def collect_official_plugin_baseline(plugin_repo: Path) -> dict[str, Any]:
                 "files": sorted(files),
             }
             for module, files in sorted(import_files.items())
-        },
-        "from_imports": {
-            symbol: {
-                "file_count": len(files),
-                "files": sorted(files),
-            }
-            for symbol, files in sorted(from_import_files.items())
-        },
-        "attribute_calls": {
-            target: {
-                "call_count": attribute_call_counts[target],
-                "file_count": len(files),
-                "files": sorted(files),
-            }
-            for target, files in sorted(attribute_call_files.items())
         },
         "hooks": {
             hook: {
@@ -1429,33 +1344,25 @@ def _migrate_runtime_baseline(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _migrate_plugin_baseline(value: dict[str, Any]) -> dict[str, Any]:
-    """链式迁移旧插件基线，并为空缺的符号/调用合同建立显式空快照。"""
-    migrated = value
-    if migrated.get("schema_version") == 2:
-        source = migrated["source"]
-        migrated = {
-            "schema_version": 3,
-            "scope": {
-                "repository": source["repository"],
-                "roots": source["roots"],
-            },
-            "provenance": {
-                "head": source["head"],
-                "python_file_count": source["python_file_count"],
-                "source_sha256": source["source_sha256"],
-            },
-            "imports": migrated["imports"],
-            "hooks": migrated["hooks"],
-            "api_routes": migrated["api_routes"],
-        }
-    if migrated.get("schema_version") == 3:
-        migrated = {
-            **migrated,
-            "schema_version": 4,
-            "from_imports": {},
-            "attribute_calls": {},
-        }
-    return migrated
+    """把来源信息混排的 v2 插件基线转换为 scope/provenance 结构。"""
+    if value.get("schema_version") != 2:
+        return value
+    source = value["source"]
+    return {
+        "schema_version": 3,
+        "scope": {
+            "repository": source["repository"],
+            "roots": source["roots"],
+        },
+        "provenance": {
+            "head": source["head"],
+            "python_file_count": source["python_file_count"],
+            "source_sha256": source["source_sha256"],
+        },
+        "imports": value["imports"],
+        "hooks": value["hooks"],
+        "api_routes": value["api_routes"],
+    }
 
 
 def semantic_baseline(path: Path, value: dict[str, Any]) -> dict[str, Any]:

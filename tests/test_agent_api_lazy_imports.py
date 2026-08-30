@@ -34,7 +34,7 @@ def _run_isolated(script: str, config_dir: Path) -> dict:
 def test_full_api_openapi_keeps_agent_runtime_cold(tmp_path: Path) -> None:
     """完整路由与 OpenAPI 注册不得物化 Agent、工具或模型运行时。"""
     result = _run_isolated(
-        r"""
+        r'''
 import json
 import socket
 import sys
@@ -91,7 +91,7 @@ print(json.dumps({
     "missing_paths": sorted(required_paths - paths),
     "network_attempts": network_attempts,
 }))
-""",
+''',
         tmp_path / "router-import",
     )
 
@@ -107,7 +107,7 @@ def test_disabled_protocol_requests_preserve_503_without_runtime_load(
 ) -> None:
     """禁用态兼容协议保持 503，并且不会因构造响应加载 Agent。"""
     result = _run_isolated(
-        r"""
+        r'''
 import asyncio
 import json
 import socket
@@ -139,7 +139,7 @@ from app.application.configuration import ApiRuntimeConfig
 from app.runtime.config import settings
 
 runtime_config = ApiRuntimeConfig(
-    60, False, settings.AI_AGENT_ENABLE,
+    False, 60, False, settings.AI_AGENT_ENABLE,
     api_token=settings.API_TOKEN,
 )
 anthropic.get_api_runtime_config_snapshot = lambda: runtime_config
@@ -193,7 +193,7 @@ print(json.dumps({
     "status_codes": [response.status_code for response in protocol_responses],
     "bodies": [json.loads(response.body) for response in protocol_responses],
 }, ensure_ascii=False))
-""",
+''',
         tmp_path / "disabled-requests",
     )
 
@@ -208,7 +208,7 @@ print(json.dumps({
 def test_runtime_agent_type_factories_are_single_flight(tmp_path: Path) -> None:
     """并发首次解析必须返回同一 class，避免会话复用误判构造器已变化。"""
     result = _run_isolated(
-        r"""
+        r'''
 import json
 import sys
 import threading
@@ -220,8 +220,7 @@ sites.SitesHelper = type("SitesHelper", (), {})
 sites.__file__ = "<test-stub>"
 sys.modules["app.application.site.sites"] = sites
 
-from app.agent import web
-from app.api.endpoints import openai
+from app.api.endpoints import agent, openai
 
 def exercise(module, factory_name, getter_name):
     calls = []
@@ -253,7 +252,7 @@ def exercise(module, factory_name, getter_name):
     return len(calls), all(result is results[0] for result in results)
 
 web_calls, web_identity = exercise(
-    web,
+    agent,
     "_get_web_agent_type",
     "get_moviepilot_agent_type",
 )
@@ -268,7 +267,7 @@ print(json.dumps({
     "collecting_calls": collecting_calls,
     "collecting_identity": collecting_identity,
 }))
-""",
+''',
         tmp_path / "agent-type-single-flight",
     )
 
@@ -285,7 +284,7 @@ def test_persistent_protocol_agent_rebinds_stream_queue_without_stale_output(
 ) -> None:
     """稳定协议会话复用 Agent 时必须保留 handler identity 并切换请求队列。"""
     result = _run_isolated(
-        r"""
+        r'''
 import asyncio
 import json
 import sys
@@ -333,7 +332,7 @@ print(json.dumps({
     "second_empty": second_queue.empty(),
     "released": handler._event_queue is None,
 }))
-""",
+''',
         tmp_path / "protocol-stream-rebind",
     )
 
@@ -351,7 +350,7 @@ print(json.dumps({
 def test_protocol_routes_follow_agent_service_lifecycle(tmp_path: Path) -> None:
     """服务未运行时返回 503，运行态仍执行原有兼容协议响应流程。"""
     result = _run_isolated(
-        r"""
+        r'''
 import asyncio
 import json
 import socket
@@ -382,7 +381,7 @@ from app.runtime.config import settings
 
 settings.AI_AGENT_ENABLE = True
 runtime_config = ApiRuntimeConfig(
-    60, False, True,
+    False, 60, False, True,
     api_token=settings.API_TOKEN,
 )
 anthropic.get_api_runtime_config_snapshot = lambda: runtime_config
@@ -464,7 +463,7 @@ print(json.dumps({
     "available_anthropic": available[1].content[0].text,
     "network_attempts": network_attempts,
 }, ensure_ascii=False))
-""",
+''',
         tmp_path / "protocol-service-lifecycle",
     )
 

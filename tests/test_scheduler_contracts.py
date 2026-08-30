@@ -1,6 +1,7 @@
 """Scheduler 声明、catalog 与 execution state 测试。"""
 
 import asyncio
+
 from unittest.mock import MagicMock
 
 import pytest

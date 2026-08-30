@@ -5,6 +5,7 @@ from typing import Any
 
 
 _EXPORTS = {
+    "QQBot": ("app.modules.qqbot.qqbot", "QQBot"),
     "QQBotModule": ("app.modules.qqbot.module", "QQBotModule"),
 }
 
@@ -27,4 +28,4 @@ def __dir__() -> list[str]:
     return sorted({*globals(), *_EXPORTS})
 
 
-__all__ = ["QQBotModule"]
+__all__ = ["QQBot", "QQBotModule"]

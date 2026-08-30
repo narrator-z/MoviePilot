@@ -4,41 +4,24 @@ import asyncio
 import queue
 import threading
 import time
+from concurrent.futures import Future
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.application.transfer.workflow import (
-    TransferAdmission,
-    TransferPlanningInput,
-    TransferQueue,
-    TransferTask,
-)
+from app.application.transfer import TransferAdmission, TransferQueue, TransferTask
 from app.chain.transfer import TransferChain
 from app.foundation.singleton import Singleton
 from app.runtime.config import global_vars
 from app.schemas.file import FileItem
-from app.schemas.transfer import TransferInfo
 from app.startup.initializers import transfer as transfer_initializer
-
-
-def _planning_input(fileitem: FileItem) -> TransferPlanningInput:
-    """构造 worker 准入与 claim 投影使用的真实规划输入。"""
-    return TransferPlanningInput(
-        source_fileitem=fileitem.model_dump(mode="json"),
-        meta=None,
-        mediainfo=None,
-    )
 
 
 def _build_chain(*, transfer_threads: int = 0) -> TransferChain:
     """构造只包含后台线程生命周期字段的 TransferChain 测试骨架。"""
     chain = object.__new__(TransferChain)
-    chain.runtime_config = SimpleNamespace(
-        transfer_threads=transfer_threads,
-        transfer_task_timeout=0,
-    )
+    chain.runtime_config = SimpleNamespace(transfer_threads=transfer_threads)
     chain._queue = queue.Queue()
     chain._transfer_interval = 0.1
     chain._threads = []
@@ -50,64 +33,7 @@ def _build_chain(*, transfer_threads: int = 0) -> TransferChain:
     chain._closing = False
     chain._replay_thread = None
     chain._replay_stop_event = threading.Event()
-    chain._recovery_wakeup_event = threading.Event()
-    chain._lease_heartbeat_thread = None
-    chain._lease_heartbeat_stop_event = threading.Event()
-    chain._worker_owner_id = "worker-owner"
-    chain._owned_leases = {}
-    chain._queued_lease_tokens = set()
-    admissions = MagicMock()
-    admissions.admit.side_effect = lambda **kwargs: TransferAdmission(
-        task_id="admitted-task",
-        storage=kwargs["storage"],
-        src_path=kwargs["src_path"],
-        state="accepted",
-        created_at="2026-08-27 10:00:00",
-        updated_at="2026-08-27 10:00:00",
-        planning_input=kwargs["planning_input"],
-    )
-    admissions.claim_task.side_effect = lambda **kwargs: TransferAdmission(
-        task_id=kwargs["task_id"],
-        storage="local",
-        src_path="/downloads/test.mkv",
-        state="accepted",
-        created_at="2026-08-27 10:00:00",
-        updated_at="2026-08-27 10:00:00",
-        planning_input=_planning_input(FileItem(
-            storage="local",
-            path="/downloads/test.mkv",
-            type="file",
-        )),
-        lease_owner=kwargs["owner_id"],
-        lease_token=f"lease-{kwargs['task_id']}",
-        lease_expires_at="2026-08-27 10:02:00.000000",
-        heartbeat_at="2026-08-27 10:00:00.000000",
-        attempt_count=1,
-    )
-    admissions.abandon_unstarted.return_value = 1
-    admissions.release_claim.return_value = True
-    chain._transfer_admissions = admissions
-    chain._TransferChain__ensure_lease_heartbeat_owner = MagicMock()
-    chain._TransferChain__ensure_recovery_scheduler = MagicMock()
     return chain
-
-
-def _claimed_admission(task: TransferTask, task_id: str) -> TransferAdmission:
-    """构造属于测试进程 owner 的有效 claim 投影。"""
-    return TransferAdmission(
-        task_id=task_id,
-        storage=task.fileitem.storage,
-        src_path=task.fileitem.path,
-        state="accepted",
-        created_at="2026-08-27 10:00:00",
-        updated_at="2026-08-27 10:00:00",
-        planning_input=_planning_input(task.fileitem),
-        lease_owner="worker-owner",
-        lease_token=f"lease-{task_id}",
-        lease_expires_at="2026-08-27 10:02:00.000000",
-        heartbeat_at="2026-08-27 10:00:00.000000",
-        attempt_count=1,
-    )
 
 
 def test_config_reload_replaces_worker_generation_and_keeps_accepting() -> None:
@@ -244,29 +170,33 @@ def test_close_workers_lock_wait_uses_the_same_timeout_budget() -> None:
     assert chain.close_workers(timeout_seconds=1) is True
 
 
-def test_close_keeps_failure_notification_when_workers_do_not_converge() -> None:
-    """活跃整理线程超时后，失败通知 owner 必须继续供线程使用。"""
+def test_close_keeps_timer_dependencies_when_workers_do_not_converge() -> None:
+    """活跃整理线程超时后，通知和重试 owner 必须继续供线程使用。"""
     chain = _build_chain()
     chain.close_workers = MagicMock(return_value=False)
     chain.failure_notification_aggregator = MagicMock()
+    chain.retry_scheduler = MagicMock(close=AsyncMock())
 
     completed = asyncio.run(chain.close(timeout_seconds=0.01))
 
     assert completed is False
     chain.close_workers.assert_called_once_with(0.01)
     chain.failure_notification_aggregator.close.assert_not_called()
+    chain.retry_scheduler.close.assert_not_awaited()
 
 
-def test_close_releases_failure_notification_after_workers_converge() -> None:
-    """worker 和回放退出后，整理链应刷新并关闭失败通知 owner。"""
+def test_close_releases_timer_dependencies_after_workers_converge() -> None:
+    """worker 和回放退出后，整理链应继续刷新通知并关闭 AI 重试。"""
     chain = _build_chain()
     chain.close_workers = MagicMock(return_value=True)
     chain.failure_notification_aggregator = MagicMock()
+    chain.retry_scheduler = MagicMock(close=AsyncMock())
 
     completed = asyncio.run(chain.close(timeout_seconds=0.01))
 
     assert completed is True
     chain.failure_notification_aggregator.close.assert_called_once_with()
+    chain.retry_scheduler.close.assert_awaited_once_with()
 
 
 def test_stop_transfer_runtime_does_not_construct_chain(monkeypatch) -> None:
@@ -343,6 +273,49 @@ def test_constructor_failure_publishes_started_worker_to_cleanup(monkeypatch) ->
         transfer_initializer.stop_transfer_runtime(timeout_seconds=1)
     ) is True
     assert workers[0].is_alive() is False
+
+
+def test_failed_retry_schedule_future_error_is_observed() -> None:
+    """跨线程调度协程的延迟异常必须被取回并写入日志。"""
+    future: Future[None] = Future()
+    future.set_exception(RuntimeError("scheduler closed"))
+
+    with patch("app.chain.transfer.logger.error") as log_error:
+        TransferChain._observe_failed_retry_schedule(future)
+
+    log_error.assert_called_once()
+    assert "scheduler closed" in log_error.call_args.args[0]
+
+
+def test_failed_retry_schedule_registers_future_observer(monkeypatch) -> None:
+    """整理线程提交 AI 重试后应让 Future 持续连接到异常观察回调。"""
+    chain = _build_chain()
+
+    async def schedule_retry(_history_id: int, *, group_key: str) -> None:
+        """提供不会实际执行的调度协程，供跨线程提交边界检查。"""
+
+    chain.retry_scheduler = MagicMock(schedule_retry=schedule_retry)
+    future = MagicMock(spec=Future)
+    event_loop = MagicMock()
+    event_loop.is_running.return_value = True
+    event_loop.is_closed.return_value = False
+    monkeypatch.setattr(global_vars, "CURRENT_EVENT_LOOP", event_loop)
+
+    def submit(coroutine, loop):
+        """关闭测试协程并返回可检查的并发 Future。"""
+        assert loop is event_loop
+        coroutine.close()
+        return future
+
+    with patch(
+        "app.chain.transfer.asyncio.run_coroutine_threadsafe",
+        side_effect=submit,
+    ):
+        chain._schedule_failed_transfer_retry(42, "media:test")
+
+    future.add_done_callback.assert_called_once()
+    callback = future.add_done_callback.call_args.args[0]
+    assert callback is TransferChain._observe_failed_retry_schedule
 
 
 def test_worker_requeues_item_taken_during_shutdown(monkeypatch) -> None:
@@ -438,8 +411,8 @@ def test_worker_settles_progress_when_only_stop_sentinel_remains(monkeypatch) ->
         assert list(chain._queue.queue) == [chain._QUEUE_STOP_SENTINEL]
 
 
-def test_durable_task_identity_flows_to_unsettled_terminal_claim_release(monkeypatch) -> None:
-    """终态无原子回执时稳定身份必须用于释放 claim，pending 保持可恢复。"""
+def test_durable_task_identity_flows_from_queue_to_terminal_discard(monkeypatch) -> None:
+    """准入生成的稳定身份必须随队列任务到 worker 终态并准确注销。"""
     chain = _build_chain()
     chain.runtime_config.transfer_task_timeout = 0
     task = TransferTask(fileitem=FileItem(
@@ -459,13 +432,8 @@ def test_durable_task_identity_flows_to_unsettled_terminal_claim_release(monkeyp
         state="accepted",
         created_at="2026-08-27 10:00:00",
         updated_at="2026-08-27 10:00:00",
-        planning_input=_planning_input(task.fileitem),
     )
-    admissions.claim_task.return_value = _claimed_admission(
-        task,
-        "durable-task-id",
-    )
-    admissions.release_claim.side_effect = (
+    admissions.discard_task.side_effect = (
         lambda **_kwargs: discarded.set() or 1
     )
     chain._transfer_admissions = admissions
@@ -503,17 +471,7 @@ def test_durable_task_identity_flows_to_unsettled_terminal_claim_release(monkeyp
 
     assert worker.is_alive() is False
     assert task.admission_task_id == "durable-task-id"
-    admissions.claim_task.assert_called_once_with(
-        task_id="durable-task-id",
-        owner_id="worker-owner",
-        lease_seconds=120,
-    )
-    admissions.release_claim.assert_called_once_with(
-        task_id="durable-task-id",
-        lease_token="lease-durable-task-id",
-        error="整理终态未完成 durable 原子结算",
-    )
-    admissions.abandon_unstarted.assert_not_called()
+    admissions.discard_task.assert_called_once_with(task_id="durable-task-id")
 
 
 def test_claimed_task_prevents_progress_settlement_before_active_registration() -> None:
@@ -569,7 +527,6 @@ def test_claimed_task_prevents_progress_settlement_before_active_registration() 
 def test_replay_has_single_owner_and_close_waits_for_it() -> None:
     """重复回放只保留一个线程，关闭会通知并等待该线程退出。"""
     chain = _build_chain()
-    del chain._TransferChain__ensure_recovery_scheduler
     replay_started = threading.Event()
     replay_calls = []
 
@@ -591,364 +548,3 @@ def test_replay_has_single_owner_and_close_waits_for_it() -> None:
     assert chain.close_workers(timeout_seconds=1) is True
     assert replay_thread.is_alive() is False
     assert chain._replay_thread is None
-
-
-def test_recovered_worker_reuses_claimed_token_without_second_claim(
-        monkeypatch,
-) -> None:
-    """恢复任务携带 token 入队后，普通 worker 必须直接执行而非二次 claim。"""
-    chain = _build_chain()
-    task = TransferTask(fileitem=FileItem(
-        storage="local",
-        path="/downloads/recovered.mkv",
-        type="file",
-        name="recovered.mkv",
-        basename="recovered",
-        extension="mkv",
-    ))
-    task.bind_admission_task_id("recovered-task")
-    task.bind_execution_lease(
-        owner_id="worker-owner",
-        lease_token="lease-recovered-task",
-    )
-    chain._owned_leases = {
-        "recovered-task": ("lease-recovered-task", time.monotonic() + 120)
-    }
-    chain.jobview = MagicMock()
-    chain.jobview.pending_total.return_value = 1
-    chain._finish_scrape_batch_task = MagicMock()
-    chain._progress = MagicMock()
-    chain._active_tasks = 0
-    chain._processed_num = 0
-    chain._fail_num = 0
-    chain._total_num = 0
-    chain._transfer_admissions.release_claim.return_value = True
-    stop_event = threading.Event()
-
-    def complete_recovery(*, task, callback):
-        """模拟恢复任务成功提交检查点并让 worker 在本项后退出。"""
-        del callback
-        task.bind_plan_checkpoint(MagicMock())
-        stop_event.set()
-        return True, ""
-
-    chain._TransferChain__handle_transfer = complete_recovery
-    chain._queue.put(TransferQueue(task=task))
-    monkeypatch.setattr(global_vars, "STOP_EVENT", threading.Event())
-
-    worker = threading.Thread(
-        target=chain._TransferChain__start_transfer,
-        args=(stop_event,),
-        daemon=True,
-    )
-    worker.start()
-    worker.join(timeout=1)
-
-    assert worker.is_alive() is False
-    chain._transfer_admissions.claim_task.assert_not_called()
-    chain._transfer_admissions.release_claim.assert_called_once_with(
-        task_id="recovered-task",
-        lease_token="lease-recovered-task",
-        error="整理终态未完成 durable 原子结算",
-    )
-    chain._transfer_admissions.abandon_unstarted.assert_not_called()
-
-
-def test_heartbeat_refreshes_current_token_and_forgets_lost_lease() -> None:
-    """heartbeat 成功应刷新本地期限，CAS 拒绝后必须立即停止本地推进资格。"""
-    chain = _build_chain()
-    task = TransferTask(fileitem=FileItem(
-        storage="local",
-        path="/downloads/heartbeat.mkv",
-        type="file",
-    ))
-    current = _claimed_admission(task, "heartbeat-task")
-    initial_deadline = time.monotonic() + 1
-    chain._owned_leases = {
-        "heartbeat-task": ("lease-heartbeat-task", initial_deadline)
-    }
-    chain._transfer_admissions.heartbeat.return_value = current
-
-    chain._TransferChain__heartbeat_owned_leases()
-
-    assert chain._owned_leases["heartbeat-task"][1] > initial_deadline
-    chain._transfer_admissions.heartbeat.return_value = None
-
-    chain._TransferChain__heartbeat_owned_leases()
-
-    assert "heartbeat-task" not in chain._owned_leases
-
-
-def test_close_timeout_keeps_heartbeat_alive_until_blocked_worker_converges() -> None:
-    """阻塞 worker 未退出时关闭不得停止 heartbeat 或允许租约过期接管。"""
-    chain = _build_chain()
-    worker_release = threading.Event()
-    worker = threading.Thread(
-        target=worker_release.wait,
-        name="transfer-blocked-owner",
-        daemon=True,
-    )
-    heartbeat = threading.Thread(
-        target=chain._lease_heartbeat_stop_event.wait,
-        name="transfer-heartbeat-owner",
-        daemon=True,
-    )
-    chain._threads = [worker]
-    chain._lease_heartbeat_thread = heartbeat
-    chain._owned_leases = {
-        "blocked-task": ("blocked-token", time.monotonic() + 120)
-    }
-    worker.start()
-    heartbeat.start()
-
-    assert chain.close_workers(timeout_seconds=0.01) is False
-    assert heartbeat.is_alive() is True
-    assert chain._lease_heartbeat_stop_event.is_set() is False
-
-    worker_release.set()
-    assert chain.close_workers(timeout_seconds=1) is True
-    assert worker.is_alive() is False
-    assert heartbeat.is_alive() is False
-    chain._transfer_admissions.release_claim.assert_called_once_with(
-        task_id="blocked-task",
-        lease_token="blocked-token",
-        error="整理宿主关闭，释放未结算任务租约",
-    )
-
-
-def test_worker_reports_failed_settlement_without_skipping_queue_bookkeeping(
-        monkeypatch,
-) -> None:
-    """终态 CAS=0 必须计为失败，同时仍完成 task_done 与 active 归零。"""
-    chain = _build_chain()
-    task = TransferTask(fileitem=FileItem(
-        storage="local",
-        path="/downloads/stale.mkv",
-        type="file",
-        name="stale.mkv",
-        basename="stale",
-        extension="mkv",
-    ))
-    chain.jobview = MagicMock()
-    chain.jobview.add_task.return_value = True
-    chain.jobview.pending_total.return_value = 1
-    chain._register_scrape_batch_task = MagicMock()
-    chain._finish_scrape_batch_task = MagicMock()
-    chain._progress = MagicMock()
-    chain._active_tasks = 0
-    chain._processed_num = 0
-    chain._fail_num = 0
-    chain._total_num = 0
-    chain._transfer_admissions.release_claim.return_value = False
-    chain._TransferChain__settle_transfer_progress_if_idle = MagicMock()
-    stop_event = threading.Event()
-
-    def complete_with_stale_lease(*, task, callback):
-        """模拟文件副作用完成后终态 token 已被新 owner 接管。"""
-        del callback
-        task.bind_plan_checkpoint(MagicMock())
-        stop_event.set()
-        return True, ""
-
-    chain._TransferChain__handle_transfer = complete_with_stale_lease
-    monkeypatch.setattr(global_vars, "STOP_EVENT", threading.Event())
-    assert chain.put_to_queue(task) is True
-
-    worker = threading.Thread(
-        target=chain._TransferChain__start_transfer,
-        args=(stop_event,),
-        daemon=True,
-    )
-    worker.start()
-    worker.join(timeout=1)
-
-    assert worker.is_alive() is False
-    assert chain._active_tasks == 0
-    assert chain._fail_num == 1
-    assert chain._queue.unfinished_tasks == 0
-
-
-def test_failed_claim_release_waits_for_fixed_recovery_poll() -> None:
-    """失败释放不得即时唤醒恢复线程，避免确定性错误形成热重试。"""
-    chain = _build_chain()
-    del chain._TransferChain__ensure_recovery_scheduler
-    chain._RECOVERY_POLL_INTERVAL_SECONDS = 0.05
-    chain._TransferChain__replay_pending = MagicMock()
-    task = TransferTask(fileitem=FileItem(
-        storage="local",
-        path="/downloads/retry-later.mkv",
-        type="file",
-    ))
-    task.bind_admission_task_id("retry-later")
-    task.bind_execution_lease(
-        owner_id="worker-owner",
-        lease_token="retry-token",
-    )
-    chain._owned_leases = {
-        "retry-later": ("retry-token", time.monotonic() + 120)
-    }
-
-    assert chain._TransferChain__release_task_claim(
-        task,
-        error="planning failed",
-    ) is True
-
-    assert chain._recovery_wakeup_event.is_set() is False
-    assert chain._replay_thread is not None
-    time.sleep(0.01)
-    chain._TransferChain__replay_pending.assert_not_called()
-    deadline = time.monotonic() + 0.5
-    while (
-            not chain._TransferChain__replay_pending.called
-            and time.monotonic() < deadline
-    ):
-        time.sleep(0.01)
-    chain._TransferChain__replay_pending.assert_called()
-    chain._transfer_admissions.release_claim.assert_called_once_with(
-        task_id="retry-later",
-        lease_token="retry-token",
-        error="planning failed",
-    )
-    assert chain.close_workers(timeout_seconds=1) is True
-
-
-def test_worker_fenced_releases_lost_lease_and_completes_queue_bookkeeping(
-        monkeypatch,
-) -> None:
-    """本地租约失效时仍尝试 token CAS release，并完整结算内存队列。"""
-    chain = _build_chain()
-    task = TransferTask(fileitem=FileItem(
-        storage="local",
-        path="/downloads/lost-lease.mkv",
-        type="file",
-    ))
-    task.bind_admission_task_id("lost-lease")
-    task.bind_execution_lease(
-        owner_id="worker-owner",
-        lease_token="lost-token",
-    )
-    chain.jobview = MagicMock()
-    chain._finish_scrape_batch_task = MagicMock()
-    chain._TransferChain__settle_transfer_progress_if_idle = MagicMock()
-    stop_event = threading.Event()
-    chain._transfer_admissions.release_claim.side_effect = (
-        lambda **_kwargs: stop_event.set() or True
-    )
-    chain._queue.put(TransferQueue(task=task))
-    monkeypatch.setattr(global_vars, "STOP_EVENT", threading.Event())
-
-    worker = threading.Thread(
-        target=chain._TransferChain__start_transfer,
-        args=(stop_event,),
-        daemon=True,
-    )
-    worker.start()
-    worker.join(timeout=1)
-
-    assert worker.is_alive() is False
-    chain._transfer_admissions.release_claim.assert_called_once_with(
-        task_id="lost-lease",
-        lease_token="lost-token",
-        error="整理任务租约已经失效：lost-lease",
-    )
-    assert chain._queue.unfinished_tasks == 0
-    assert chain._recovery_wakeup_event.is_set() is False
-
-
-def test_callback_without_terminal_settlement_releases_claim_and_counts_failure(
-        monkeypatch,
-) -> None:
-    """回调未给出原子结算回执时必须保留 pending、释放 claim 并计失败。"""
-    chain = _build_chain()
-    task = TransferTask(fileitem=FileItem(
-        storage="local",
-        path="/downloads/fenced-success.mkv",
-        type="file",
-        name="fenced-success.mkv",
-    ))
-    chain.jobview = MagicMock()
-    chain.jobview.add_task.return_value = True
-    chain.jobview.pending_total.return_value = 1
-    chain._register_scrape_batch_task = MagicMock()
-    chain._finish_scrape_batch_task = MagicMock()
-    chain._progress = MagicMock()
-    chain._active_tasks = 0
-    chain._processed_num = 0
-    chain._fail_num = 0
-    chain._total_num = 0
-    chain._transfer_admissions.release_claim.return_value = False
-    chain._TransferChain__settle_transfer_progress_if_idle = MagicMock()
-    success_callback = MagicMock(return_value=(True, ""))
-    chain._TransferChain__default_callback = success_callback
-    stop_event = threading.Event()
-
-    def complete_with_success(*, task, callback):
-        """模拟文件成功后进入受 durable 终态保护的回调。"""
-        task.bind_plan_checkpoint(MagicMock())
-        stop_event.set()
-        return callback(
-            task,
-            TransferInfo(success=True, fileitem=task.fileitem),
-        )
-
-    chain._TransferChain__handle_transfer = complete_with_success
-    monkeypatch.setattr(global_vars, "STOP_EVENT", threading.Event())
-    assert chain.put_to_queue(task) is True
-
-    worker = threading.Thread(
-        target=chain._TransferChain__start_transfer,
-        args=(stop_event,),
-        daemon=True,
-    )
-    worker.start()
-    worker.join(timeout=1)
-
-    assert worker.is_alive() is False
-    success_callback.assert_called_once()
-    chain._transfer_admissions.release_claim.assert_called_once_with(
-        task_id="admitted-task",
-        lease_token="lease-admitted-task",
-        error="整理终态未完成 durable 原子结算",
-    )
-    chain._transfer_admissions.abandon_unstarted.assert_not_called()
-    assert chain._fail_num == 1
-    assert chain._queue.unfinished_tasks == 0
-
-
-def test_close_release_db_block_respects_deadline_and_keeps_heartbeat() -> None:
-    """关闭租约释放被数据库阻塞时应按预算返回，并继续 heartbeat。"""
-    chain = _build_chain()
-    release_started = threading.Event()
-    release_db = threading.Event()
-    heartbeat = threading.Thread(
-        target=chain._lease_heartbeat_stop_event.wait,
-        name="transfer-heartbeat-release-test",
-        daemon=True,
-    )
-    chain._lease_heartbeat_thread = heartbeat
-    chain._owned_leases = {
-        "blocked-release": ("blocked-token", time.monotonic() + 120)
-    }
-
-    def block_release(**_kwargs):
-        """模拟数据库锁住 release_claim，直到测试显式放行。"""
-        release_started.set()
-        release_db.wait()
-        return True
-
-    chain._transfer_admissions.release_claim.side_effect = block_release
-    heartbeat.start()
-
-    started_at = time.monotonic()
-    assert chain.close_workers(timeout_seconds=0.01) is False
-    assert time.monotonic() - started_at < 0.5
-    assert release_started.is_set()
-    assert heartbeat.is_alive() is True
-    assert chain._lease_heartbeat_stop_event.is_set() is False
-    assert chain._lease_release_thread is not None
-    assert chain._lease_release_thread.is_alive() is True
-
-    release_db.set()
-    assert chain.close_workers(timeout_seconds=1) is True
-    assert heartbeat.is_alive() is False
-    assert chain._lease_release_thread is None

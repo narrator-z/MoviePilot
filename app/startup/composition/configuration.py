@@ -1,102 +1,15 @@
 """把可变部署设置转换成宿主各领域使用的类型化配置快照。"""
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, cast
 
 from app.application.configuration import (
     ApiRuntimeConfig,
     ChainRuntimeConfig,
-    RuntimeConfiguration,
-    RuntimeSettingsService,
     SchedulerRuntimeConfig,
-    SystemConfigService,
     TokenRuntimeConfig,
-    configure_runtime_configuration,
-    configure_runtime_settings,
-    configure_system_config,
-    configure_token_runtime_config,
-    reset_configuration_services,
 )
-from app.application.database import AsyncDatabaseExecutor
-from app.application.security.userconfig import (
-    UserConfigurationService,
-    configure_user_configuration,
-    reset_user_configuration,
-)
-from app.db.adapters.configuration import TransactionalUserConfigurationRepository
-from app.db.oper.systemconfig import SystemConfigOper
-from app.db.session import SessionFactory
 from app.runtime.config import Settings
-from app.runtime.settings import (
-    configure_runtime_setting_provider,
-    configure_runtime_setting_updater,
-    reset_runtime_setting_ports,
-)
 from app.schemas.types import MediaType
-
-
-@dataclass(frozen=True, slots=True)
-class ConfigurationComposition:
-    """保存启动阶段加载完成的配置服务与类型化快照门面。"""
-
-    system_config: SystemConfigOper
-    system_service: SystemConfigService
-    user_service: UserConfigurationService
-    runtime: RuntimeConfiguration
-    settings: RuntimeSettingsService
-
-
-async def compose_configuration(
-    *,
-    executor: AsyncDatabaseExecutor,
-    settings: Settings,
-) -> ConfigurationComposition:
-    """加载系统与用户配置快照，并在全部成功后发布配置服务。"""
-    system_config = cast(Callable[[], SystemConfigOper], SystemConfigOper)()
-    user_config = TransactionalUserConfigurationRepository(SessionFactory)
-    await executor.run(system_config.load_snapshot)
-    await executor.run(user_config.load_snapshot)
-    system_service = SystemConfigService(
-        repository=system_config,
-        async_executor=executor,
-    )
-    user_service = UserConfigurationService(
-        repository=user_config,
-        async_executor=executor,
-    )
-    return ConfigurationComposition(
-        system_config=system_config,
-        system_service=system_service,
-        user_service=user_service,
-        runtime=RuntimeConfiguration(
-            api=lambda: build_api_runtime_config(settings),
-            scheduler=lambda: build_scheduler_runtime_config(settings),
-            chain=lambda: build_chain_runtime_config(settings),
-        ),
-        settings=RuntimeSettingsService(settings),
-    )
-
-
-def publish_configuration(
-    composition: ConfigurationComposition,
-    settings: Settings,
-) -> None:
-    """发布 HostRuntime 使用的同一配置对象及兼容设置入口。"""
-    configure_system_config(composition.system_service)
-    configure_user_configuration(composition.user_service)
-    configure_runtime_configuration(composition.runtime)
-    configure_runtime_settings(composition.settings)
-    configure_runtime_setting_provider(lambda key: getattr(settings, key))
-    configure_runtime_setting_updater(composition.settings.update)
-    configure_token_runtime_config(lambda: build_token_runtime_config(settings))
-
-
-def reset_configuration() -> None:
-    """撤销当前 lifespan 发布的全部配置服务与 runtime 端口。"""
-    reset_runtime_setting_ports()
-    reset_user_configuration()
-    reset_configuration_services()
 
 
 def normalize_subscribe_rss_interval(value: object) -> int:
@@ -112,6 +25,7 @@ def normalize_subscribe_rss_interval(value: object) -> int:
 def build_api_runtime_config(settings: Settings) -> ApiRuntimeConfig:
     """从可热更新的部署设置构建一次 API 请求配置快照。"""
     return ApiRuntimeConfig(
+        advanced_mode=settings.ADVANCED_MODE,
         access_token_expire_minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES,
         btrfs_fsid_dedup=settings.BTRFS_FSID_DEDUP,
         ai_agent_enable=settings.AI_AGENT_ENABLE,

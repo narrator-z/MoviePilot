@@ -56,24 +56,6 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         introduced="v3.0.0",
         owner="application",
     ),
-    "app.application.chain.durable_events": ModuleAlias(
-        target="app.application.chain.events",
-        replacement="app.application.chain.events",
-        introduced="v3.0.0",
-        owner="application",
-    ),
-    "app.application.transfer_execution": ModuleAlias(
-        target="app.application.transfer.execution",
-        replacement="app.application.transfer.execution",
-        introduced="v3.0.0",
-        owner="application",
-    ),
-    "app.runtime.managed_resources": ModuleAlias(
-        target="app.runtime.resources",
-        replacement="app.runtime.resources",
-        introduced="v3.0.0",
-        owner="runtime",
-    ),
     "app.db.agentchat_oper": ModuleAlias(
         target="app.db.oper.agentchat",
         replacement="app.db.oper.agentchat",
@@ -123,10 +105,10 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         owner="db",
     ),
     "app.db.site_oper": ModuleAlias(
-        target="app.sdk._legacy.site",
-        replacement="app.application.site.contract.SiteRepository",
+        target="app.db.oper.site",
+        replacement="app.db.oper.site",
         introduced="v3.0.0",
-        owner="sdk",
+        owner="db",
     ),
     "app.db.subscribe_oper": ModuleAlias(
         target="app.sdk._legacy.subscribe",
@@ -135,10 +117,10 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         owner="sdk",
     ),
     "app.db.subscribehistory_oper": ModuleAlias(
-        target="app.sdk._legacy.subscribe",
-        replacement="app.application.subscription.contract.SubscriptionHistoryQueryPort",
+        target="app.db.oper.subscribehistory",
+        replacement="app.db.oper.subscribehistory",
         introduced="v3.0.0",
-        owner="sdk",
+        owner="db",
     ),
     "app.db.systemconfig_oper": ModuleAlias(
         target="app.db.oper.systemconfig",
@@ -153,10 +135,10 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         owner="sdk",
     ),
     "app.db.transferpending_oper": ModuleAlias(
-        target="app.sdk._legacy.transferpending",
-        replacement="app.application.transfer.workflow",
+        target="app.db.oper.transferpending",
+        replacement="app.db.oper.transferpending",
         introduced="v3.0.0",
-        owner="sdk",
+        owner="db",
     ),
     "app.db.user_oper": ModuleAlias(
         target="app.sdk._legacy.user",
@@ -171,10 +153,10 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         owner="db",
     ),
     "app.db.workflow_oper": ModuleAlias(
-        target="app.sdk._legacy.workflow",
-        replacement="app.application.workflow.WorkflowExecutionPort",
+        target="app.db.oper.workflow",
+        replacement="app.db.oper.workflow",
         introduced="v3.0.0",
-        owner="sdk",
+        owner="db",
     ),
     "app.utils.crypto": ModuleAlias(
         target="app.foundation.crypto",
@@ -296,12 +278,8 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         introduced="v3.0.0",
         owner="runtime",
     ),
-    "app.utils.media": ModuleAlias(
-        target="app.sdk.media",
-        replacement="app.sdk.media",
-        introduced="v3.0.0",
-        owner="sdk",
-    ),
+    # fork: app/utils/media.py 是 fork 物理文件（含 build_filename_mediainfo 等
+    # fork 私有工具），v3 合并后保留物理文件，不再经别名转发到 app.sdk.media
     "app.utils.mixins": ModuleAlias(
         target="app.runtime.reload",
         replacement="app.runtime.reload",
@@ -441,13 +419,13 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         owner="domain",
     ),
     "app.core.module": ModuleAlias(
-        target="app.runtime.extensions.module.manager",
+        target="app.runtime.extensions.module_manager",
         replacement="app.sdk.plugins",
         introduced="v3.0.0",
         owner="runtime",
     ),
     "app.core.plugin": ModuleAlias(
-        target="app.runtime.extensions.plugin.manager",
+        target="app.runtime.extensions.plugin_manager",
         replacement="app.sdk.plugins",
         introduced="v3.0.0",
         owner="runtime",
@@ -619,8 +597,7 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         introduced="v3.0.0", owner="runtime",
     ),
     "app.helper.torrent": ModuleAlias(
-        target="app.application.torrent.download",
-        replacement="app.application.torrent.download",
+        target="app.application.torrent", replacement="app.application.torrent",
         introduced="v3.0.0", owner="application",
     ),
     "app.helper.transferhistory": ModuleAlias(
@@ -641,10 +618,8 @@ MODULE_ALIASES: Dict[str, ModuleAlias] = {
         introduced="v3.0.0", owner="application",
     ),
     "app.helper.llm": ModuleAlias(
-        target="app.agent.llm.helper",
-        replacement="app.agent.llm.helper",
-        introduced="v3.0.0",
-        owner="agent",
+        target="app.agent.llm", replacement="app.agent.llm",
+        introduced="v3.0.0", owner="agent", is_package=True,
     ),
 }
 
@@ -660,7 +635,9 @@ PACKAGE_ALIASES: Dict[str, ModuleAlias] = {
 }
 
 # 旧父包完全迁空后才登记；迁移中的物理父包继续由 PathFinder 处理。
-VIRTUAL_PACKAGES: Set[str] = {"app.core", "app.helper", "app.utils"}
+# fork: app.utils 目录含物理 media.py（fork 私有工具），保持由 PathFinder 加载，
+# 不再登记为虚拟包；其余 app.core/app.helper 在 v3 已无物理目录，仍为虚拟包。
+VIRTUAL_PACKAGES: Set[str] = {"app.core", "app.helper"}
 
 # 旧包 __init__.py 曾公开的符号在这里显式声明，禁止模糊转发。
 PACKAGE_EXPORTS: Dict[str, Dict[str, SymbolAlias]] = {
@@ -777,156 +754,16 @@ _MESSAGE_NOTIFICATION_SYMBOL_ALIASES: Dict[str, SymbolAlias] = {
 }
 
 SYMBOL_ALIASES: Dict[str, Dict[str, SymbolAlias]] = {
-    "app.agent": {
-        "AgentChain": SymbolAlias(
-            target_module="app.chain.agent",
-            target_name="AgentChain",
-            replacement="app.chain.agent.AgentChain",
-        ),
-        "AgentManager": SymbolAlias(
-            target_module="app.agent.manager",
-            target_name="AgentManager",
-            replacement="app.agent.manager.AgentManager",
-        ),
-        "HEARTBEAT_SESSION_PREFIX": SymbolAlias(
-            target_module="app.agent.orchestrator",
-            target_name="HEARTBEAT_SESSION_PREFIX",
-            replacement="app.agent.orchestrator.HEARTBEAT_SESSION_PREFIX",
-        ),
-        "MoviePilotAgent": SymbolAlias(
-            target_module="app.agent.orchestrator",
-            target_name="MoviePilotAgent",
-            replacement="app.agent.orchestrator.MoviePilotAgent",
-        ),
-        "ReplyMode": SymbolAlias(
-            target_module="app.agent.contracts",
-            target_name="ReplyMode",
-            replacement="app.agent.contracts.ReplyMode",
-        ),
-        "UNSUPPORTED_IMAGE_INPUT_MESSAGE": SymbolAlias(
-            target_module="app.agent.orchestrator",
-            target_name="UNSUPPORTED_IMAGE_INPUT_MESSAGE",
-            replacement="app.agent.orchestrator.UNSUPPORTED_IMAGE_INPUT_MESSAGE",
-        ),
-        "agent_manager": SymbolAlias(
-            target_module="app.agent.manager",
-            target_name="agent_manager",
-            replacement="app.agent.manager.agent_manager",
-        ),
-    },
-    "app.agent.llm": {
-        "LLMHelper": SymbolAlias(
-            target_module="app.agent.llm.helper",
-            target_name="LLMHelper",
-            replacement="app.agent.llm.helper.LLMHelper",
-        ),
-    },
-    "app.chain": {
-        "ChainBase": SymbolAlias(
-            target_module="app.sdk.chain",
-            target_name="ChainBase",
-            replacement="app.sdk.chain.ChainBase",
-        ),
-    },
-    "app.db.oper": {
-        "SiteOper": SymbolAlias(
-            target_module="app.sdk._legacy.site",
-            target_name="SiteOper",
-            replacement="app.application.site.contract.SiteRepository",
-        ),
-        "SubscribeHistoryOper": SymbolAlias(
-            target_module="app.sdk._legacy.subscribe",
-            target_name="SubscribeHistoryOper",
-            replacement=(
-                "app.application.subscription.contract.SubscriptionHistoryQueryPort"
-            ),
-        ),
-        "SubscribeOper": SymbolAlias(
-            target_module="app.sdk._legacy.subscribe",
-            target_name="SubscribeOper",
-            replacement="app.application.subscription.contract.SubscriptionRepository",
-        ),
-        "TransferHistoryOper": SymbolAlias(
-            target_module="app.sdk._legacy.history",
-            target_name="TransferHistoryOper",
-            replacement="app.application.history.TransferHistoryRepository",
-        ),
-        "WorkflowOper": SymbolAlias(
-            target_module="app.sdk._legacy.workflow",
-            target_name="WorkflowOper",
-            replacement="app.application.workflow.WorkflowExecutionPort",
-        ),
-    },
-    "app.workflow": {
-        "WorkFlowManager": SymbolAlias(
-            target_module="app.workflow",
-            target_name="WorkflowManager",
-            replacement="app.workflow.WorkflowManager",
-        ),
-    },
-    "app.application.transfer": {
-        name: SymbolAlias(
-            target_module="app.sdk._legacy.transfer",
-            target_name=name,
-            replacement=f"app.application.transfer.workflow.{name}",
-        )
-        for name in ("TransferTask", "TransferQueue")
-    },
     "app.agent.orchestrator": {
-        "AGENT_SESSION_QUEUE_MAX_SIZE": SymbolAlias(
-            target_module="app.agent.session",
-            target_name="AGENT_SESSION_QUEUE_MAX_SIZE",
-            replacement="app.agent.session.AGENT_SESSION_QUEUE_MAX_SIZE",
-        ),
         "AgentChain": SymbolAlias(
             target_module="app.chain.agent",
             target_name="AgentChain",
             replacement="app.chain.agent.AgentChain",
-        ),
-        "AgentManager": SymbolAlias(
-            target_module="app.agent.manager",
-            target_name="AgentManager",
-            replacement="app.agent.manager.AgentManager",
-        ),
-        "AgentManagerQueueFullError": SymbolAlias(
-            target_module="app.agent.session",
-            target_name="AgentManagerQueueFullError",
-            replacement="app.agent.session.AgentManagerQueueFullError",
-        ),
-        "AgentManagerUnavailableError": SymbolAlias(
-            target_module="app.agent.session",
-            target_name="AgentManagerUnavailableError",
-            replacement="app.agent.session.AgentManagerUnavailableError",
         ),
         "ReplyMode": SymbolAlias(
             target_module="app.schemas.types",
             target_name="ReplyMode",
             replacement="app.schemas.types.ReplyMode",
-        ),
-        "_MessageTask": SymbolAlias(
-            target_module="app.agent.session",
-            target_name="_MessageTask",
-            replacement="app.agent.session._MessageTask",
-        ),
-        "_async_finish_processing_status": SymbolAlias(
-            target_module="app.agent.session",
-            target_name="_async_finish_processing_status",
-            replacement="app.agent.session._async_finish_processing_status",
-        ),
-        "_async_start_processing_status": SymbolAlias(
-            target_module="app.agent.session",
-            target_name="_async_start_processing_status",
-            replacement="app.agent.session._async_start_processing_status",
-        ),
-        "_finish_processing_status": SymbolAlias(
-            target_module="app.agent.session",
-            target_name="_finish_processing_status",
-            replacement="app.agent.session._finish_processing_status",
-        ),
-        "agent_manager": SymbolAlias(
-            target_module="app.agent.manager",
-            target_name="agent_manager",
-            replacement="app.agent.manager.agent_manager",
         ),
     },
     # 刮削能力从 MediaChain 拆出为独立 ScrapingChain 后，
@@ -967,7 +804,7 @@ SYMBOL_ALIASES: Dict[str, Dict[str, SymbolAlias]] = {
             name: SymbolAlias(
                 target_module="app.sdk._legacy.transfer",
                 target_name=name,
-                replacement=f"app.application.transfer.workflow.{name}",
+                replacement=f"app.application.transfer.{name}",
             )
             for name in ("TransferTask", "TransferQueue")
         },
@@ -978,7 +815,7 @@ SYMBOL_ALIASES: Dict[str, Dict[str, SymbolAlias]] = {
             name: SymbolAlias(
                 target_module="app.sdk._legacy.transfer",
                 target_name=name,
-                replacement=f"app.application.transfer.workflow.{name}",
+                replacement=f"app.application.transfer.{name}",
             )
             for name in ("TransferTask", "TransferQueue")
         },

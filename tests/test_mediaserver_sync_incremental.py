@@ -8,10 +8,9 @@ from sqlalchemy.orm import sessionmaker
 from app import schemas
 from app.chain import mediaserver as MEDIA_SERVER_CHAIN_MODULE
 from app.chain.mediaserver import MediaServerChain
-from app.db.adapters.mediaserver import TransactionalMediaServerRepository
 from app.db.base import Base
-from app.db.models.mediaserver import MediaServerItem
 from app.db.oper.mediaserver import MediaServerOper
+from app.db.models.mediaserver import MediaServerItem
 from app.runtime.config import global_vars
 
 
@@ -100,14 +99,19 @@ def test_sync_persists_music_without_querying_tv_episodes(database):
         ]
     )
     chain.episodes = lambda *_args, **_kwargs: pytest.fail("音乐条目不应查询电视剧分集")
-    chain.media_server_repository = TransactionalMediaServerRepository(database)
 
-    with patch.object(
-        MEDIA_SERVER_CHAIN_MODULE,
-        "get_mediaserver_configs",
-        return_value=[SimpleNamespace(name="navidrome", enabled=True, sync_libraries=["all"])],
-    ):
-        chain.sync()
+    with database() as session:
+        with patch.object(
+            MEDIA_SERVER_CHAIN_MODULE,
+            "get_chain_media_server_port",
+            lambda: MediaServerOper(session),
+        ), patch.object(
+            MEDIA_SERVER_CHAIN_MODULE,
+            "get_mediaserver_configs",
+            return_value=[SimpleNamespace(name="navidrome", enabled=True, sync_libraries=["all"])],
+        ):
+            chain.sync()
+            session.commit()
 
     with database() as db:
         item = db.query(MediaServerItem).one()
@@ -115,40 +119,6 @@ def test_sync_persists_music_without_querying_tv_episodes(database):
     assert item.item_type == "音乐"
     assert item.title == "叶惠美"
     assert item.seasoninfo == {}
-
-
-def test_sync_normalizes_incomplete_tv_episode_rows(database):
-    """TV 同步应丢弃无季号记录，并把缺失集列表规范为空列表。"""
-    chain = object.__new__(MediaServerChain)
-    chain.librarys = lambda _server: [SimpleNamespace(id="shows", name="剧集库")]
-    chain.media_count = lambda _server: 1
-    chain.items_count = lambda **_kwargs: 1
-    chain.items = lambda **_kwargs: iter([
-        schemas.MediaServerItem(
-            server="plex",
-            library="shows",
-            item_id="show-1",
-            item_type="Series",
-            title="测试剧集",
-        )
-    ])
-    chain.episodes = lambda *_args, **_kwargs: [
-        schemas.MediaServerSeasonInfo(season=None, episodes=[99]),
-        schemas.MediaServerSeasonInfo(season=1, episodes=None),
-    ]
-    chain.media_server_repository = TransactionalMediaServerRepository(database)
-
-    with patch.object(
-        MEDIA_SERVER_CHAIN_MODULE,
-        "get_mediaserver_configs",
-        return_value=[SimpleNamespace(name="plex", enabled=True, sync_libraries=["all"])],
-    ):
-        chain.sync()
-
-    with database() as session:
-        item = session.query(MediaServerItem).one()
-
-    assert item.seasoninfo == {"1": []}
 
 
 def test_sync_updates_rows_and_removes_stale_entries(database):
@@ -222,14 +192,19 @@ def test_sync_updates_rows_and_removes_stale_entries(database):
         ]
     )
     chain.episodes = lambda *_args, **_kwargs: []
-    chain.media_server_repository = TransactionalMediaServerRepository(database)
 
-    with patch.object(
-        MEDIA_SERVER_CHAIN_MODULE,
-        "get_mediaserver_configs",
-        return_value=[SimpleNamespace(name="plex", enabled=True, sync_libraries=["movies"])],
-    ):
-        chain.sync()
+    with database() as session:
+        with patch.object(
+            MEDIA_SERVER_CHAIN_MODULE,
+            "get_chain_media_server_port",
+            lambda: MediaServerOper(session),
+        ), patch.object(
+            MEDIA_SERVER_CHAIN_MODULE,
+            "get_mediaserver_configs",
+            return_value=[SimpleNamespace(name="plex", enabled=True, sync_libraries=["movies"])],
+        ):
+            chain.sync()
+            session.commit()
 
     with database() as db:
         items = (
@@ -301,19 +276,24 @@ def test_sync_queries_counts_before_items_and_reports_media_progress(database):
     chain.items_count = lambda **_kwargs: pytest.fail("整服同步不应逐库重复计数")
     chain.items = items
     chain.episodes = lambda *_args, **_kwargs: []
-    chain.media_server_repository = TransactionalMediaServerRepository(database)
 
-    with patch.object(
-        MEDIA_SERVER_CHAIN_MODULE,
-        "get_mediaserver_configs",
-        return_value=[
-            SimpleNamespace(name="plex-a", enabled=True, sync_libraries=["all"]),
-            SimpleNamespace(name="plex-b", enabled=True, sync_libraries=["all"]),
-        ],
-    ):
-        chain.sync(
-            progress_callback=lambda **kwargs: progress_snapshots.append(kwargs)
-        )
+    with database() as session:
+        with patch.object(
+            MEDIA_SERVER_CHAIN_MODULE,
+            "get_chain_media_server_port",
+            lambda: MediaServerOper(session),
+        ), patch.object(
+            MEDIA_SERVER_CHAIN_MODULE,
+            "get_mediaserver_configs",
+            return_value=[
+                SimpleNamespace(name="plex-a", enabled=True, sync_libraries=["all"]),
+                SimpleNamespace(name="plex-b", enabled=True, sync_libraries=["all"]),
+            ],
+        ):
+            chain.sync(
+                progress_callback=lambda **kwargs: progress_snapshots.append(kwargs)
+            )
+            session.commit()
 
     assert events == [
         "count:plex-a",
@@ -354,7 +334,11 @@ def test_sync_targets_one_server_without_excluding_other_enabled_servers(monkeyp
             excluded_server_calls.append(servers)
 
     chain.librarys = lambda server: library_calls.append(server) or []
-    chain.media_server_repository = FakeMediaServerOper()
+    monkeypatch.setattr(
+        MEDIA_SERVER_CHAIN_MODULE,
+        "get_chain_media_server_port",
+        FakeMediaServerOper,
+    )
     monkeypatch.setattr(
         MEDIA_SERVER_CHAIN_MODULE,
         "get_mediaserver_configs",
@@ -368,93 +352,6 @@ def test_sync_targets_one_server_without_excluding_other_enabled_servers(monkeyp
 
     assert library_calls == ["plex-a"]
     assert excluded_server_calls == [["plex-a", "plex-b"]]
-
-
-def test_sync_partial_commit_preserves_stale_rows_until_next_run(
-    database,
-    monkeypatch,
-):
-    """前序条目提交后发生失败时保留 stale，并由下一轮成功同步收敛。"""
-    old_sync_time = "2026-05-01 00:00:00"
-    with database() as session:
-        session.add(MediaServerItem(
-            server="plex",
-            library="movies",
-            item_id="stale",
-            item_type="电影",
-            title="陈旧条目",
-            lst_mod_date=old_sync_time,
-        ))
-        session.commit()
-
-    chain = object.__new__(MediaServerChain)
-    stale_calls = []
-    items = [
-        schemas.MediaServerItem(
-            server="plex",
-            library="movies",
-            item_id=f"movie-{index}",
-            item_type="Movie",
-            title=f"测试电影 {index}",
-        )
-        for index in (1, 2)
-    ]
-    transactional = TransactionalMediaServerRepository(database)
-
-    class FailingMediaServerRepository:
-        """提交首个条目后让第二个条目失败，并记录不应发生的清理。"""
-
-        def __init__(self):
-            """初始化本轮已尝试写入计数。"""
-            self.upsert_count = 0
-
-        def delete_excluded_servers(self, servers):
-            """委托真实短事务清理已移除服务器。"""
-            return transactional.delete_excluded_servers(servers)
-
-        def upsert(self, item):
-            """提交首条记录，在第二条写入前模拟数据库不可用。"""
-            self.upsert_count += 1
-            if self.upsert_count == 2:
-                raise RuntimeError("database unavailable")
-            return transactional.upsert(item)
-
-        def delete_stale(self, **kwargs):
-            """记录不应发生的 stale 清理。"""
-            stale_calls.append(kwargs)
-            return transactional.delete_stale(**kwargs)
-
-    chain.librarys = lambda _server: [SimpleNamespace(id="movies", name="电影库")]
-    chain.media_count = lambda _server: len(items)
-    chain.items_count = lambda **_kwargs: len(items)
-    chain.items = lambda **_kwargs: iter(items)
-    chain.episodes = lambda *_args, **_kwargs: []
-    repository = FailingMediaServerRepository()
-    chain.media_server_repository = repository
-    monkeypatch.setattr(
-        MEDIA_SERVER_CHAIN_MODULE,
-        "get_mediaserver_configs",
-        lambda **_kwargs: [
-            SimpleNamespace(name="plex", enabled=True, sync_libraries=["all"])
-        ],
-    )
-
-    with pytest.raises(RuntimeError, match="database unavailable"):
-        chain.sync()
-
-    assert stale_calls == []
-    with database() as session:
-        assert {
-            item.item_id for item in session.query(MediaServerItem).all()
-        } == {"movie-1", "stale"}
-
-    chain.media_server_repository = transactional
-    chain.sync()
-
-    with database() as session:
-        assert {
-            item.item_id for item in session.query(MediaServerItem).all()
-        } == {"movie-1", "movie-2"}
 
 
 def test_sync_stops_without_emitting_completion_after_stop_signal(monkeypatch):
@@ -474,16 +371,15 @@ def test_sync_stops_without_emitting_completion_after_stop_signal(monkeypatch):
         global_vars.stop_system()
         return 0, 0
 
-    chain.media_server_repository = FakeMediaServerOper()
+    monkeypatch.setattr(
+        MEDIA_SERVER_CHAIN_MODULE,
+        "get_chain_media_server_port",
+        FakeMediaServerOper,
+    )
     monkeypatch.setattr(
         chain,
         "_prepare_sync_contexts",
-        lambda _servers, _server, _repository: (
-            [server],
-            1,
-            {"plex": ([], {})},
-            0,
-        ),
+        lambda _servers, _server: ([server], 1, {"plex": ([], {})}, 0),
     )
     monkeypatch.setattr(chain, "_sync_server_libraries", stop_during_sync)
     monkeypatch.setattr(

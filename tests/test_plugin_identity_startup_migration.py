@@ -18,7 +18,7 @@ from app.application.plugin.identity import (
     PluginPayloadSourceType,
     TrustedPluginSourceType,
 )
-from app.application.plugin.migration import PluginIdentityMigrationService
+from app.application.plugin.identity_migration import PluginIdentityMigrationService
 from app.application.plugin.source import (
     CandidateInventory,
     LocalCandidateRead,
@@ -501,9 +501,14 @@ async def test_sync_runs_identity_migration_before_automatic_install(
         return task()
 
     monkeypatch.setattr(
-        plugins_initializer.main_loop_registry,
-        "require",
-        lambda: asyncio.get_running_loop(),
+        plugins_initializer.global_vars,
+        "CURRENT_EVENT_LOOP",
+        asyncio.get_running_loop(),
+    )
+    monkeypatch.setattr(
+        plugins_initializer,
+        "configure_plugin_services",
+        lambda: order.append("configure"),
     )
     monkeypatch.setattr(plugins_initializer, "PluginManager", lambda: manager)
     monkeypatch.setattr(
@@ -524,7 +529,7 @@ async def test_sync_runs_identity_migration_before_automatic_install(
     monkeypatch.setattr(plugins_initializer, "execute_task", execute)
 
     assert await plugins_initializer.sync_plugins() is False
-    assert order == ["migrate", "identity", "sync"]
+    assert order == ["configure", "migrate", "identity", "sync"]
 
 
 @pytest.mark.asyncio

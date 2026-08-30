@@ -7,9 +7,8 @@ from pydantic import BaseModel, Field
 
 from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.tags import ToolTag
-from app.domain import site as site_rules
+from app.application.agentdata import get_agent_site_port
 from app.runtime.log import logger
-from app.schemas.common import JsonData
 
 SITE_USERDATA_DETAIL_PREVIEW_LIMIT = 10
 
@@ -18,11 +17,6 @@ def _preview_list(value, limit: int = SITE_USERDATA_DETAIL_PREVIEW_LIMIT) -> tup
     """返回列表字段预览，避免做种明细或未读消息一次性撑大工具结果。"""
     items = list(value) if isinstance(value, (list, tuple)) else []
     return items[:limit], len(items), len(items) > limit
-
-
-def _sort_text(value: JsonData) -> str:
-    """把用户数据排序字段规范为可比较文本。"""
-    return value if isinstance(value, str) else ""
 
 
 class QuerySiteUserdataInput(BaseModel):
@@ -68,33 +62,41 @@ class QuerySiteUserdataTool(MoviePilotTool):
         )
 
         try:
-            repository = self.data.sites
-            site = await repository.async_get(site_id)
+            site_oper = get_agent_site_port()
+            site = await site_oper.async_get(site_id)
             if not site:
                 return json.dumps(
                     {"success": False, "message": f"站点不存在: {site_id}"},
                     ensure_ascii=False,
                 )
 
-            site_domain = site.domain or site_rules.extract_domain(site.url)
-            user_data_list = await repository.async_get_userdata_by_domain(
-                domain=site_domain, workdate=workdate
+            user_data_list = await site_oper.async_get_userdata_by_domain(
+                domain=site.domain, workdate=workdate
             )
 
             if not user_data_list:
                 return json.dumps(
                     {
                         "success": False,
-                        "message": f"站点 {site.name} ({site_domain}) 暂无用户数据",
+                        "message": f"站点 {site.name} ({site.domain}) 暂无用户数据",
                         "site_id": site_id,
                         "site_name": site.name,
-                        "site_domain": site_domain,
+                        "site_domain": site.domain,
                         "workdate": workdate,
                     },
                     ensure_ascii=False,
                 )
 
-            formatted_user_data: list[dict[str, JsonData]] = []
+            # 格式化用户数据
+            result = {
+                "success": True,
+                "site_id": site_id,
+                "site_name": site.name,
+                "site_domain": site.domain,
+                "workdate": workdate,
+                "data_count": len(user_data_list),
+                "user_data": [],
+            }
 
             for user_data in user_data_list:
                 # 格式化上传/下载量（转换为可读格式）
@@ -120,7 +122,7 @@ class QuerySiteUserdataTool(MoviePilotTool):
                     user_data.message_unread_contents
                 )
 
-                user_data_dict: dict[str, JsonData] = {
+                user_data_dict = {
                     "domain": user_data.domain,
                     "name": user_data.name,
                     "username": user_data.username,
@@ -152,32 +154,21 @@ class QuerySiteUserdataTool(MoviePilotTool):
                     "updated_day": user_data.updated_day,
                     "updated_time": user_data.updated_time,
                 }
-                formatted_user_data.append(user_data_dict)
+                result["user_data"].append(user_data_dict)
 
             # 如果有多条数据，只返回最新的（按更新时间排序）
-            message: Optional[str] = None
-            if len(formatted_user_data) > 1:
-                formatted_user_data.sort(
-                    key=lambda item: (
-                        _sort_text(item.get("updated_day")),
-                        _sort_text(item.get("updated_time")),
+            if len(result["user_data"]) > 1:
+                result["user_data"].sort(
+                    key=lambda x: (
+                        x.get("updated_day", ""),
+                        x.get("updated_time", ""),
                     ),
                     reverse=True,
                 )
-                message = f"找到 {len(formatted_user_data)} 条数据，显示最新的一条"
-                formatted_user_data = [formatted_user_data[0]]
-
-            result: dict[str, JsonData] = {
-                "success": True,
-                "site_id": site_id,
-                "site_name": site.name,
-                "site_domain": site_domain,
-                "workdate": workdate,
-                "data_count": len(user_data_list),
-                "user_data": formatted_user_data,
-            }
-            if message:
-                result["message"] = message
+                result["message"] = (
+                    f"找到 {len(result['user_data'])} 条数据，显示最新的一条"
+                )
+                result["user_data"] = [result["user_data"][0]]
 
             return json.dumps(result, ensure_ascii=False, indent=2)
 

@@ -11,7 +11,7 @@
     "match_mode": "exact_fingerprint_set",
     "entries": [
       {
-        "caller": "app.chain.download.facade",
+        "caller": "app.chain.download",
         "qualname": "DownloadChain",
         "method": "register",
         "receiver_kind": "canonical_singleton",
@@ -23,9 +23,9 @@
         "handler": "DownloadChain.download_file_deleted",
         "registration_kind": "decorator",
         "priority": "<default>",
-        "fingerprint": "b21a96beb9e6c37b7ab8878fb39dd00a19e9b4ff8ed7e5b0d20a51e597ffe27b",
+        "fingerprint": "eb33287636f1bb928cb221c64dfb9663fb20b87ad699c41182a673f5af19ab27",
         "classification": "approved_static_registration",
-        "owner": "app.chain.download.facade",
+        "owner": "app.chain.download",
         "reason": "下载文件删除事件由 DownloadChain 处理关联状态清理。"
       },
       {
@@ -47,7 +47,7 @@
         "reason": "元数据刮削事件由 ScrapingChain 执行宿主刮削流程。"
       },
       {
-        "caller": "app.chain.search.facade",
+        "caller": "app.chain.search",
         "qualname": "SearchChain",
         "method": "register",
         "receiver_kind": "canonical_singleton",
@@ -59,9 +59,9 @@
         "handler": "SearchChain.remove_site",
         "registration_kind": "decorator",
         "priority": "<default>",
-        "fingerprint": "7884f6aa0b02400cc69dbd75fd6eeeb88f0b429415bdf584cf91e6a64d7625d1",
+        "fingerprint": "5a7967a84e5716f1939530b1f5d561dbf97130d22330ad7c282d2924e0743fe5",
         "classification": "approved_static_registration",
-        "owner": "app.chain.search.facade",
+        "owner": "app.chain.search",
         "reason": "站点删除后由 SearchChain 清理搜索侧站点状态。"
       },
       {
@@ -119,7 +119,7 @@
         "reason": "站点更新后由 SiteChain 刷新站点用户数据缓存。"
       },
       {
-        "caller": "app.chain.subscribe.facade",
+        "caller": "app.chain.subscribe",
         "qualname": "SubscribeChain",
         "method": "register",
         "receiver_kind": "canonical_singleton",
@@ -131,13 +131,13 @@
         "handler": "SubscribeChain.remove_site",
         "registration_kind": "decorator",
         "priority": "<default>",
-        "fingerprint": "26a42e4bd34260584bd0363d2bac213084d07c6811a3812d12c7ba208b31a029",
+        "fingerprint": "f29dd0d5dd598e19281e2d1a577b98adc5a0c0722c569bb3e974cc6b984c0737",
         "classification": "approved_static_registration",
-        "owner": "app.chain.subscribe.facade",
+        "owner": "app.chain.subscribe",
         "reason": "站点删除后由 SubscribeChain 清理订阅侧站点引用。"
       },
       {
-        "caller": "app.chain.subscribe.facade",
+        "caller": "app.chain.subscribe",
         "qualname": "SubscribeChain",
         "method": "register",
         "receiver_kind": "canonical_singleton",
@@ -149,9 +149,9 @@
         "handler": "SubscribeChain.reconcile_rule_group_references",
         "registration_kind": "decorator",
         "priority": "<default>",
-        "fingerprint": "713e0ff077b9f76ea4b6695ca730dd2360f25059f677c1d6496cb2a4ffc8e1c4",
+        "fingerprint": "5764fa4e793a602ce36195edf6ce15a16d4875910c0104589b1c5aa9b3173077",
         "classification": "approved_static_registration",
-        "owner": "app.chain.subscribe.facade",
+        "owner": "app.chain.subscribe",
         "reason": "配置变更后由 SubscribeChain 对齐订阅规则组引用。"
       },
       {
@@ -209,7 +209,7 @@
         "reason": "模块重载事件由 Command 更新命令注册状态。"
       },
       {
-        "caller": "app.runtime.extensions.module.manager",
+        "caller": "app.runtime.extensions.module_manager",
         "qualname": "ModuleManager.__init__",
         "method": "add_event_listener",
         "receiver_kind": "canonical_singleton",
@@ -221,9 +221,9 @@
         "handler": "self.handle_config_changed",
         "registration_kind": "listener",
         "priority": "<default>",
-        "fingerprint": "26cc40efaa5ed089e42e73509e2668b83e3634c343fea7a5e8f3a45d68fba275",
+        "fingerprint": "37daee8e6104140ee28a6efebefd30f1f9ac6a7c44f9609199c1b4863b30c564",
         "classification": "approved_static_registration",
-        "owner": "app.runtime.extensions.module.manager",
+        "owner": "app.runtime.extensions.module_manager",
         "reason": "模块管理器监听配置变化并重建受影响的模块运行状态。"
       },
       {
@@ -245,7 +245,7 @@
         "reason": "配置重载 Mixin 为声明式宿主类型安装统一刷新处理器。"
       },
       {
-        "caller": "app.scheduler.facade",
+        "caller": "app.scheduler",
         "qualname": "Scheduler",
         "method": "register",
         "receiver_kind": "canonical_singleton",
@@ -257,9 +257,9 @@
         "handler": "Scheduler.on_plugin_reload",
         "registration_kind": "decorator",
         "priority": "<default>",
-        "fingerprint": "8780e71625cff4efebb1e39c32cff3c8cfd29c3cdf5eb1922d5e0d240ebd477a",
+        "fingerprint": "055c11260c15adabe65ddf1c9fd39000a7c1b7e255848e3c028e3985731e0778",
         "classification": "approved_static_registration",
-        "owner": "app.scheduler.facade",
+        "owner": "app.scheduler",
         "reason": "插件重载后由 Scheduler 对齐插件提供的定时任务。"
       },
       {
@@ -282,7 +282,7 @@
       },
       {
         "caller": "app.startup.initializers.modules",
-        "qualname": "_initialize_modules",
+        "qualname": "init_modules",
         "method": "add_event_listener",
         "receiver_kind": "constructed_manager",
         "events": [
@@ -293,14 +293,14 @@
         "handler": "dispatch_web_agent_message_event",
         "registration_kind": "listener",
         "priority": "<default>",
-        "fingerprint": "043b1451d0995070b782b4c0e78186cbb1c019c9cfd23500cd9c84c0d1992218",
+        "fingerprint": "59263eddd85e4e5e30606a9d0ab6d02ba6a9483bff7f262a3818495e2c4f6ef5",
         "classification": "approved_static_registration",
         "owner": "app.startup.initializers.modules",
         "reason": "模块初始化阶段把通知消息桥接到 WebAgent 消息分发入口。"
       },
       {
         "caller": "app.workflow",
-        "qualname": "WorkflowManager.register_workflow_event",
+        "qualname": "WorkFlowManager.register_workflow_event",
         "method": "add_event_listener",
         "receiver_kind": "canonical_singleton",
         "events": [],
@@ -309,7 +309,7 @@
         "handler": "self._handle_event",
         "registration_kind": "listener",
         "priority": "<default>",
-        "fingerprint": "b99f557080a8ddb6dc9d2870d02c4cabc4b265b0daac086369c3bf1d51073c09",
+        "fingerprint": "042068d816db7e46ab4da6e96f8549af97b57bd9d75ba710cc1ff4fec7e5e188",
         "classification": "approved_dynamic_exception",
         "owner": "app.workflow",
         "reason": "工作流配置在运行期决定事件类型，receiver 与 handler 仍可静态证明。"

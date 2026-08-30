@@ -7,9 +7,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.tags import ToolTag
-from app.application.agenttask import agent_task_to_dict
-from app.runtime.scheduling import TimerUtils
 from app.runtime.settings import get_runtime_setting
+
+from app.application.agentdata import get_agent_chat_port
+from app.application.agentdata import get_agent_task_port
+from app.runtime.scheduling import TimerUtils
 
 
 class CreateAgentTaskInput(BaseModel):
@@ -112,11 +114,11 @@ class CreateAgentTaskTool(MoviePilotTool):
             timezone_name=get_runtime_setting('TZ'),
             require_future=True,
         )
-        chat = self.data.chat.get_sync(
+        chat = get_agent_chat_port().get(
             session_id=self._session_id,
             user_id=self._user_id,
         )
-        task = self.data.tasks.add(
+        task = get_agent_task_port().add(
             name=payload.name.strip(),
             content=payload.content.strip(),
             trigger_type=payload.trigger_type,
@@ -129,10 +131,8 @@ class CreateAgentTaskTool(MoviePilotTool):
             source=self._source or (chat.source if chat else None),
             original_chat_id=chat.original_chat_id if chat else None,
         )
-        if task is None:
-            raise RuntimeError("Agent 定时任务创建后无法读取")
         next_run_at = update_agent_task_job(task.id)
-        return agent_task_to_dict(
+        return get_agent_task_port().to_dict(
             task,
             next_run_at=next_run_at,
             timezone=get_runtime_setting('TZ'),

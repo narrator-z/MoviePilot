@@ -29,12 +29,6 @@ class MediaServerOper(DbOper):
             if hasattr(MediaServerItem, k) and k != "id"
         }
 
-    @staticmethod
-    def _contains_season(item: MediaServerItem, season: int) -> bool:
-        """兼容 JSON 往返后变为字符串的 seasoninfo 键。"""
-        seasoninfo = item.seasoninfo or {}
-        return season in seasoninfo or str(season) in seasoninfo
-
     def add(self, **kwargs) -> bool:
         """
         新增媒体服务器数据
@@ -138,7 +132,10 @@ class MediaServerOper(DbOper):
 
         if kwargs.get("season") is not None:
             # 判断季是否存在
-            if not self._contains_season(item, kwargs["season"]):
+            if not item.seasoninfo:
+                return None
+            seasoninfo = item.seasoninfo or {}
+            if kwargs.get("season") not in seasoninfo.keys():
                 return None
         return item
 
@@ -172,7 +169,10 @@ class MediaServerOper(DbOper):
 
         if kwargs.get("season") is not None:
             # 判断季是否存在
-            if not self._contains_season(item, kwargs["season"]):
+            if not item.seasoninfo:
+                return None
+            seasoninfo = item.seasoninfo or {}
+            if kwargs.get("season") not in seasoninfo.keys():
                 return None
         return item
 

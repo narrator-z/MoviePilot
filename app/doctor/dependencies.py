@@ -35,13 +35,16 @@ NATIVE_MODULES = (
 )
 
 
-def _verify_text_capabilities() -> None:
+def _verify_text_capabilities(*, free_threaded: bool) -> None:
     """验证标准与 free-threaded profile 共同依赖的文本能力。"""
     moviepilot_rust = import_module("moviepilot_rust")
     if not moviepilot_rust.is_available() or not moviepilot_rust.jieba_cut("中文分词"):
         raise RuntimeError("中文分词运行依赖不可用")
 
-    converted = moviepilot_rust.zhconv_fast("后台", "zh-hant")
+    if free_threaded:
+        converted = moviepilot_rust.zhconv_fast("后台", "zh-hant")
+    else:
+        converted = import_module("zhconv_rs").zhconv("后台", "zh-hant")
     if not converted:
         raise RuntimeError("中文转换运行依赖不可用")
 
@@ -57,7 +60,7 @@ def _verify_native_profile(*, free_threaded: bool) -> None:
     profile_modules = (
         (("psycopg", "psycopg"),)
         if free_threaded
-        else (("psycopg2", "psycopg2"),)
+        else (("psycopg2", "psycopg2"), ("zhconv-rs", "zhconv_rs"))
     )
     for name, module_name in (*NATIVE_MODULES, *profile_modules):
         imported[name] = import_module(module_name)
@@ -76,7 +79,7 @@ def main(*, full: bool = False) -> None:
     for module_name in CORE_MODULES:
         import_module(module_name)
 
-    _verify_text_capabilities()
+    _verify_text_capabilities(free_threaded=free_threaded)
     if full:
         _verify_native_profile(free_threaded=free_threaded)
     if free_threaded and sys._is_gil_enabled():

@@ -33,9 +33,10 @@ class RuntimeFacadePolicy:
 RUNTIME_FACADE_POLICIES = (
     RuntimeFacadePolicy(
         name="scheduler",
-        dependency="app.scheduler.facade",
+        dependency="app.scheduler",
         exact_consumers=frozenset(
             {
+                "app.scheduler",
                 "app.startup.initializers.modules",
                 "app.startup.initializers.scheduler",
             }
@@ -43,22 +44,21 @@ RUNTIME_FACADE_POLICIES = (
     ),
     RuntimeFacadePolicy(
         name="module",
-        dependency="app.runtime.extensions.module.manager",
+        dependency="app.runtime.extensions.module_manager",
         exact_consumers=frozenset(
             {
                 "app.sdk.plugins",
-                "app.startup.composition.chain",
                 "app.startup.initializers.modules",
             }
         ),
     ),
     RuntimeFacadePolicy(
         name="plugin",
-        dependency="app.runtime.extensions.plugin.manager",
+        dependency="app.runtime.extensions.plugin_manager",
         exact_consumers=frozenset(
             {
                 "app.sdk.plugins",
-                "app.startup.composition.chain",
+                "app.startup.initializers.modules",
                 "app.startup.initializers.plugins",
             }
         ),
@@ -68,7 +68,6 @@ RUNTIME_FACADE_POLICIES = (
         dependency="app.command",
         exact_consumers=frozenset(
             {
-                "app.startup.composition.outbox",
                 "app.startup.initializers.command",
                 "app.startup.initializers.modules",
             }

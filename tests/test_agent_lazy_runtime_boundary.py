@@ -145,7 +145,7 @@ from typing import get_args, get_type_hints
 from app.testing.bootstrap import ensure_sites_stub
 
 ensure_sites_stub()
-from app.agent.loader import get_tool_factory
+from app.agent.runtime_loader import get_tool_factory
 
 factory = get_tool_factory()
 catalog = factory.create_catalog(session_id="lazy", user_id="api")
@@ -197,7 +197,7 @@ print(json.dumps({
 
 def test_manager_first_catalog_use_is_single_flight(monkeypatch) -> None:
     """并发首次查询只能在 manager 锁内建立一次会话工具快照。"""
-    from app.agent import loader as runtime_loader
+    from app.agent import runtime_loader
     from app.agent.tools.manager import MoviePilotToolsManager
 
     calls: list[tuple[str, str]] = []
@@ -240,7 +240,7 @@ def test_legacy_explicit_tool_refresh_keeps_atomic_catalog_contract(
     monkeypatch,
 ) -> None:
     """插件显式刷新旧入口应继续发布同一次构造的完整目录快照。"""
-    from app.agent import loader as runtime_loader
+    from app.agent import runtime_loader
     from app.agent.tools.manager import MoviePilotToolsManager
 
     calls: list[int] = []
@@ -298,19 +298,17 @@ def test_reply_mode_identity_and_display_message_contract() -> None:
     assert legacy_message == contract_message
 
 
-def test_llm_internal_owner_is_imported_directly_without_loading_other_owners() -> None:
-    """内部 capability 使用 owner 路径，包根不再重复导出其实现。"""
+def test_llm_facade_resolves_only_requested_public_module() -> None:
+    """访问 capability 导出时不应顺带加载 helper 或 provider registry。"""
     result = _run_isolated(
         """
 import json
 import sys
 
 import app.agent.llm as llm
-missing_root_export = not hasattr(llm, "AgentCapabilityManager")
-from app.agent.llm.capability import AgentCapabilityManager
+capability = llm.AgentCapabilityManager
 print(json.dumps({
-    "missing_root_export": missing_root_export,
-    "module": AgentCapabilityManager.__module__,
+    "module": capability.__module__,
     "helper_loaded": "app.agent.llm.helper" in sys.modules,
     "provider_loaded": "app.agent.llm.provider" in sys.modules,
 }))
@@ -318,7 +316,6 @@ print(json.dumps({
     )
 
     assert result == {
-        "missing_root_export": True,
         "module": "app.agent.llm.capability",
         "helper_loaded": False,
         "provider_loaded": False,

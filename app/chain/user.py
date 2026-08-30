@@ -1,16 +1,17 @@
 import secrets
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple, Union
+from typing import Any, Literal, Optional, Tuple, Union
 
+from app.application.chain.data import get_chain_user_port
 from app.application.security.otp import OtpUtils
 from app.application.security.token import get_password_hash, verify_password
-from app.application.security.user import AuxiliaryUserCreate, UserAuthSnapshot
-from app.chain.base import ChainBase
+from app.chain import ChainBase
 from app.runtime.log import logger
 from app.schemas.event import AuthCredentials, AuthInterceptCredentials
 from app.schemas.types import ChainEventType
 
 PASSWORD_INVALID_CREDENTIALS_MESSAGE = "用户名、密码或验证码错误"
+User = Any
 
 
 MfaMethod = Literal["otp"]
@@ -35,7 +36,7 @@ class UserChain(ChainBase):
             mfa_code: Optional[str] = None,
             code: Optional[str] = None,
             grant_type: Optional[str] = "password"
-    ) -> Tuple[bool, Union[str, UserAuthSnapshot, MfaRequired, None]]:
+    ) -> Tuple[bool, Union[str, User, MfaRequired, None]]:
         """
         认证用户，根据不同的 grant_type 处理不同的认证流程
 
@@ -59,7 +60,7 @@ class UserChain(ChainBase):
         if credentials.grant_type == "password":
             # Password 认证
             success, user_or_message = self.password_authenticate(credentials=credentials)
-            if success and isinstance(user_or_message, UserAuthSnapshot):
+            if success:
                 # 如果用户启用了二次验证，则进一步验证
                 mfa_result = self._verify_mfa(user_or_message, credentials.mfa_code)
                 if isinstance(mfa_result, MfaRequired):
@@ -73,10 +74,7 @@ class UserChain(ChainBase):
                 if self.runtime_config.auxiliary_auth_enable:
                     logger.warning("密码认证失败，尝试通过外部服务进行辅助认证 ...")
                     aux_success, aux_user_or_message = self.auxiliary_authenticate(credentials=credentials)
-                    if aux_success and isinstance(
-                        aux_user_or_message,
-                        UserAuthSnapshot,
-                    ):
+                    if aux_success:
                         # 辅助认证成功后再验证 6 位验证码
                         mfa_result = self._verify_mfa(aux_user_or_message, credentials.mfa_code)
                         if isinstance(mfa_result, MfaRequired):
@@ -103,11 +101,8 @@ class UserChain(ChainBase):
             logger.debug(f"辅助认证未启用，认证类型 {grant_type} 未实现")
             return False, "不支持的认证类型"
 
-    @classmethod
-    def password_authenticate(
-        cls,
-        credentials: AuthCredentials,
-    ) -> Tuple[bool, Union[UserAuthSnapshot, str]]:
+    @staticmethod
+    def password_authenticate(credentials: AuthCredentials) -> Tuple[bool, Union[User, str]]:
         """
         密码认证
 
@@ -119,11 +114,8 @@ class UserChain(ChainBase):
         if not credentials or credentials.grant_type != "password":
             logger.info("密码认证失败，认证类型不匹配")
             return False, PASSWORD_INVALID_CREDENTIALS_MESSAGE
-        if not credentials.username or credentials.password is None:
-            logger.info("密码认证失败，用户名或密码为空")
-            return False, PASSWORD_INVALID_CREDENTIALS_MESSAGE
 
-        user = cls().user_repository.get_auth_by_name(name=credentials.username)
+        user = get_chain_user_port().get_by_name(name=credentials.username)
         if not user:
             logger.info(f"密码认证失败，用户 {credentials.username} 不存在")
             return False, PASSWORD_INVALID_CREDENTIALS_MESSAGE
@@ -138,10 +130,7 @@ class UserChain(ChainBase):
 
         return True, user
 
-    def auxiliary_authenticate(
-        self,
-        credentials: AuthCredentials,
-    ) -> Tuple[bool, Union[UserAuthSnapshot, str]]:
+    def auxiliary_authenticate(self, credentials: AuthCredentials) -> Tuple[bool, Union[User, str]]:
         """
         辅助用户认证
 
@@ -154,9 +143,9 @@ class UserChain(ChainBase):
             return False, "认证凭证无效"
 
         # 检查是否因为用户被禁用
-        useroper = self.user_repository
+        useroper = get_chain_user_port()
         if credentials.username:
-            user = useroper.get_auth_by_name(name=credentials.username)
+            user = useroper.get_by_name(name=credentials.username)
             if user and not user.is_active:
                 logger.info(f"用户 {user.name} 已被禁用，跳过后续身份校验")
                 return False, PASSWORD_INVALID_CREDENTIALS_MESSAGE
@@ -177,28 +166,16 @@ class UserChain(ChainBase):
             credentials = result  # 使用模块认证返回的认证数据
 
         # 处理认证成功的逻辑
-        resolved_username = credentials.username
-        if not resolved_username:
-            return False, PASSWORD_INVALID_CREDENTIALS_MESSAGE
-        success = self._process_auth_success(
-            username=resolved_username,
-            credentials=credentials,
-        )
+        success = self._process_auth_success(username=credentials.username, credentials=credentials)
         if success:
             logger.info(f"用户 {credentials.username} 辅助认证通过")
-            user = useroper.get_auth_by_name(resolved_username)
-            if user is not None:
-                return True, user
-            return False, PASSWORD_INVALID_CREDENTIALS_MESSAGE
+            return True, useroper.get_by_name(credentials.username)
         else:
             logger.warning(f"用户 {credentials.username} 辅助认证未通过")
             return False, PASSWORD_INVALID_CREDENTIALS_MESSAGE
 
     @staticmethod
-    def _verify_mfa(
-        user: UserAuthSnapshot,
-        mfa_code: Optional[str],
-    ) -> Union[bool, MfaRequired]:
+    def _verify_mfa(user: User, mfa_code: Optional[str]) -> Union[bool, MfaRequired]:
         """
         验证密码登录后的 6 位验证码。
 
@@ -236,7 +213,7 @@ class UserChain(ChainBase):
             return False
 
         token, channel, service = credentials.token, credentials.channel, credentials.service
-        if not token or not channel or not service:
+        if not all([token, channel, service]):
             logger.info(f"用户 {username} 未通过 {credentials.grant_type} 认证，必要信息不足")
             return False
 
@@ -254,8 +231,8 @@ class UserChain(ChainBase):
                 return False
 
         # 检查用户是否存在，如果不存在且当前为密码认证时则创建新用户
-        useroper = self.user_repository
-        user = useroper.get_auth_by_name(name=username)
+        useroper = get_chain_user_port()
+        user = useroper.get_by_name(name=username)
         if user:
             # 如果用户存在，但是已经被禁用，则直接响应
             if not user.is_active:
@@ -268,10 +245,8 @@ class UserChain(ChainBase):
             return True
         else:
             if credentials.grant_type == "password":
-                useroper.create_auxiliary(AuxiliaryUserCreate(
-                    name=username,
-                    hashed_password=get_password_hash(secrets.token_urlsafe(16)),
-                ))
+                useroper.add(name=username, is_active=True, is_superuser=False,
+                             hashed_password=get_password_hash(secrets.token_urlsafe(16)))
                 logger.info(f"用户 {username} 不存在，已通过 {credentials.grant_type} 认证并已创建普通用户")
                 return True
             else:

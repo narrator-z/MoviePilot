@@ -117,8 +117,8 @@ def test_user_configuration_service_supports_sync_and_async_writes() -> None:
         async_executor=_InlineDatabaseExecutor(),
     )
 
-    assert service.set("alice", "theme", "dark") is None
-    assert asyncio.run(service.async_set("alice", "theme", "light")) is None
+    assert service.set("alice", "theme", "dark") is True
+    assert asyncio.run(service.async_set("alice", "theme", "light")) is True
     assert repository.set.call_args_list == [
         ((), {"username": "alice", "key": "theme", "value": "dark"}),
         ((), {"username": "alice", "key": "theme", "value": "light"}),
@@ -146,6 +146,7 @@ def test_api_runtime_provider_returns_frozen_snapshot_per_request() -> None:
     configure_runtime_configuration(
         RuntimeConfiguration(
             api=lambda: ApiRuntimeConfig(
+                advanced_mode=False,
                 access_token_expire_minutes=60,
                 btrfs_fsid_dedup=False,
                 ai_agent_enable=state["enabled"],

@@ -24,6 +24,8 @@ app/config/
 .runtime/
 public/
 .moviepilot.env
+# 本地验证用的临时 CONFIG_DIR（含 app.env/user.db 等运行期密钥与数据库产物，禁止入库）
+.mp_test_config/
 *.pyc
 *.log
 .coverage

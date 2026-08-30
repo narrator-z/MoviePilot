@@ -3,7 +3,6 @@
 import asyncio
 import json
 import threading
-from collections.abc import Generator
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,11 +14,14 @@ import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from langchain_core.messages import AIMessage
 
-from app.agent.contracts import ReplyMode
-from app.agent.manager import AgentManager
-from app.agent.middleware.selection import ToolSelectorMiddleware
-from app.agent.orchestrator import MoviePilotAgent
-from app.agent.session import _MessageTask
+from app.agent import (
+    AgentChain,
+    AgentManager,
+    MoviePilotAgent,
+    ReplyMode,
+    _MessageTask,
+)
+from app.agent.middleware.tool_selection import ToolSelectorMiddleware
 from app.agent.tools.factory import MoviePilotToolFactory
 from app.agent.tools.impl.create_agent_task import (
     CreateAgentTaskInput,
@@ -36,17 +38,13 @@ from app.agent.tools.impl.update_agent_task import (
     UpdateAgentTaskTool,
 )
 from app.agent.tools.tags import ToolTag
-from app.chain.agent import AgentChain
-from app.db import SessionFactory
-from app.db.adapters.agent import TransactionalAgentTaskRepository
-from app.db.models.agenttask import AgentTask
-from app.db.oper.agenttask import AgentTaskOper
 from app.runtime.config import settings
-from app.runtime.loop import main_loop_registry
-from app.runtime.scheduling import TimerUtils
-from app.scheduler.facade import Scheduler
-from app.scheduler.registry import ExecutionRegistry
+from app.db import SessionFactory
+from app.db.oper.agenttask import AgentTaskOper
+from app.db.models.agenttask import AgentTask
 from app.schemas import ScheduleInfo
+from app.scheduler import Scheduler
+from app.runtime.scheduling import TimerUtils
 
 
 class _FakeAgentTaskScheduler:
@@ -87,17 +85,6 @@ def anyio_backend() -> str:
 def enable_ai_agent(monkeypatch) -> None:
     """在当前测试模块中启用 Agent 调度能力并在用例后自动还原。"""
     monkeypatch.setattr(settings, "AI_AGENT_ENABLE", True)
-
-
-@pytest.fixture(autouse=True)
-def isolate_scheduler_main_loop() -> Generator[None, None, None]:
-    """隔离主循环登记，避免前序兼容层假循环改变 Scheduler 投递路径。"""
-    previous = main_loop_registry.current
-    main_loop_registry.replace_compat(None)
-    try:
-        yield
-    finally:
-        main_loop_registry.replace_compat(previous)
 
 
 def _future_time(minutes: int = 10) -> str:
@@ -147,9 +134,11 @@ def _build_agent_task_scheduler(reconcile: bool = False) -> Scheduler:
     scheduler._jobs = {}
     scheduler._scheduler = BackgroundScheduler(timezone=settings.TZ)
     scheduler._lifecycle_state = "running"
-    scheduler._registry = ExecutionRegistry(scheduler._lock)
+    scheduler._handles = {}
+    scheduler._job_generations = {}
+    scheduler._active_job_generations = {}
+    scheduler._agent_task_reservations = {}
     scheduler._agent_task_interruptions_reconciled = False
-    scheduler._agent_tasks = TransactionalAgentTaskRepository(SessionFactory)
     if reconcile:
         scheduler._reconcile_agent_task_interruptions()
     return scheduler
@@ -157,14 +146,7 @@ def _build_agent_task_scheduler(reconcile: bool = False) -> Scheduler:
 
 def _build_tool(tool_class, user_id: str):
     """构造带当前用户消息上下文的 Agent 工具。"""
-    tool = tool_class(
-        session_id=f"session-{user_id}",
-        user_id=user_id,
-        data=SimpleNamespace(
-            tasks=TransactionalAgentTaskRepository(SessionFactory),
-            chat=SimpleNamespace(get_sync=lambda **_kwargs: None),
-        ),
-    )
+    tool = tool_class(session_id=f"session-{user_id}", user_id=user_id)
     tool.set_message_attr(
         channel="Telegram",
         source="telegram-test",
@@ -343,8 +325,10 @@ def test_scheduler_registers_and_removes_agent_task_job() -> None:
     scheduler._jobs = {}
     scheduler._scheduler = BackgroundScheduler(timezone=settings.TZ)
     scheduler._lifecycle_state = "running"
-    scheduler._registry = ExecutionRegistry(scheduler._lock)
-    scheduler._agent_tasks = TransactionalAgentTaskRepository(SessionFactory)
+    scheduler._handles = {}
+    scheduler._job_generations = {}
+    scheduler._active_job_generations = {}
+    scheduler._agent_task_reservations = {}
 
     next_run_at = scheduler.update_agent_task_job(task.id)
     job_id = scheduler._get_agent_task_job_id(task.id)
@@ -428,7 +412,7 @@ async def test_date_task_reload_job_is_removed_after_run_finishes(
     release.set()
 
     async def wait_until_released() -> None:
-        while scheduler._registry.handles():
+        while scheduler._handles:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_until_released(), timeout=1)
@@ -817,12 +801,12 @@ async def test_scheduler_config_reload_preserves_active_agent_task(
 
     await scheduler.on_config_changed()
     assert AgentTaskOper().get(task.id).last_status == "running"
-    assert scheduler._registry.handles()
+    assert scheduler._handles
 
     release.set()
 
     async def wait_until_released() -> None:
-        while scheduler._registry.handles():
+        while scheduler._handles:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_until_released(), timeout=1)
@@ -890,7 +874,10 @@ def test_scheduler_starts_registered_agent_task_without_waiting() -> None:
         }
     }
     scheduler._lifecycle_state = "running"
-    scheduler._registry = ExecutionRegistry(scheduler._lock)
+    scheduler._handles = {}
+    scheduler._job_generations = {}
+    scheduler._active_job_generations = {}
+    scheduler._agent_task_reservations = {}
     scheduler.start = Mock()
 
     assert scheduler.start_agent_task(7) is True

@@ -1,28 +1,20 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from packaging.version import Version
 
 from app.application.plugin.catalog import PluginCatalogService
-from app.runtime.extensions.plugin.metadata import PluginMetadataMapper
-from app.schemas.plugin import Plugin
 
 
-def _plugin(
-        plugin_id: str,
-        version: str,
-        repo_url: str,
-        package_version: str | None = "v3",
-) -> Plugin:
+def _plugin(plugin_id: str, version: str, repo_url: str):
     """构造目录合并测试使用的最小插件 DTO。"""
-    plugin = Plugin(
+    return SimpleNamespace(
         id=plugin_id,
         plugin_version=version,
         repo_url=repo_url,
     )
-    plugin.package_version = package_version
-    return plugin
 
 
 def _service(**overrides) -> PluginCatalogService:
@@ -71,51 +63,6 @@ def test_merge_prefers_newer_version_and_remote_source():
     assert result == [new_remote]
 
 
-def test_merge_treats_plugin_id_casing_as_one_physical_plugin():
-    """同一物理插件的市场与本地 ID 大小写差异不能产生两个目录条目。"""
-    service = _service()
-    online = _plugin("DownloadCenter", "3.2.1", "https://market-a")
-    local = _plugin("downloadcenter", "3.3.2", "local://DownloadCenter")
-
-    result = service.merge(
-        [online, local],
-        [],
-        ["https://market-a"],
-    )
-
-    assert result == [local]
-
-
-def test_merge_by_source_deduplicates_plugin_id_casing_within_generation():
-    """同一仓库和代际内的 ID 大小写差异不能产生重复候选。"""
-    service = _service()
-    old = _plugin("DownloadCenter", "3.2.1", "https://market-a")
-    new = _plugin("downloadcenter", "3.3.2", "https://market-a")
-
-    result = service.merge_by_source(
-        [old, new],
-        [],
-        ["https://market-a"],
-    )
-
-    assert result == [new]
-
-
-def test_merge_by_source_preserves_candidates_across_generations():
-    """跨代际候选必须保留，由来源准入按代际优先级继续决策。"""
-    service = _service()
-    v3 = _plugin("DownloadCenter", "3.2.1", "https://market-a", "v3")
-    v2 = _plugin("downloadcenter", "9.0.0", "https://market-a", "v2")
-
-    result = service.merge_by_source(
-        [v3, v2],
-        [],
-        ["https://market-a"],
-    )
-
-    assert result == [v3, v2]
-
-
 def test_load_maps_market_entries_with_installed_snapshot():
     """单市场读取只获取一次已安装快照并按索引顺序映射 DTO。"""
     mapper = Mock(side_effect=lambda plugin_id, *_args: plugin_id)
@@ -134,33 +81,6 @@ def test_load_maps_market_entries_with_installed_snapshot():
     assert mapper.call_args_list[1].args[3:] == (["Installed"], 1, "v3")
 
 
-def test_metadata_mapper_preserves_package_generation_without_serializing_it():
-    """市场映射必须保留候选代际，同时不能扩张插件 API 响应。"""
-    mapper = PluginMetadataMapper(
-        plugin_instance=lambda _plugin_id: None,
-        plugin_class=lambda _plugin_id: None,
-        annotate_system_version=lambda info: info,
-        is_package_compatible=lambda _info, _version: True,
-        auth_checker=lambda _plugin, _source: True,
-        version_compare=lambda _left, _operator, _right: False,
-        log=Mock(),
-    )
-
-    plugin = mapper.map(
-        plugin_id="Demo",
-        plugin_info={"name": "Demo", "version": "3.0.0"},
-        market="https://market-a",
-        installed_plugins=[],
-        add_time=1,
-        package_version="v3",
-    )
-
-    assert plugin is not None
-    assert plugin.package_version == "v3"
-    assert "package_version" not in plugin.model_dump()
-    assert "package_version" not in Plugin.model_json_schema()["properties"]
-
-
 @pytest.mark.asyncio
 async def test_async_collect_isolates_failure_and_completes_progress():
     """异步市场单任务失败时保留成功结果，并把进度推进到完成态。"""
@@ -174,8 +94,7 @@ async def test_async_collect_isolates_failure_and_completes_progress():
         if market == "https://market-a" and package_version == "v3":
             raise RuntimeError("unavailable")
         version = "2.0.0" if package_version else "1.0.0"
-        plugin_id = "MarketA" if market.endswith("market-a") else "MarketB"
-        return [_plugin(plugin_id, version, market)]
+        return [_plugin(market, version, market)]
 
     result = await service.async_collect(
         markets=["https://market-a", "https://market-b"],
@@ -186,8 +105,8 @@ async def test_async_collect_isolates_failure_and_completes_progress():
     )
 
     assert {plugin.id for plugin in result} == {
-        "MarketA",
-        "MarketB",
+        "https://market-a",
+        "https://market-b",
     }
     error.assert_called_once()
     assert progress.call_args_list[0].kwargs["value"] == 0

@@ -23,7 +23,7 @@ import app.db.engine as engine_module
 from app.db.engine import (_async_pool_enabled, _get_database_engine,
                            _database_backend_label, get_engine,
                            get_global_async_engine)
-from app.runtime.loop import main_loop_registry
+from app.runtime.config import global_vars
 from app.runtime.settings import get_runtime_setting
 from app.runtime.log import logger
 from app.runtime.observability import record_metric
@@ -86,7 +86,7 @@ def get_scoped_session() -> scoped_session:
 #
 # 做成 __dict__ 里真实存在的函数就两头都成立：导入它不碰引擎，调用它才创建。全仓库对这三个
 # 名字的用法都是 `X()` 取一个会话，这一形式的语义与原先的 sessionmaker / scoped_session 实例
-# 完全一致；测试应在实际数据库 owner 边界替换 SessionFactory。
+# 完全一致；patch("app.scheduler.SessionFactory", ...) 这类既有测试替身也照旧生效。
 #
 # 但仅限 `X()` 这一形式：它们不再是 sessionmaker / scoped_session 实例，因此实例上的其余接口
 # （ScopedSession.remove()、SessionFactory.configure()、AsyncSessionFactory.begin()、
@@ -144,7 +144,7 @@ def _pooled_loop() -> Optional[Any]:
 
     只认常驻主循环：它承载了绝大多数异步 DB 流量，且生命周期与进程一致，
     池中连接不会因循环销毁而失效。
-    直接读可空 current 而不用 require()，避免主循环尚未就绪时
+    直接读 CURRENT_EVENT_LOOP 而不用 global_vars.loop，避免主循环尚未就绪时
     把正常的回退引擎选择转换成生命周期异常。
     """
     if not _async_pool_enabled():
@@ -154,7 +154,7 @@ def _pooled_loop() -> Optional[Any]:
     except RuntimeError:
         # 没有运行中的循环，行为与池化前一致
         return None
-    if loop is not main_loop_registry.current:
+    if loop is not getattr(global_vars, "CURRENT_EVENT_LOOP", None):
         return None
     return loop
 

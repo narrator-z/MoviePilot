@@ -1,10 +1,8 @@
 import asyncio
-from unittest.mock import patch
 
 import pytest
 
-from app.runtime.config import GlobalVar, global_vars
-from app.runtime.loop import MainLoopRegistry, main_loop_registry
+from app.runtime.config import GlobalVar
 
 
 def test_global_loop_requires_lifecycle_owner() -> None:
@@ -79,48 +77,3 @@ def test_nested_owner_release_restores_same_event_loop() -> None:
         assert runtime.CURRENT_EVENT_LOOP is None
 
     asyncio.run(verify())
-
-
-def test_global_var_loop_property_is_only_a_compatibility_facade() -> None:
-    """旧属性赋值与 canonical registry 必须共享事实源而不复制状态。"""
-    previous = main_loop_registry.current
-    loop = asyncio.new_event_loop()
-    try:
-        global_vars.CURRENT_EVENT_LOOP = loop
-        assert main_loop_registry.current is loop
-        assert global_vars.CURRENT_EVENT_LOOP is loop
-    finally:
-        global_vars.CURRENT_EVENT_LOOP = previous
-        loop.close()
-
-
-def test_global_var_loop_patch_can_restore_an_empty_compatibility_value() -> None:
-    """兼容属性原值为空时，patch 清理应通过 deleter 恢复空投递目标。"""
-    runtime = GlobalVar()
-    loop = asyncio.new_event_loop()
-    try:
-        with patch.object(runtime, "CURRENT_EVENT_LOOP", loop):
-            assert runtime.CURRENT_EVENT_LOOP is loop
-
-        assert runtime.CURRENT_EVENT_LOOP is None
-    finally:
-        loop.close()
-
-
-def test_main_loop_registry_rejects_stale_owner_release() -> None:
-    """独立 registry 中旧 owner 的迟到释放不得覆盖更新循环。"""
-    registry = MainLoopRegistry()
-    first = asyncio.new_event_loop()
-    second = asyncio.new_event_loop()
-    try:
-        first_owner = registry.register(first)
-        second_owner = registry.register(second)
-
-        registry.release(first_owner)
-
-        assert registry.current is second
-        registry.release(second_owner)
-        assert registry.current is None
-    finally:
-        first.close()
-        second.close()

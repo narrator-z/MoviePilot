@@ -6,7 +6,9 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
-from app.adapters.network.http import HttpRequestError, RequestUtils
+import requests
+
+from app.adapters.network.http import RequestUtils
 from app.foundation import temporal as time_tools
 from app.foundation.singleton import WeakSingleton
 from app.modules.filemanager.storages import StorageBase, transfer_process
@@ -52,18 +54,14 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
     def __init__(self):
         super().__init__()
         self._auth_state = {}
-        self._request_utils = RequestUtils(
-            use_session=True,
-            timeout=20,
-            verify=True,
-        )
+        self.session = requests.Session()
         self._init_session()
 
     def _init_session(self):
         """
         初始化带速率限制的会话
         """
-        self._request_utils.update_headers({"Content-Type": "application/json"})
+        self.session.headers.update({"Content-Type": "application/json"})
 
     def _check_session(self):
         """
@@ -103,9 +101,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
                     self.set_config({"refresh_time": int(time.time()), **tokens})
             access_token = tokens.get("access_token")
             if access_token:
-                self._request_utils.update_headers(
-                    {"Authorization": f"Bearer {access_token}"}
-                )
+                self.session.headers.update({"Authorization": f"Bearer {access_token}"})
             return access_token
 
     def generate_qrcode(self) -> Tuple[dict, str]:
@@ -116,7 +112,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
         # 生成PKCE参数
         code_verifier = secrets.token_urlsafe(96)[:128]
         # 请求设备码
-        resp = self._request_utils.post_res(
+        resp = self.session.post(
             f"{self.base_url}/oauth/authorize/qrcode",
             json={
                 "client_id": get_runtime_setting('ALIPAN_APP_ID'),
@@ -155,7 +151,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
         if not self._auth_state:
             return {}, "生成二维码失败"
         try:
-            resp = self._request_utils.get_res(
+            resp = self.session.get(
                 f"{self.base_url}/oauth/qrcode/{self._auth_state['sid']}/status"
             )
             if resp is None:
@@ -171,7 +167,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
                     self.set_config({"refresh_time": int(time.time()), **tokens})
                     self.__get_drive_id()
             return {"status": status, "tip": _status_text.get(status, "未知错误")}, ""
-        except HttpRequestError as e:
+        except Exception as e:
             return {}, str(e)
 
     def __get_access_token(self) -> dict:
@@ -180,7 +176,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
         """
         if not self._auth_state:
             raise SessionInvalidException("【阿里云盘】请先生成二维码")
-        resp = self._request_utils.post_res(
+        resp = self.session.post(
             f"{self.base_url}/oauth/access_token",
             json={
                 "client_id": get_runtime_setting('ALIPAN_APP_ID'),
@@ -204,7 +200,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
         """
         if not refresh_token:
             raise SessionInvalidException("【阿里云盘】会话失效，请重新扫码登录！")
-        resp = self._request_utils.post_res(
+        resp = self.session.post(
             f"{self.base_url}/oauth/access_token",
             json={
                 "client_id": get_runtime_setting('ALIPAN_APP_ID'),
@@ -228,9 +224,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
         """
         获取默认存储桶ID
         """
-        resp = self._request_utils.post_res(
-            f"{self.base_url}/adrive/v1.0/user/getDriveInfo"
-        )
+        resp = self.session.post(f"{self.base_url}/adrive/v1.0/user/getDriveInfo")
         if resp is None:
             logger.error("获取默认存储桶ID失败")
             return None
@@ -267,13 +261,8 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
         no_error_log = kwargs.pop("no_error_log", False)
 
         try:
-            resp = self._request_utils.request(
-                method,
-                f"{self.base_url}{endpoint}",
-                raise_exception=True,
-                **kwargs,
-            )
-        except Exception as e:
+            resp = self.session.request(method, f"{self.base_url}{endpoint}", **kwargs)
+        except requests.exceptions.RequestException as e:
             logger.error(f"【阿里云盘】{method} 请求 {endpoint} 网络错误: {str(e)}")
             return None
 
@@ -354,10 +343,6 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
 
     def init_storage(self):
         pass
-
-    def close(self) -> None:
-        """关闭阿里云盘 HTTP 客户端。"""
-        self._request_utils.close()
 
     def list(self, fileitem: _SchemaFileItem) -> List[_SchemaFileItem]:
         """
@@ -576,7 +561,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
         """
         上传单个分片
         """
-        return RequestUtils(timeout=60, verify=True).put_res(upload_url, data=data)
+        return requests.put(upload_url, data=data, timeout=60.0)
 
     def _list_uploaded_parts(self, drive_id: str, file_id: str, upload_id: str) -> dict:
         """
@@ -828,7 +813,7 @@ class AliPan(StorageBase, metaclass=WeakSingleton):
                 json={"drive_id": fileitem.drive_id, "file_id": fileitem.fileid},
             )
             return True
-        except HttpRequestError:
+        except requests.exceptions.HTTPError:
             return False
 
     def rename(self, fileitem: _SchemaFileItem, name: str) -> bool:

@@ -2,36 +2,26 @@
 
 import ast
 import inspect
-import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.application.history import TransferHistorySnapshot
-from app.application.transfer import workflow as transfer_application
-from app.application.transfer.execution import (
-    TransferExecutionCheckpoint,
-    TransferExecutionSnapshot,
-    TransferExecutionState,
-    TransferExecutionStep,
-    TransferSettlementResult,
-    TransferStepState,
-)
-from app.application.transfer.workflow import TransferTask
+from app.application import transfer as transfer_application
+from app.application.transfer import TransferTask
 from app.chain.transfer import TransferChain
-from app.db.adapters.transfer.admission import TransactionalTransferAdmissionRepository
-from app.db.models.transferhistory import TransferHistory
+from app.db.adapters.transfer import TransactionalTransferAdmissionRepository
 from app.db.models.transferpending import TransferPending
 from app.domain.context import MediaInfo
 from app.domain.meta.metabase import MetaBase
 from app.modules.filemanager.module import FileManagerModule
 from app.modules.filemanager.transhandler import TransHandler
 from app.runtime.extensions.module.dispatcher import (
+    FrozenModuleProviderMissingError,
     ModuleInvocationDispatcher,
 )
 from app.schemas.exception import StorageQueryError
@@ -208,164 +198,10 @@ def _planned_admission(task: TransferTask, checkpoint):
     )
 
 
-class _ExecutionRepositoryStub:
-    """为规划编排测试提供严格但内存化的 execution repository。"""
-
-    def __init__(self) -> None:
-        """初始化空步骤集合与未启动执行态。"""
-        self.steps = {}
-        self.state = TransferExecutionState.NOT_STARTED
-        self.checkpoint = None
-
-    def get_snapshot(self, *, task_id):
-        """返回当前任务的类型化执行投影。"""
-        return TransferExecutionSnapshot(
-            task_id=task_id,
-            state=self.state,
-            checkpoint=self.checkpoint,
-            retry_generation=0,
-            retry_count=0,
-            retry_due_at=None,
-            settlement_revision=0,
-            terminal_history_id=None,
-            last_error=None,
-            steps=tuple(self.steps.values()),
-        )
-
-    def prepare_step(self, *, task_id, lease_token, intent):
-        """幂等保存准备态步骤。"""
-        del lease_token
-        existing = self.steps.get(intent.operation_id)
-        if existing is not None:
-            return existing
-        step = TransferExecutionStep(
-            task_id=task_id,
-            operation_id=intent.operation_id,
-            checkpoint_fingerprint=intent.checkpoint_fingerprint,
-            ordinal=intent.ordinal,
-            phase=intent.phase,
-            kind=intent.kind,
-            state=TransferStepState.PREPARED,
-            attempt_token=None,
-            attempt_count=0,
-            intent=intent,
-            result=None,
-            last_error=None,
-            prepared_at="2026-08-27 10:00:00",
-            started_at=None,
-            completed_at=None,
-            updated_at="2026-08-27 10:00:00",
-        )
-        self.steps[intent.operation_id] = step
-        return step
-
-    def start_step(
-            self,
-            *,
-            task_id,
-            lease_token,
-            operation_id,
-            attempt_token,
-    ):
-        """把准备态步骤推进到已开始。"""
-        del task_id, lease_token
-        step = replace(
-            self.steps[operation_id],
-            state=TransferStepState.STARTED,
-            attempt_token=attempt_token,
-            attempt_count=1,
-            started_at="2026-08-27 10:00:01",
-        )
-        self.steps[operation_id] = step
-        self.state = TransferExecutionState.RUNNING
-        return step
-
-    def complete_step(
-            self,
-            *,
-            task_id,
-            lease_token,
-            operation_id,
-            attempt_token,
-            result,
-    ):
-        """以当前 attempt 提交成功证据。"""
-        del task_id, lease_token
-        assert self.steps[operation_id].attempt_token == attempt_token
-        step = replace(
-            self.steps[operation_id],
-            state=TransferStepState.SUCCEEDED,
-            result=result,
-            completed_at="2026-08-27 10:00:02",
-        )
-        self.steps[operation_id] = step
-        return step
-
-    def checkpoint_execution(self, *, task_id, lease_token, checkpoint):
-        """保存可重放终态的聚合检查点。"""
-        del lease_token
-        self.state = TransferExecutionState.SETTLING
-        self.checkpoint = checkpoint
-        return self.get_snapshot(task_id=task_id)
-
-    def mark_manual_review(
-            self,
-            *,
-            task_id,
-            lease_token,
-            operation_id,
-            attempt_token,
-            error,
-            evidence,
-    ):
-        """把执行结果不确定的步骤隔离到人工复核态。"""
-        del lease_token
-        step = self.steps[operation_id]
-        assert step.attempt_token == attempt_token
-        self.steps[operation_id] = replace(
-            step,
-            state=TransferStepState.MANUAL_REVIEW,
-            result=evidence,
-            last_error=error,
-        )
-        self.state = TransferExecutionState.MANUAL_REVIEW
-        return self.get_snapshot(task_id=task_id)
-
-
 def _chain(*, repository=None, checkpoint=None, result=None) -> TransferChain:
     """构造只保留规划编排依赖的 TransferChain 骨架。"""
     chain = object.__new__(TransferChain)
-    chain.transfer_history_repository = Mock()
-    chain.transfer_execution_repository = Mock()
     chain._transfer_admissions = repository or Mock()
-    chain._transfer_executions = _ExecutionRepositoryStub()
-    chain.durable_event_writer = Mock()
-    chain._worker_owner_id = "planning-owner"
-    chain._owned_leases = {}
-    chain._queued_lease_tokens = set()
-    chain._worker_state_lock = threading.RLock()
-    chain._closing = False
-    chain._recovery_wakeup_event = threading.Event()
-    chain._TransferChain__ensure_lease_heartbeat_owner = Mock()
-
-    def claim_task(**kwargs):
-        """为规划测试返回与进程 owner 匹配的稳定 claim。"""
-        return transfer_application.TransferAdmission(
-            task_id=kwargs["task_id"],
-            storage="local",
-            src_path="/downloads/Movie.2026.mkv",
-            state="accepted",
-            created_at="2026-08-27 10:00:00",
-            updated_at="2026-08-27 10:00:00",
-            planning_input=_planning_input(),
-            lease_owner=kwargs["owner_id"],
-            lease_token=f"lease-{kwargs['task_id']}",
-            lease_expires_at="2026-08-27 10:02:00.000000",
-            heartbeat_at="2026-08-27 10:00:00.000000",
-            attempt_count=1,
-        )
-
-    chain._transfer_admissions.claim_task.side_effect = claim_task
     chain._module_dispatcher = Mock()
     chain._module_dispatcher.freeze_plugin_providers.return_value = ()
     chain.eventmanager = Mock()
@@ -378,43 +214,6 @@ def _chain(*, repository=None, checkpoint=None, result=None) -> TransferChain:
             transfer_type="copy",
         )
     )
-
-    def run_module(method, *args, **kwargs):
-        """让规划测试沿正式模块入口调用其可观察的宿主执行替身。"""
-        assert method == "execute_transfer_plan"
-        checkpoint_arg = kwargs.pop("checkpoint")
-        return chain.execute_transfer_plan(checkpoint_arg, *args, **kwargs)
-
-    chain.run_module = Mock(side_effect=run_module)
-    return chain
-
-
-def _replay_chain(repository) -> TransferChain:
-    """构造绑定固定恢复 owner 且不启动真实 heartbeat 线程的测试链。"""
-    chain = object.__new__(TransferChain)
-    chain._transfer_admissions = repository
-    chain._transfer_executions = Mock()
-    chain._transfer_executions.get_snapshot.side_effect = (
-        lambda *, task_id: TransferExecutionSnapshot(
-            task_id=task_id,
-            state=TransferExecutionState.NOT_STARTED,
-            checkpoint=None,
-            retry_generation=0,
-            retry_count=0,
-            retry_due_at=None,
-            settlement_revision=0,
-            terminal_history_id=None,
-            last_error=None,
-            steps=(),
-        )
-    )
-    chain._worker_owner_id = "replay-owner"
-    chain._owned_leases = {}
-    chain._queued_lease_tokens = set()
-    chain._worker_state_lock = threading.RLock()
-    chain._closing = False
-    chain._recovery_wakeup_event = threading.Event()
-    chain._TransferChain__ensure_lease_heartbeat_owner = Mock()
     return chain
 
 
@@ -429,43 +228,6 @@ def _real_dispatcher(plugins: dict) -> ModuleInvocationDispatcher:
         system_error_handler=Mock(),
         rate_limit_handler=Mock(),
     )
-
-
-def test_non_preview_missing_durable_writer_stops_before_planning_or_execution():
-    """缺少原子 writer 时，持久任务取得租约后也不得开始任何外部流程。"""
-    task = _task()
-    task.bind_admission_task_id("task-missing-writer")
-    _bind_planning_input(task, _planning_input())
-    chain = _chain()
-    chain.durable_event_writer = None
-
-    with pytest.raises(RuntimeError, match="缺少 durable 原子写入端口"):
-        chain._plan_checkpoint_and_execute(task)
-
-    chain._module_dispatcher.freeze_plugin_providers.assert_not_called()
-    chain.plan_transfer.assert_not_called()
-    chain.execute_transfer_plan.assert_not_called()
-
-
-def test_non_preview_missing_execution_repository_stops_before_side_effects():
-    """缺少 execution repository 时不得调用 provider 或文件执行器。"""
-    task = _task()
-    task.bind_admission_task_id("task-missing-execution-repository")
-    _bind_planning_input(task, _planning_input())
-    _bind_checkpoint(task, _checkpoint())
-    chain = _chain()
-    chain._transfer_executions = None
-    chain._TransferChain__restore_planned_task = Mock()
-
-    with pytest.raises(RuntimeError, match="缺少 execution repository"):
-        chain._plan_checkpoint_and_execute(
-            task,
-            source_oper=object(),
-            target_oper=object(),
-        )
-
-    chain._module_dispatcher.execute_frozen_plugin_providers.assert_not_called()
-    chain.execute_transfer_plan.assert_not_called()
 
 
 def test_legacy_provider_runs_only_after_checkpoint_commit_and_short_circuits_host():
@@ -507,7 +269,7 @@ def test_legacy_provider_runs_only_after_checkpoint_commit_and_short_circuits_ho
 
     returned = chain._plan_checkpoint_and_execute(task)
 
-    assert returned == plugin_result
+    assert returned is plugin_result
     assert calls == ["checkpoint", "plugin"]
     chain.plan_transfer.assert_not_called()
     chain.execute_transfer_plan.assert_not_called()
@@ -741,8 +503,8 @@ def test_missing_frozen_provider_keeps_pending_and_skips_cleanup() -> None:
     chain._transfer_storage_chain = Mock(return_value=storage_chain)
 
     with pytest.raises(
-        RuntimeError,
-        match=r"禁止自动重放.*ProviderTwo/插件二\.transfer",
+        FrozenModuleProviderMissingError,
+        match=r"ProviderTwo/插件二\.transfer",
     ):
         chain._plan_checkpoint_and_execute(task)
 
@@ -963,7 +725,6 @@ def test_provider_empty_fallback_cas_failure_blocks_host_execution():
     chain.execute_transfer_plan.assert_not_called()
     repository.record_planning_failure.assert_called_once_with(
         task_id="task-provider-cas-failure",
-        lease_token="lease-task-provider-cas-failure",
         error="CAS failed",
     )
 
@@ -1017,7 +778,7 @@ def test_provider_pending_crash_replay_executes_snapshot_without_host_planning()
 
     returned = recovered_chain._plan_checkpoint_and_execute(recovered_task)
 
-    assert returned == recovered_result
+    assert returned is recovered_result
     recovered_chain._module_dispatcher.freeze_plugin_providers.assert_not_called()
     recovered_chain.plan_transfer.assert_not_called()
     recovered_chain._transfer_admissions.checkpoint_plan.assert_not_called()
@@ -1029,7 +790,7 @@ def test_provider_pending_crash_replay_executes_snapshot_without_host_planning()
 
 
 def test_legacy_transfer_command_uses_durable_pipeline_and_settles_pending():
-    """旧同步调用必须经过 admission、checkpoint、执行和原子终态结算。"""
+    """旧同步调用必须经过 admission、checkpoint、执行和终态注销。"""
     calls = []
     repository = Mock()
     repository.admit.side_effect = (
@@ -1043,47 +804,18 @@ def test_legacy_transfer_command_uses_durable_pipeline_and_settles_pending():
         return SimpleNamespace(checkpoint=kwargs["checkpoint"])
 
     repository.checkpoint_plan.side_effect = checkpoint_plan
+    repository.discard_task.side_effect = (
+        lambda **_kwargs: calls.append("discard") or 1
+    )
     result = TransferInfo(
         success=True,
         fileitem=_task().fileitem,
         transfer_type="copy",
     )
     chain = _chain(repository=repository, checkpoint=_checkpoint(), result=result)
-    execution_checkpoint = TransferExecutionCheckpoint.create(
-        payload={
-            "outcome": "succeeded",
-            "transferinfo": result.model_dump(mode="json"),
-        },
-        operation_ids=("operation-legacy-command",),
+    chain.execute_transfer_plan.side_effect = (
+        lambda *_args, **_kwargs: calls.append("execute") or result
     )
-    step_runner = Mock()
-    step_runner.checkpoint.return_value = execution_checkpoint
-    chain._TransferChain__build_durable_step_runner = Mock(return_value=step_runner)
-    chain.run_module = Mock(
-        side_effect=lambda *_args, **_kwargs: calls.append("execute") or result
-    )
-    chain.durable_event_writer = Mock()
-
-    def settle_result(**kwargs):
-        """执行历史暂存并模拟 writer 返回 task-aware 结算投影。"""
-        staging = Mock()
-        staging.replace.return_value = TransferHistorySnapshot(
-            id=31,
-            status=True,
-            src=result.fileitem.path,
-            src_storage=result.fileitem.storage,
-            src_fileitem=result.fileitem.model_dump(mode="json"),
-        )
-        history = kwargs["stage_history"](staging)
-        assert history.status is True
-        calls.append("settle")
-        return TransferSettlementResult(
-            history_id=history.id,
-            settlement_revision=1,
-            pending_deleted=True,
-        )
-
-    chain.durable_event_writer.transfer_result.side_effect = settle_result
     meta = MetaBase("Movie.2026.mkv")
     mediainfo = MediaInfo()
 
@@ -1097,13 +829,10 @@ def test_legacy_transfer_command_uses_durable_pipeline_and_settles_pending():
     )
 
     assert returned is result
-    assert calls == ["admit", "checkpoint", "execute", "settle"]
-    repository.abandon_unstarted.assert_not_called()
-    writer_call = chain.durable_event_writer.transfer_result.call_args.kwargs
-    assert writer_call["topic"] is None
-    assert writer_call["publish"] is None
-    assert writer_call["settlement"].task_id == "task-legacy-command"
-    assert writer_call["settlement"].outcome == "succeeded"
+    assert calls == ["admit", "checkpoint", "execute", "discard"]
+    repository.discard_task.assert_called_once_with(
+        task_id="task-legacy-command"
+    )
 
 
 def test_cleanup_destination_is_idempotent_and_uses_storage_safety_policy():
@@ -1161,7 +890,6 @@ def test_planning_payload_round_trip_is_self_contained_and_stable():
 def test_repository_rejects_checkpoint_with_mismatched_planning_fingerprint(tmp_path):
     """checkpoint 内嵌输入与 accepted 指纹不一致时必须拒绝状态跃迁。"""
     engine = create_engine(f"sqlite:///{tmp_path / 'fingerprint.db'}")
-    TransferHistory.__table__.create(engine)
     TransferPending.__table__.create(engine)
     repository = TransactionalTransferAdmissionRepository(sessionmaker(bind=engine))
     accepted_input = _planning_input(target_path="/library/A")
@@ -1170,32 +898,16 @@ def test_repository_rejects_checkpoint_with_mismatched_planning_fingerprint(tmp_
         src_path="/downloads/Movie.2026.mkv",
         planning_input=accepted_input,
     )
-    claimed = repository.claim_task(
-        task_id=admission.task_id,
-        owner_id="fingerprint-test",
-        lease_seconds=120,
-    )
-    assert claimed is not None
-    assert claimed.lease_token is not None
     mismatched = _checkpoint(target_path="/library/B/Movie.mkv")
 
     with pytest.raises(ValueError, match="指纹|fingerprint|规划输入"):
         repository.checkpoint_plan(
             task_id=admission.task_id,
-            lease_token=claimed.lease_token,
             input_fingerprint=accepted_input.fingerprint,
             checkpoint=mismatched,
         )
 
-    assert repository.release_claim(
-        task_id=admission.task_id,
-        lease_token=claimed.lease_token,
-    ) is True
-    recovered = repository.claim_recoverable(
-        owner_id="fingerprint-recovery",
-        limit=10,
-        lease_seconds=120,
-    )
+    recovered = repository.list_recoverable()
     assert len(recovered) == 1
     assert recovered[0].state == "accepted"
     assert recovered[0].checkpoint is None
@@ -1205,7 +917,6 @@ def test_repository_rejects_checkpoint_with_mismatched_planning_fingerprint(tmp_
 def test_repository_round_trips_accepted_and_planned_recovery_states(tmp_path):
     """仓储必须同时恢复 accepted 输入和 planned 自包含 checkpoint。"""
     engine = create_engine(f"sqlite:///{tmp_path / 'recoverable.db'}")
-    TransferHistory.__table__.create(engine)
     TransferPending.__table__.create(engine)
     repository = TransactionalTransferAdmissionRepository(sessionmaker(bind=engine))
     planning_input = _planning_input()
@@ -1215,35 +926,23 @@ def test_repository_round_trips_accepted_and_planned_recovery_states(tmp_path):
         planning_input=planning_input,
     )
 
-    claimed = repository.claim_task(
-        task_id=admission.task_id,
-        owner_id="roundtrip-owner",
-        lease_seconds=120,
-    )
-    assert claimed is not None
-    assert claimed.lease_token is not None
-    assert claimed.state == "accepted"
-    assert claimed.planning_input == planning_input
-    assert claimed.checkpoint is None
+    accepted = repository.list_recoverable()
+    assert len(accepted) == 1
+    assert accepted[0].state == "accepted"
+    assert accepted[0].planning_input == planning_input
+    assert accepted[0].checkpoint is None
 
     repository.record_planning_failure(
         task_id=admission.task_id,
-        lease_token=claimed.lease_token,
         error="rename unavailable",
     )
-    with sessionmaker(bind=engine)() as session:
-        retryable = session.execute(
-            select(TransferPending).where(
-                TransferPending.task_id == admission.task_id
-            )
-        ).scalar_one()
-        assert retryable.state == "accepted"
-        assert retryable.last_error == "rename unavailable"
+    retryable = repository.list_recoverable()[0]
+    assert retryable.state == "accepted"
+    assert retryable.last_error == "rename unavailable"
 
     checkpoint = _checkpoint()
     planned = repository.checkpoint_plan(
         task_id=admission.task_id,
-        lease_token=claimed.lease_token,
         input_fingerprint=planning_input.fingerprint,
         checkpoint=checkpoint,
     )
@@ -1251,18 +950,7 @@ def test_repository_round_trips_accepted_and_planned_recovery_states(tmp_path):
     assert planned.state == "planned"
     assert planned.checkpoint == checkpoint
     assert planned.last_error is None
-    assert repository.release_claim(
-        task_id=admission.task_id,
-        lease_token=claimed.lease_token,
-    ) is True
-    recovered = repository.claim_recoverable(
-        owner_id="roundtrip-recovery",
-        limit=10,
-        lease_seconds=120,
-    )
-    assert len(recovered) == 1
-    assert recovered[0].state == "planned"
-    assert recovered[0].checkpoint == checkpoint
+    assert repository.list_recoverable() == [planned]
     engine.dispose()
 
 
@@ -1294,10 +982,6 @@ def test_checkpoint_commit_precedes_executor_and_sync_task_is_admitted():
     repository.admit.side_effect = admit
     repository.checkpoint_plan.side_effect = checkpoint_plan
     chain = _chain(repository=repository, checkpoint=checkpoint, result=result)
-    claim_task = repository.claim_task.side_effect
-    repository.claim_task.side_effect = lambda **kwargs: (
-        order.append("claim") or claim_task(**kwargs)
-    )
     chain.plan_transfer.side_effect = lambda *_args, **_kwargs: (
         order.append("plan") or checkpoint
     )
@@ -1308,13 +992,12 @@ def test_checkpoint_commit_precedes_executor_and_sync_task_is_admitted():
     returned = chain._plan_checkpoint_and_execute(task)
 
     assert returned is result
-    assert order == ["admit", "claim", "plan", "commit-checkpoint", "execute"]
+    assert order == ["admit", "plan", "commit-checkpoint", "execute"]
     assert task.admission_task_id == "task-sync"
     repository.admit.assert_called_once()
     assert repository.admit.call_args.kwargs["planning_input"] is planning_input
     repository.checkpoint_plan.assert_called_once_with(
         task_id="task-sync",
-        lease_token="lease-task-sync",
         input_fingerprint=planning_input.fingerprint,
         checkpoint=checkpoint,
     )
@@ -1509,15 +1192,11 @@ def test_accepted_replay_restores_explicit_context_without_online_lookup(
         updated_at="2026-08-27 10:00:00",
         input_fingerprint=planning_input.fingerprint,
         planning_input=planning_input,
-        lease_owner="replay-owner",
-        lease_token="lease-task-accepted-offline",
-        lease_expires_at="2026-08-27 10:02:00.000000",
-        heartbeat_at="2026-08-27 10:00:00.000000",
-        attempt_count=1,
     )
     replay_repository = Mock()
-    replay_repository.claim_recoverable.return_value = [admission]
-    replay_chain = _replay_chain(replay_repository)
+    replay_repository.list_recoverable.return_value = [admission]
+    replay_chain = object.__new__(TransferChain)
+    replay_chain._transfer_admissions = replay_repository
     replay_chain._execute_transfer = Mock()
     queued_tasks = []
     replay_chain.put_to_queue = Mock(
@@ -1551,22 +1230,21 @@ def test_accepted_replay_restores_explicit_context_without_online_lookup(
         repository=execution_repository,
         checkpoint=checkpoint,
     )
-    execution_chain._worker_owner_id = "replay-owner"
-    execution_chain._owned_leases = {
-        admission.task_id: (str(admission.lease_token), float("inf"))
-    }
     execution_chain.jobview = Mock()
     execution_chain.eventmanager = Mock()
     execution_chain.eventmanager.send_event.return_value = None
     execution_chain.runtime_config = SimpleNamespace(scrape_follow_tmdb=True)
     execution_chain._TransferChain__finish_scrape_batch_task = Mock()
-    execution_chain.transfer_history_repository = Mock()
     monkeypatch.setattr(
-        "app.chain.transfer.execution.MediaChain",
+        "app.chain.transfer.get_chain_transfer_history_port",
+        lambda: Mock(),
+    )
+    monkeypatch.setattr(
+        "app.chain.transfer.MediaChain",
         Mock(side_effect=AssertionError("accepted replay 不应重新在线识别")),
     )
     monkeypatch.setattr(
-        "app.chain.transfer.execution.TmdbChain",
+        "app.chain.transfer.TmdbChain",
         Mock(side_effect=AssertionError("accepted replay 不应重新在线获取剧集")),
     )
 
@@ -1614,15 +1292,11 @@ def test_accepted_replay_with_explicit_empty_episodes_stays_offline(
         created_at="2026-08-27 10:00:00",
         updated_at="2026-08-27 10:00:00",
         planning_input=planning_input,
-        lease_owner="replay-owner",
-        lease_token="lease-task-accepted-empty-episodes",
-        lease_expires_at="2026-08-27 10:02:00.000000",
-        heartbeat_at="2026-08-27 10:00:00.000000",
-        attempt_count=1,
     )
     replay_repository = Mock()
-    replay_repository.claim_recoverable.return_value = [admission]
-    replay_chain = _replay_chain(replay_repository)
+    replay_repository.list_recoverable.return_value = [admission]
+    replay_chain = object.__new__(TransferChain)
+    replay_chain._transfer_admissions = replay_repository
     queued_tasks = []
     replay_chain.put_to_queue = Mock(
         side_effect=lambda task: queued_tasks.append(task) or True
@@ -1645,22 +1319,21 @@ def test_accepted_replay_with_explicit_empty_episodes_stays_offline(
         repository=execution_repository,
         checkpoint=checkpoint,
     )
-    execution_chain._worker_owner_id = "replay-owner"
-    execution_chain._owned_leases = {
-        admission.task_id: (str(admission.lease_token), float("inf"))
-    }
     execution_chain.jobview = Mock()
     execution_chain.eventmanager = Mock()
     execution_chain.eventmanager.send_event.return_value = None
     execution_chain.runtime_config = SimpleNamespace(scrape_follow_tmdb=True)
     execution_chain._TransferChain__finish_scrape_batch_task = Mock()
-    execution_chain.transfer_history_repository = Mock()
     monkeypatch.setattr(
-        "app.chain.transfer.execution.MediaChain",
+        "app.chain.transfer.get_chain_transfer_history_port",
+        lambda: Mock(),
+    )
+    monkeypatch.setattr(
+        "app.chain.transfer.MediaChain",
         Mock(side_effect=AssertionError("accepted replay 不应重新在线识别")),
     )
     monkeypatch.setattr(
-        "app.chain.transfer.execution.TmdbChain",
+        "app.chain.transfer.TmdbChain",
         Mock(side_effect=AssertionError("accepted replay 不应重新在线获取剧集")),
     )
 
@@ -1683,7 +1356,7 @@ def test_planned_execution_restores_resolved_context_without_online_recognition(
     chain.eventmanager.send_event.return_value = None
 
     with patch(
-        "app.chain.transfer.execution.MediaChain",
+        "app.chain.transfer.MediaChain",
         side_effect=AssertionError("planned replay 不应重新在线识别"),
     ):
         result = chain._TransferChain__handle_transfer(task)
@@ -1748,108 +1421,36 @@ def test_filemanager_resolves_drifted_target_from_checkpoint(monkeypatch):
 
 
 def test_pre_checkpoint_recognition_failure_records_retryable_error(monkeypatch):
-    """未识别拒绝必须先建立 plan/execution checkpoint，且不提前写终态副作用。"""
+    """准入后、checkpoint 前的业务失败必须写 last_error 并保持 accepted。"""
     task = _task()
     task.meta = MetaBase("Unrecognized.Movie.2026.mkv")
     task.bind_admission_task_id("task-before-checkpoint")
-    chain = _chain()
-    chain._worker_owner_id = "recognition-owner"
+    chain = object.__new__(TransferChain)
+    chain._transfer_admissions = Mock()
     chain.jobview = Mock()
     chain.queue_failed_transfer_notification = Mock()
     chain.runtime_config = SimpleNamespace(
-        ai_agent_enable=True,
-        ai_agent_retry_transfer=True,
+        ai_agent_enable=False,
+        ai_agent_retry_transfer=False,
     )
     chain._TransferChain__mark_torrent_completed_if_done = Mock()
-    chain._transfer_admissions.checkpoint_plan.side_effect = (
-        lambda **kwargs: _planned_admission(task, kwargs["checkpoint"])
-    )
     media_chain = Mock()
     media_chain.recognize_by_meta.return_value = None
-    monkeypatch.setattr("app.chain.transfer.execution.MediaChain", lambda: media_chain)
-    chain.transfer_history_repository = SimpleNamespace()
-    record_transfer_failure = Mock()
-    add_transfer_fail = Mock()
+    monkeypatch.setattr("app.chain.transfer.MediaChain", lambda: media_chain)
     monkeypatch.setattr(
-        "app.chain.transfer.settlement.record_transfer_failure",
-        record_transfer_failure,
+        "app.chain.transfer.get_chain_transfer_history_port",
+        lambda: SimpleNamespace(),
     )
-    monkeypatch.setattr("app.chain.transfer.settlement.add_transfer_fail", add_transfer_fail)
+    monkeypatch.setattr("app.chain.transfer.record_transfer_failure", Mock())
+    monkeypatch.setattr("app.chain.transfer.add_transfer_fail", lambda **_kwargs: None)
 
     result = chain._TransferChain__handle_transfer(task)
 
     assert result == (False, "未识别到媒体信息")
-    assert task.plan_checkpoint is not None
-    assert task.plan_checkpoint.rejection_error == "未识别到媒体信息"
-    assert task.plan_checkpoint.items == ()
-    assert task.execution_checkpoint is not None
-    assert task.execution_checkpoint.payload["outcome"] == "failed"
-    assert [step.kind for step in chain._transfer_executions.steps.values()] == [
-        "reject"
-    ]
-    chain._transfer_admissions.record_planning_failure.assert_not_called()
-    record_transfer_failure.assert_not_called()
-    add_transfer_fail.assert_not_called()
-    chain.queue_failed_transfer_notification.assert_not_called()
-    chain._TransferChain__mark_torrent_completed_if_done.assert_not_called()
-
-
-def test_recognition_rejection_without_writer_has_zero_terminal_side_effects(
-        monkeypatch,
-) -> None:
-    """缺 writer 时未识别拒绝不得提交计划、历史、通知或 AI 重试。"""
-    task = _task()
-    task.meta = MetaBase("Unrecognized.Movie.2026.mkv")
-    task.bind_admission_task_id("task-rejection-missing-writer")
-    chain = _chain()
-    chain.durable_event_writer = None
-    chain.jobview = Mock()
-    chain.queue_failed_transfer_notification = Mock()
-    chain._TransferChain__mark_torrent_completed_if_done = Mock()
-    chain.runtime_config = SimpleNamespace(
-        ai_agent_enable=True,
-        ai_agent_retry_transfer=True,
+    chain._transfer_admissions.record_planning_failure.assert_called_once_with(
+        task_id="task-before-checkpoint",
+        error="未识别到媒体信息",
     )
-    media_chain = Mock()
-    media_chain.recognize_by_meta.return_value = None
-    monkeypatch.setattr("app.chain.transfer.execution.MediaChain", lambda: media_chain)
-    chain.transfer_history_repository = SimpleNamespace()
-    record_transfer_failure = Mock()
-    add_transfer_fail = Mock()
-    monkeypatch.setattr(
-        "app.chain.transfer.settlement.record_transfer_failure",
-        record_transfer_failure,
-    )
-    monkeypatch.setattr("app.chain.transfer.settlement.add_transfer_fail", add_transfer_fail)
-
-    with pytest.raises(RuntimeError, match="缺少 durable 原子写入端口"):
-        chain._TransferChain__handle_transfer(task)
-
-    assert task.plan_checkpoint is None
-    assert task.execution_checkpoint is None
-    chain._transfer_admissions.checkpoint_plan.assert_not_called()
-    record_transfer_failure.assert_not_called()
-    add_transfer_fail.assert_not_called()
-    chain.queue_failed_transfer_notification.assert_not_called()
-    chain._TransferChain__mark_torrent_completed_if_done.assert_not_called()
-
-
-def test_planning_rejection_checkpoint_round_trips_and_rejects_file_steps():
-    """拒绝原因必须稳定序列化，且不能与真实文件步骤同时存在。"""
-    checkpoint = replace(
-        _checkpoint(),
-        items=(),
-        rejection_error="未识别到媒体信息",
-    )
-
-    restored = transfer_application.TransferPlanCheckpoint.from_payload(
-        checkpoint.to_payload()
-    )
-
-    assert restored == checkpoint
-    assert restored.rejection_error == "未识别到媒体信息"
-    with pytest.raises(ValueError, match="不得包含文件步骤"):
-        replace(checkpoint, items=_checkpoint().items)
 
 
 def test_preview_plans_without_persistence_or_file_side_effects():
@@ -1931,49 +1532,32 @@ def test_filemanager_explicit_plan_then_execute_uses_same_checkpoint():
 
 def test_sync_and_worker_paths_share_checkpoint_orchestrator():
     """同步直跑和后台 worker 必须汇入同一个检查点编排，不得旁路旧 transfer。"""
-    execution_module = ast.parse(
-        inspect.getsource(inspect.getmodule(TransferChain._TransferChain__handle_transfer))
-    )
-    workflow_module = ast.parse(
-        inspect.getsource(inspect.getmodule(TransferChain._run_transfer_workflow))
-    )
-    execution_functions = {
+    module = ast.parse(inspect.getsource(inspect.getmodule(TransferChain)))
+    functions = {
         node.name: node
-        for node in ast.walk(execution_module)
+        for node in ast.walk(module)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    workflow_functions = {
-        node.name: node
-        for node in ast.walk(workflow_module)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    handler = execution_functions["_TransferChain__handle_transfer"]
+    handler = functions["__handle_transfer"]
     handler_calls = {
         node.func.attr
         for node in ast.walk(handler)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    performer = execution_functions["_TransferChain__perform_transfer"]
+    performer = functions["__perform_transfer"]
     performer_calls = {
         node.func.attr
         for node in ast.walk(performer)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    execute_batch = workflow_functions["_run_transfer_workflow"]
+    execute_batch = functions["_execute_transfer"]
     execute_calls = {
         node.func.attr
         for node in ast.walk(execute_batch)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    execute_tasks = workflow_functions["_execute_transfer_tasks"]
-    execute_task_calls = {
-        node.func.attr
-        for node in ast.walk(execute_tasks)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-    }
 
-    assert "_TransferChain__perform_transfer" in handler_calls
+    assert "__perform_transfer" in handler_calls
     assert "_plan_checkpoint_and_execute" in performer_calls
     assert "transfer" not in handler_calls
-    assert "_execute_transfer_tasks" in execute_calls
-    assert "_TransferChain__handle_transfer" in execute_task_calls
+    assert "__handle_transfer" in execute_calls

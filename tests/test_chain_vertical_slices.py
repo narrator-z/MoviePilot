@@ -4,12 +4,12 @@ import inspect
 
 import pytest
 
-from app.chain.download.facade import DownloadChain
-from app.chain.media.facade import MediaChain
+from app.chain.download import DownloadChain
+from app.chain.media import MediaChain
 from app.chain.message import MessageChain
-from app.chain.search.facade import SearchChain
-from app.chain.subscribe.facade import SubscribeChain
-from app.chain.transfer.facade import TransferChain
+from app.chain.search import SearchChain
+from app.chain.subscribe import SubscribeChain
+from app.chain.transfer import TransferChain
 
 
 @pytest.mark.parametrize(
@@ -27,8 +27,8 @@ from app.chain.transfer.facade import TransferChain
             SearchChain,
             {
                 "save_last_search_params": "_search_state",
-                "last_search_params": "SearchCacheOwner",
-                "last_search_results": "SearchCacheOwner",
+                "last_search_params": "_search_state",
+                "last_search_results": "_search_state",
             },
         ),
         (

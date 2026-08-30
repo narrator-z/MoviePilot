@@ -1,10 +1,10 @@
-from typing import Any, Callable, List, Optional, Sequence
+from typing import Callable, List, Optional
 
 import pillow_avif  # noqa: F401  # pylint: disable=unused-import  # AVIF 注册副作用
 
 from app.application.image import ImageHelper
+from app.chain import ChainBase
 from app.chain.bangumi import BangumiChain
-from app.chain.base import ChainBase
 from app.chain.douban import DoubanChain
 from app.chain.listenbrainz import ListenBrainzChain
 from app.chain.tmdb import TmdbChain
@@ -35,111 +35,6 @@ class RecommendChain(ChainBase, metaclass=Singleton):
     # 推荐缓存区域
     recommend_cache_region = "recommend"
 
-    @staticmethod
-    def _music_chart_request(
-            range_name: str,
-            page: int,
-            count: int,
-            entity: str,
-    ) -> dict[str, Any]:
-        """构造同步和异步榜单入口共用的 ListenBrainz 请求。"""
-        return {
-            "range_name": range_name,
-            "page": page,
-            "count": count,
-            "entity": entity,
-        }
-
-    @staticmethod
-    def _music_discover_request(
-            page: int,
-            count: int,
-            entity: str,
-            mode: str,
-            tags: str,
-            sort: str,
-    ) -> dict[str, Any]:
-        """构造同步和异步豆瓣音乐发现入口共用的请求。"""
-        return {
-            "page": page,
-            "count": count,
-            "entity": entity,
-            "mode": mode,
-            "tags": tags,
-            "sort": sort,
-        }
-
-    @staticmethod
-    def _tmdb_discover_request(
-            mtype: MediaType,
-            sort_by: Optional[str],
-            with_genres: Optional[str],
-            with_original_language: Optional[str],
-            with_keywords: Optional[str],
-            with_watch_providers: Optional[str],
-            vote_average: Optional[float],
-            vote_count: Optional[int],
-            release_date: Optional[str],
-            page: Optional[int],
-    ) -> dict[str, Any]:
-        """构造同步和异步 TMDB 发现入口共用的业务请求。"""
-        return {
-            "mtype": mtype,
-            "sort_by": sort_by,
-            "with_genres": with_genres,
-            "with_original_language": with_original_language,
-            "with_keywords": with_keywords,
-            "with_watch_providers": with_watch_providers,
-            "vote_average": vote_average,
-            "vote_count": vote_count,
-            "release_date": release_date,
-            "page": page,
-        }
-
-    @staticmethod
-    def _douban_discover_request(
-            mtype: MediaType,
-            sort: Optional[str],
-            tags: Optional[str],
-            page: Optional[int],
-            count: Optional[int],
-    ) -> dict[str, Any]:
-        """构造同步和异步豆瓣影视发现入口共用的业务请求。"""
-        return {
-            "mtype": mtype,
-            "sort": sort,
-            "tags": tags,
-            "page": page,
-            "count": count,
-        }
-
-    @staticmethod
-    def _supports_music_source(media_source: MediaSource) -> bool:
-        """判断推荐发现是否支持请求中的音乐数据源。"""
-        return normalize_media_source(media_source) == MediaSource.DoubanMusic
-
-    @staticmethod
-    def _serialize_medias(
-            medias: Optional[Sequence[Any]],
-    ) -> list[dict[str, Any]]:
-        """把来源媒体对象统一投影为推荐缓存使用的字典。"""
-        return [media.to_dict() for media in medias] if medias else []
-
-    @classmethod
-    def _serialize_media_page(
-            cls,
-            medias: Optional[Sequence[Any]],
-            page: Optional[int],
-            count: Optional[int],
-    ) -> list[dict[str, Any]]:
-        """按规范化页码截取来源媒体，并统一投影为推荐字典。"""
-        if not medias:
-            return []
-        normalized_page = page or 1
-        normalized_count = count or 30
-        start = (normalized_page - 1) * normalized_count
-        return cls._serialize_medias(medias[start:start + normalized_count])
-
     def music_chart(
             self,
             range_name: str,
@@ -151,8 +46,12 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             entity: str = MUSIC_ENTITY_RECORDING,
     ) -> list[MusicInfo]:
         """读取 ListenBrainz 音乐榜单并应用推荐筛选与排序。"""
-        request = self._music_chart_request(range_name, page, count, entity)
-        results = ListenBrainzChain().music_chart(**request)
+        results = ListenBrainzChain().music_chart(
+            range_name=range_name,
+            page=page,
+            count=count,
+            entity=entity,
+        )
         return self._filter_music_candidates(
             results,
             count=count,
@@ -172,8 +71,12 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             entity: str = MUSIC_ENTITY_RECORDING,
     ) -> list[MusicInfo]:
         """异步读取 ListenBrainz 音乐榜单并应用推荐筛选与排序。"""
-        request = self._music_chart_request(range_name, page, count, entity)
-        results = await ListenBrainzChain().async_music_chart(**request)
+        results = await ListenBrainzChain().async_music_chart(
+            range_name=range_name,
+            page=page,
+            count=count,
+            entity=entity,
+        )
         return self._filter_music_candidates(
             results,
             count=count,
@@ -218,10 +121,16 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             sort: str = "U",
     ) -> list[MusicInfo]:
         """按固定音乐来源读取发现内容，当前支持豆瓣音乐。"""
-        if not self._supports_music_source(media_source):
+        if normalize_media_source(media_source) != MediaSource.DoubanMusic:
             return []
-        request = self._music_discover_request(page, count, entity, mode, tags, sort)
-        return DoubanChain().music_discover(**request)
+        return DoubanChain().music_discover(
+            page=page,
+            count=count,
+            entity=entity,
+            mode=mode,
+            tags=tags,
+            sort=sort,
+        )
 
     async def async_music_discover(
             self,
@@ -234,10 +143,16 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             sort: str = "U",
     ) -> list[MusicInfo]:
         """异步按固定音乐来源读取发现内容，当前支持豆瓣音乐。"""
-        if not self._supports_music_source(media_source):
+        if normalize_media_source(media_source) != MediaSource.DoubanMusic:
             return []
-        request = self._music_discover_request(page, count, entity, mode, tags, sort)
-        return await DoubanChain().async_music_discover(**request)
+        return await DoubanChain().async_music_discover(
+            page=page,
+            count=count,
+            entity=entity,
+            mode=mode,
+            tags=tags,
+            sort=sort,
+        )
 
     @staticmethod
     def _filter_music_candidates(
@@ -397,12 +312,17 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         TMDB热门电影
         """
-        request = self._tmdb_discover_request(
-            MediaType.MOVIE, sort_by, with_genres, with_original_language,
-            with_keywords, with_watch_providers, vote_average, vote_count,
-            release_date, page,
-        )
-        return self._serialize_medias(TmdbChain().tmdb_discover(**request))
+        movies = TmdbChain().tmdb_discover(mtype=MediaType.MOVIE,
+                                           sort_by=sort_by,
+                                           with_genres=with_genres,
+                                           with_original_language=with_original_language,
+                                           with_keywords=with_keywords,
+                                           with_watch_providers=with_watch_providers,
+                                           vote_average=vote_average,
+                                           vote_count=vote_count,
+                                           release_date=release_date,
+                                           page=page)
+        return [movie.to_dict() for movie in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -414,7 +334,7 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             count=count or 30,
             entity=MUSIC_ENTITY_ALBUM,
         )
-        return self._serialize_medias(medias)
+        return [media.to_dict() for media in medias]
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -430,7 +350,7 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             count=count or 30,
             entity=MUSIC_ENTITY_ALBUM,
         )
-        return self._serialize_medias(medias)
+        return [media.to_dict() for media in medias]
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -446,12 +366,17 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         TMDB热门电视剧
         """
-        request = self._tmdb_discover_request(
-            MediaType.TV, sort_by, with_genres, with_original_language,
-            with_keywords, with_watch_providers, vote_average, vote_count,
-            release_date, page,
-        )
-        return self._serialize_medias(TmdbChain().tmdb_discover(**request))
+        tvs = TmdbChain().tmdb_discover(mtype=MediaType.TV,
+                                        sort_by=sort_by,
+                                        with_genres=with_genres,
+                                        with_original_language=with_original_language,
+                                        with_keywords=with_keywords,
+                                        with_watch_providers=with_watch_providers,
+                                        vote_average=vote_average,
+                                        vote_count=vote_count,
+                                        release_date=release_date,
+                                        page=page)
+        return [tv.to_dict() for tv in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -459,7 +384,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         TMDB流行趋势
         """
-        return self._serialize_medias(TmdbChain().tmdb_trending(page=page))
+        infos = TmdbChain().tmdb_trending(page=page)
+        return [info.to_dict() for info in infos] if infos else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -467,7 +393,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         Bangumi每日放送
         """
-        return self._serialize_media_page(BangumiChain().calendar(), page, count)
+        medias = BangumiChain().calendar()
+        return [media.to_dict() for media in medias[(page - 1) * count: page * count]] if medias else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -475,9 +402,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣正在热映
         """
-        return self._serialize_medias(
-            DoubanChain().movie_showing(page=page, count=count)
-        )
+        movies = DoubanChain().movie_showing(page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -486,10 +412,9 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣最新电影
         """
-        request = self._douban_discover_request(
-            MediaType.MOVIE, sort, tags, page, count
-        )
-        return self._serialize_medias(DoubanChain().douban_discover(**request))
+        movies = DoubanChain().douban_discover(mtype=MediaType.MOVIE,
+                                               sort=sort, tags=tags, page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -498,8 +423,9 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣最新电视剧
         """
-        request = self._douban_discover_request(MediaType.TV, sort, tags, page, count)
-        return self._serialize_medias(DoubanChain().douban_discover(**request))
+        tvs = DoubanChain().douban_discover(mtype=MediaType.TV,
+                                            sort=sort, tags=tags, page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -507,9 +433,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣电影TOP250
         """
-        return self._serialize_medias(
-            DoubanChain().movie_top250(page=page, count=count)
-        )
+        movies = DoubanChain().movie_top250(page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -517,9 +442,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣国产剧集榜
         """
-        return self._serialize_medias(
-            DoubanChain().tv_weekly_chinese(page=page, count=count)
-        )
+        tvs = DoubanChain().tv_weekly_chinese(page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -527,9 +451,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣全球剧集榜
         """
-        return self._serialize_medias(
-            DoubanChain().tv_weekly_global(page=page, count=count)
-        )
+        tvs = DoubanChain().tv_weekly_global(page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -537,9 +460,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣热门动漫
         """
-        return self._serialize_medias(
-            DoubanChain().tv_animation(page=page, count=count)
-        )
+        tvs = DoubanChain().tv_animation(page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -547,9 +469,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣热门电影
         """
-        return self._serialize_medias(
-            DoubanChain().movie_hot(page=page, count=count)
-        )
+        movies = DoubanChain().movie_hot(page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -557,7 +478,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         豆瓣热门电视剧
         """
-        return self._serialize_medias(DoubanChain().tv_hot(page=page, count=count))
+        tvs = DoubanChain().tv_hot(page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -574,15 +496,18 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步TMDB热门电影
         """
-        request = self._tmdb_discover_request(
-            MediaType.MOVIE, sort_by, with_genres, with_original_language,
-            with_keywords, with_watch_providers, vote_average, vote_count,
-            release_date, page,
-        )
-        movies = await TmdbChain().async_run_module(
-            "async_tmdb_discover", **request, raise_exception=raise_exception
-        )
-        return self._serialize_medias(movies)
+        movies = await TmdbChain().async_run_module("async_tmdb_discover", mtype=MediaType.MOVIE,
+                                                    sort_by=sort_by,
+                                                    with_genres=with_genres,
+                                                    with_original_language=with_original_language,
+                                                    with_keywords=with_keywords,
+                                                    with_watch_providers=with_watch_providers,
+                                                    vote_average=vote_average,
+                                                    vote_count=vote_count,
+                                                    release_date=release_date,
+                                                    page=page,
+                                                    raise_exception=raise_exception)
+        return [movie.to_dict() for movie in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -599,15 +524,18 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步TMDB热门电视剧
         """
-        request = self._tmdb_discover_request(
-            MediaType.TV, sort_by, with_genres, with_original_language,
-            with_keywords, with_watch_providers, vote_average, vote_count,
-            release_date, page,
-        )
-        tvs = await TmdbChain().async_run_module(
-            "async_tmdb_discover", **request, raise_exception=raise_exception
-        )
-        return self._serialize_medias(tvs)
+        tvs = await TmdbChain().async_run_module("async_tmdb_discover", mtype=MediaType.TV,
+                                                 sort_by=sort_by,
+                                                 with_genres=with_genres,
+                                                 with_original_language=with_original_language,
+                                                 with_keywords=with_keywords,
+                                                 with_watch_providers=with_watch_providers,
+                                                 vote_average=vote_average,
+                                                 vote_count=vote_count,
+                                                 release_date=release_date,
+                                                 page=page,
+                                                 raise_exception=raise_exception)
+        return [tv.to_dict() for tv in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -622,7 +550,7 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             page=page,
             raise_exception=raise_exception,
         )
-        return self._serialize_medias(infos)
+        return [info.to_dict() for info in infos] if infos else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -631,7 +559,7 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         异步Bangumi每日放送
         """
         medias = await BangumiChain().async_run_module("async_bangumi_calendar")
-        return self._serialize_media_page(medias, page, count)
+        return [media.to_dict() for media in medias[(page - 1) * count: page * count]] if medias else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -639,10 +567,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣正在热映
         """
-        movies = await DoubanChain().async_run_module(
-            "async_movie_showing", page=page, count=count
-        )
-        return self._serialize_medias(movies)
+        movies = await DoubanChain().async_run_module("async_movie_showing", page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -654,7 +580,7 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             count=count or 30,
             entity=MUSIC_ENTITY_ALBUM,
         )
-        return self._serialize_medias(medias)
+        return [media.to_dict() for media in medias]
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -670,7 +596,7 @@ class RecommendChain(ChainBase, metaclass=Singleton):
             count=count or 30,
             entity=MUSIC_ENTITY_ALBUM,
         )
-        return self._serialize_medias(medias)
+        return [media.to_dict() for media in medias]
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -679,13 +605,9 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣最新电影
         """
-        request = self._douban_discover_request(
-            MediaType.MOVIE, sort, tags, page, count
-        )
-        movies = await DoubanChain().async_run_module(
-            "async_douban_discover", **request
-        )
-        return self._serialize_medias(movies)
+        movies = await DoubanChain().async_run_module("async_douban_discover", mtype=MediaType.MOVIE,
+                                                      sort=sort, tags=tags, page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -694,11 +616,9 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣最新电视剧
         """
-        request = self._douban_discover_request(MediaType.TV, sort, tags, page, count)
-        tvs = await DoubanChain().async_run_module(
-            "async_douban_discover", **request
-        )
-        return self._serialize_medias(tvs)
+        tvs = await DoubanChain().async_run_module("async_douban_discover", mtype=MediaType.TV,
+                                                   sort=sort, tags=tags, page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -706,10 +626,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣电影TOP250
         """
-        movies = await DoubanChain().async_run_module(
-            "async_movie_top250", page=page, count=count
-        )
-        return self._serialize_medias(movies)
+        movies = await DoubanChain().async_run_module("async_movie_top250", page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -717,10 +635,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣国产剧集榜
         """
-        tvs = await DoubanChain().async_run_module(
-            "async_tv_weekly_chinese", page=page, count=count
-        )
-        return self._serialize_medias(tvs)
+        tvs = await DoubanChain().async_run_module("async_tv_weekly_chinese", page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -728,10 +644,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣全球剧集榜
         """
-        tvs = await DoubanChain().async_run_module(
-            "async_tv_weekly_global", page=page, count=count
-        )
-        return self._serialize_medias(tvs)
+        tvs = await DoubanChain().async_run_module("async_tv_weekly_global", page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -739,10 +653,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣热门动漫
         """
-        tvs = await DoubanChain().async_run_module(
-            "async_tv_animation", page=page, count=count
-        )
-        return self._serialize_medias(tvs)
+        tvs = await DoubanChain().async_run_module("async_tv_animation", page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -750,10 +662,8 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣热门电影
         """
-        movies = await DoubanChain().async_run_module(
-            "async_movie_hot", page=page, count=count
-        )
-        return self._serialize_medias(movies)
+        movies = await DoubanChain().async_run_module("async_movie_hot", page=page, count=count)
+        return [media.to_dict() for media in movies] if movies else []
 
     @log_execution_time(logger=logger)
     @cached(ttl=recommend_ttl, region=recommend_cache_region, skip_empty=True)
@@ -761,7 +671,5 @@ class RecommendChain(ChainBase, metaclass=Singleton):
         """
         异步豆瓣热门电视剧
         """
-        tvs = await DoubanChain().async_run_module(
-            "async_tv_hot", page=page, count=count
-        )
-        return self._serialize_medias(tvs)
+        tvs = await DoubanChain().async_run_module("async_tv_hot", page=page, count=count)
+        return [media.to_dict() for media in tvs] if tvs else []

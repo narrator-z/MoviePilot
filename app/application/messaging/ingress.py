@@ -1,80 +1,14 @@
 """消息渠道回环进入宿主消息 API 的统一适配边界。"""
 
-import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any
 from urllib.parse import urlencode
 
+from app.adapters.network.http import AsyncRequestUtils, RequestUtils
 from app.runtime.log import logger
 from app.runtime.settings import get_runtime_setting
 
 BackgroundSubmitter = Callable[..., object]
-
-
-@dataclass(frozen=True, slots=True)
-class _MessageIngressRequest:
-    """冻结同步与异步本地消息回环共用的请求参数。"""
-
-    url: str
-    payload: Mapping[str, Any]
-    source: str
-    timeout: float
-
-
-class MessageIngressPort(Protocol):
-    """宿主本地消息入口所需的最小同步、异步传输端口。"""
-
-    def post(
-        self,
-        url: str,
-        payload: Mapping[str, Any],
-        *,
-        timeout: float,
-    ) -> Optional[int]:
-        """同步投递 payload，并返回 HTTP 状态码或 None。"""
-        ...
-
-    async def async_post(
-        self,
-        url: str,
-        payload: Mapping[str, Any],
-        *,
-        timeout: float,
-    ) -> Optional[int]:
-        """异步投递 payload，并返回 HTTP 状态码或 None。"""
-        ...
-
-
-_message_ingress_lock = threading.Lock()
-_message_ingress_port: Optional[MessageIngressPort] = None
-
-
-def configure_message_ingress_port(
-    port: MessageIngressPort,
-) -> Optional[MessageIngressPort]:
-    """由启动组合根装配消息回环传输，并返回旧实现供隔离环境恢复。"""
-    global _message_ingress_port
-    with _message_ingress_lock:
-        previous = _message_ingress_port
-        _message_ingress_port = port
-    return previous
-
-
-def reset_message_ingress_port(port: Optional[MessageIngressPort] = None) -> None:
-    """恢复指定消息回环传输；省略参数时回到未装配状态。"""
-    global _message_ingress_port
-    with _message_ingress_lock:
-        _message_ingress_port = port
-
-
-def _message_ingress_snapshot() -> MessageIngressPort:
-    """返回当前消息回环传输，未装配时稳定失败。"""
-    with _message_ingress_lock:
-        port = _message_ingress_port
-    if port is None:
-        raise RuntimeError("消息回环端口尚未由启动组合根装配")
-    return port
 
 
 def build_message_ingress_url(source: str | None) -> str:
@@ -88,48 +22,6 @@ def build_message_ingress_url(source: str | None) -> str:
     )
 
 
-def _message_ingress_request(
-    payload: Mapping[str, Any],
-    source: str | None,
-    timeout: float,
-) -> _MessageIngressRequest:
-    """统一构造 URL、payload 副本和日志使用的来源标识。"""
-    return _MessageIngressRequest(
-        url=build_message_ingress_url(source),
-        payload=dict(payload),
-        source=source or "-",
-        timeout=timeout,
-    )
-
-
-def _message_ingress_confirmed(
-    request: _MessageIngressRequest,
-    status_code: Optional[int],
-) -> bool:
-    """统一判断本地入口是否确认接收，并输出稳定失败原因。"""
-    if status_code is None:
-        logger.error(f"转发渠道消息到本地入口失败：source={request.source} - 无响应")
-        return False
-    if status_code >= 400:
-        logger.error(
-            "转发渠道消息到本地入口失败："
-            f"source={request.source} - HTTP {status_code}"
-        )
-        return False
-    return True
-
-
-def _message_ingress_failed(
-    source: str | None,
-    error: Exception,
-) -> bool:
-    """统一记录传输或组合根异常，并按关闭策略返回失败。"""
-    logger.error(
-        f"转发渠道消息到本地入口失败：source={source or '-'} - {error}"
-    )
-    return False
-
-
 def forward_message_to_host(
     payload: Mapping[str, Any],
     source: str | None,
@@ -137,16 +29,34 @@ def forward_message_to_host(
     timeout: float = 15,
 ) -> bool:
     """同步转发渠道 payload，统一判断本地入口是否确认接收。"""
+    response = None
     try:
-        request = _message_ingress_request(payload, source, timeout)
-        status_code = _message_ingress_snapshot().post(
-            request.url,
-            request.payload,
-            timeout=request.timeout,
+        response = RequestUtils(timeout=timeout).post_res(
+            build_message_ingress_url(source),
+            json=dict(payload),
         )
-        return _message_ingress_confirmed(request, status_code)
+        if response is None:
+            logger.error(f"转发渠道消息到本地入口失败：source={source or '-'} - 无响应")
+            return False
+        if response.status_code >= 400:
+            logger.error(
+                "转发渠道消息到本地入口失败："
+                f"source={source or '-'} - HTTP {response.status_code}"
+            )
+            return False
+        return True
     except Exception as error:
-        return _message_ingress_failed(source, error)
+        logger.error(f"转发渠道消息到本地入口失败：source={source or '-'} - {error}")
+        return False
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as error:
+                logger.debug(
+                    f"释放本地消息入口响应失败：source={source or '-'} - {error}"
+                )
 
 
 async def async_forward_message_to_host(
@@ -156,16 +66,33 @@ async def async_forward_message_to_host(
     timeout: float = 15,
 ) -> bool:
     """异步转发渠道 payload，供自有事件循环的消息 SDK 复用同一确认语义。"""
+    response = None
     try:
-        request = _message_ingress_request(payload, source, timeout)
-        status_code = await _message_ingress_snapshot().async_post(
-            request.url,
-            request.payload,
-            timeout=request.timeout,
+        response = await AsyncRequestUtils(timeout=timeout).post_res(
+            build_message_ingress_url(source),
+            json=dict(payload),
         )
-        return _message_ingress_confirmed(request, status_code)
+        if response is None:
+            logger.error(f"转发渠道消息到本地入口失败：source={source or '-'} - 无响应")
+            return False
+        if response.status_code >= 400:
+            logger.error(
+                "转发渠道消息到本地入口失败："
+                f"source={source or '-'} - HTTP {response.status_code}"
+            )
+            return False
+        return True
     except Exception as error:
-        return _message_ingress_failed(source, error)
+        logger.error(f"转发渠道消息到本地入口失败：source={source or '-'} - {error}")
+        return False
+    finally:
+        if response is not None:
+            try:
+                await response.aclose()
+            except Exception as error:
+                logger.debug(
+                    f"释放本地消息入口响应失败：source={source or '-'} - {error}"
+                )
 
 
 def submit_message_to_host(

@@ -7,9 +7,10 @@ from pydantic import BaseModel, Field
 
 from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.tags import ToolTag
-from app.foundation.text import cut as jieba_cut
+from app.application.agentdata import get_agent_transfer_history_port
 from app.runtime.log import logger
 from app.schemas.types import media_type_to_agent
+from app.foundation.text import cut as jieba_cut
 
 
 class QueryTransferHistoryInput(BaseModel):
@@ -74,7 +75,7 @@ class QueryTransferHistoryTool(MoviePilotTool):
             # 每页固定 30 条，与工具说明保持一致，避免整理路径等字段撑大上下文。
             count = 30
 
-            transferhis = self.data.transfer_history
+            transferhis = get_agent_transfer_history_port()
             # 处理标题搜索
             if title:
                 # 使用统一分词封装处理标题，便于替换底层实现。

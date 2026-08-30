@@ -825,31 +825,6 @@ class MessageTemplateHelper:
         return None
 
 
-class MessageQueueClient:
-    """把当前 Chain 的发送回调绑定到共享消息队列，不持有后台资源。"""
-
-    def __init__(
-        self,
-        manager: "MessageQueueManager",
-        send_callback: Callable[..., Any],
-    ) -> None:
-        """保存共享队列和当前调用方回调。"""
-        self._manager = manager
-        self._send_callback = send_callback
-
-    def send_message(self, *args: Any, **kwargs: Any) -> None:
-        """使用当前调用方回调同步派发或排队消息。"""
-        self._manager.send_message_for(self._send_callback, *args, **kwargs)
-
-    async def async_send_message(self, *args: Any, **kwargs: Any) -> None:
-        """使用当前调用方回调异步派发或排队消息。"""
-        await self._manager.async_send_message_for(
-            self._send_callback,
-            *args,
-            **kwargs,
-        )
-
-
 class MessageQueueManager(metaclass=SingletonClass):
     """
     消息发送队列管理器
@@ -858,15 +833,13 @@ class MessageQueueManager(metaclass=SingletonClass):
     def __init__(
             self,
             send_callback: Optional[Callable] = None,
-            check_interval: Optional[int] = 10,
-            auto_start: bool = True,
+            check_interval: Optional[int] = 10
     ) -> None:
         """
         消息队列管理器初始化
 
         :param send_callback: 实际发送消息的回调函数
         :param check_interval: 时间检查间隔（秒）
-        :param auto_start: 是否保留旧构造即启动语义；生产组合根传入 False
         """
         self.schedule_periods: List[tuple[int, int, int, int]] = []
 
@@ -875,38 +848,13 @@ class MessageQueueManager(metaclass=SingletonClass):
         self.queue: queue.Queue[Any] = queue.Queue()
         self.send_callback = send_callback
         self.check_interval = check_interval
-        self._state_lock = threading.RLock()
-        self._running = False
+
+        self._running = True
         self._stop_event = threading.Event()
-        self.thread: Optional[threading.Thread] = None
-        if auto_start:
-            self.start()
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
 
-    def start(self) -> None:
-        """显式启动唯一监控线程，重复调用保持幂等。"""
-        with self._state_lock:
-            if self.thread is not None and self.thread.is_alive():
-                return
-            self._stop_event = threading.Event()
-            self._running = True
-            thread = threading.Thread(
-                target=self._monitor_loop,
-                daemon=True,
-                name="MessageQueueMonitor",
-            )
-            self.thread = thread
-            try:
-                thread.start()
-            except BaseException:
-                self._running = False
-                self.thread = None
-                raise
-
-    def bind(self, send_callback: Callable[..., Any]) -> MessageQueueClient:
-        """为一个 Chain 创建不拥有线程的轻量发送客户端。"""
-        return MessageQueueClient(self, send_callback)
-
-    def init_config(self) -> None:
+    def init_config(self):
         """
         初始化配置
         """
@@ -989,16 +937,15 @@ class MessageQueueManager(metaclass=SingletonClass):
         """
         发送消息（立即发送或加入队列）
         """
-        self._dispatch_message(None, False, *args, **kwargs)
-
-    def send_message_for(
-        self,
-        send_callback: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        """使用显式调用方回调立即发送或排队，避免共享队列绑定首个 Chain。"""
-        self._dispatch_message(send_callback, True, *args, **kwargs)
+        immediately = kwargs.pop("immediately", False)
+        if immediately or self._is_in_scheduled_time(datetime.now()):
+            self._send(*args, **kwargs)
+        else:
+            self.queue.put({
+                "args": args,
+                "kwargs": kwargs
+            })
+            logger.info(f"消息已加入队列，当前队列长度：{self.queue.qsize()}")
 
     async def async_send_message(self, *args, **kwargs) -> None:
         """
@@ -1009,124 +956,31 @@ class MessageQueueManager(metaclass=SingletonClass):
         着不发。这里与同步 ``send_message`` 行为对齐：
         指定 ``immediately=True`` 必须当场发出，与时段无关。
         """
-        await self._async_dispatch_message(None, False, *args, **kwargs)
-
-    async def async_send_message_for(
-        self,
-        send_callback: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        """使用显式调用方回调异步发送或排队。"""
-        await self._async_dispatch_message(send_callback, True, *args, **kwargs)
-
-    def _dispatch_message(
-        self,
-        send_callback: Optional[Callable[..., Any]],
-        explicit_callback: bool,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        """执行同步消息入口，共享调度计划但保留同步回调边界。"""
-        scheduled = (
-            False
-            if kwargs.get("immediately", False)
-            else self._is_in_scheduled_time(datetime.now())
-        )
-        send_now, message = self._build_message_dispatch(
-            send_callback=send_callback,
-            explicit_callback=explicit_callback,
-            args=args,
-            kwargs=kwargs,
-            scheduled=scheduled,
-        )
-        if send_now:
-            if explicit_callback:
-                self._send_with_callback(
-                    send_callback, *message["args"], **message["kwargs"]
-                )
-            else:
-                self._send(*message["args"], **message["kwargs"])
-            return
-        self._enqueue_message(message)
-
-    async def _async_dispatch_message(
-        self,
-        send_callback: Optional[Callable[..., Any]],
-        explicit_callback: bool,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        """执行异步消息入口，共享调度计划并在线程池运行同步回调。"""
-        scheduled = (
-            False
-            if kwargs.get("immediately", False)
-            else self._is_in_scheduled_time(datetime.now())
-        )
-        send_now, message = self._build_message_dispatch(
-            send_callback=send_callback,
-            explicit_callback=explicit_callback,
-            args=args,
-            kwargs=kwargs,
-            scheduled=scheduled,
-        )
-        if send_now:
-            callback = (
-                partial(self._send_with_callback, send_callback)
-                if explicit_callback
-                else self._send
-            )
+        immediately = kwargs.pop("immediately", False)
+        if immediately or self._is_in_scheduled_time(datetime.now()):
+            # _send 会执行具体渠道回调，可能包含网络 IO；放到 executor
+            # 避免 async 调用方所在事件循环被同步发送阻塞。
             context = copy_context()
-            call = partial(callback, *message["args"], **message["kwargs"])
+            call = partial(self._send, *args, **kwargs)
             loop = asyncio.get_running_loop()
             submission = partial(loop.run_in_executor, None, context.run, call)
             # 默认执行器保持空底层上下文，渠道调用只使用当前消息快照。
             await Context().run(submission)
             return
-        self._enqueue_message(message)
-
-    @staticmethod
-    def _build_message_dispatch(
-        *,
-        send_callback: Optional[Callable[..., Any]],
-        explicit_callback: bool,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        scheduled: bool,
-    ) -> tuple[bool, dict[str, Any]]:
-        """纯函数生成同步、异步入口共用的立即发送结论和队列载荷。"""
-        dispatch_kwargs = dict(kwargs)
-        immediately = bool(dispatch_kwargs.pop("immediately", False))
-        message: dict[str, Any] = {
+        self.queue.put({
             "args": args,
-            "kwargs": dispatch_kwargs,
-        }
-        if explicit_callback:
-            message["send_callback"] = send_callback
-        return immediately or scheduled, message
-
-    def _enqueue_message(self, message: dict[str, Any]) -> None:
-        """写入一条已完成调度决策的消息并记录当前队列长度。"""
-        self.queue.put(message)
+            "kwargs": kwargs
+        })
         logger.info(f"消息已加入队列，当前队列长度：{self.queue.qsize()}")
 
     def _send(self, *args, **kwargs) -> None:
         """
         实际发送消息（可通过回调函数自定义）
         """
-        self._send_with_callback(self.send_callback, *args, **kwargs)
-
-    @staticmethod
-    def _send_with_callback(
-        send_callback: Optional[Callable[..., Any]],
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        """调用一条消息携带的发送回调并隔离渠道异常。"""
-        if send_callback:
+        if self.send_callback:
             try:
                 logger.info(f"发送消息：{kwargs}")
-                send_callback(*args, **kwargs)
+                self.send_callback(*args, **kwargs)
             except Exception as e:
                 logger.error(f"发送消息错误：{str(e)}")
 
@@ -1144,15 +998,7 @@ class MessageQueueManager(metaclass=SingletonClass):
                         break
                     try:
                         message = self.queue.get_nowait()
-                        send_callback = message.get("send_callback")
-                        if send_callback is None:
-                            self._send(*message['args'], **message['kwargs'])
-                        else:
-                            self._send_with_callback(
-                                send_callback,
-                                *message['args'],
-                                **message['kwargs'],
-                            )
+                        self._send(*message['args'], **message['kwargs'])
                         logger.info(f"队列剩余消息：{self.queue.qsize()}")
                     except queue.Empty:
                         break
@@ -1172,19 +1018,13 @@ class MessageQueueManager(metaclass=SingletonClass):
         self._running = False
         self._stop_event.set()
         logger.info("正在停止消息队列...")
-        thread = self.thread
-        if thread is None:
-            return True
-        if thread is threading.current_thread():
+        if self.thread is threading.current_thread():
             logger.error("消息队列不能在自身监控线程内等待退出")
             return False
-        thread.join(timeout=max(0.0, timeout))
-        if thread.is_alive():
+        self.thread.join(timeout=max(0.0, timeout))
+        if self.thread.is_alive():
             logger.error(f"消息队列在 {timeout:g} 秒内未停止")
             return False
-        with self._state_lock:
-            if self.thread is thread:
-                self.thread = None
         logger.info("消息队列已停止")
         return True
 
@@ -1198,10 +1038,6 @@ class MessageHelper(metaclass=Singleton):
         """初始化系统消息队列和通知去重缓存。"""
         self.sys_queue = queue.Queue()
         self._recent_notification_keys = TTLCache(region="message:notification", maxsize=500, ttl=60)
-
-    def close(self) -> None:
-        """关闭通知去重缓存；真实收敛后由生命周期释放单例身份。"""
-        self._recent_notification_keys.close()
 
     @staticmethod
     def _build_system_notification_key(
@@ -1269,45 +1105,25 @@ class MessageHelper(metaclass=Singleton):
 
 def stop_message(
         timeout: float = _MESSAGE_QUEUE_STOP_TIMEOUT_SECONDS,
-        queue_manager: Optional[MessageQueueManager] = None,
-        message_helper: Optional[MessageHelper] = None,
 ) -> bool:
     """
     停止已启动的消息服务并返回全部资源是否收敛。
 
     :param timeout: 等待消息队列监控线程退出的最长秒数
-    :param queue_manager: 组合根发布的消息队列 owner
-    :param message_helper: 组合根发布的消息通知 owner
     :return: 已启动资源均完成关闭时返回 True，否则返回 False
     """
     all_converged = True
     # 只关闭已启动的服务，避免清理路径反向创建后台线程和缓存
-    queue_owner = queue_manager or MessageQueueManager.get_existing_instance()
-    if queue_owner:
+    if queue_manager := MessageQueueManager.get_existing_instance():
         try:
-            if queue_owner.stop(timeout=timeout) is False:
+            if queue_manager.stop(timeout=timeout) is False:
                 all_converged = False
-            else:
-                MessageQueueManager.release_existing_instance(queue_owner)
         except Exception as err:
             logger.error(f"停止消息队列失败：{str(err)}")
-            all_converged = False
-    helper_owner = (
-        message_helper
-        if message_helper is not None
-        else MessageHelper.get_existing_instance()
-    )
-    if helper_owner:
-        try:
-            helper_owner.close()
-            MessageHelper.release_existing_instance(helper_owner)
-        except Exception as err:
-            logger.error(f"关闭消息通知缓存失败：{str(err)}")
             all_converged = False
     if template_helper := TemplateHelper.get_existing_instance():
         try:
             template_helper.close()
-            TemplateHelper.release_existing_instance(template_helper)
         except Exception as err:
             logger.error(f"关闭消息模板缓存失败：{str(err)}")
             all_converged = False

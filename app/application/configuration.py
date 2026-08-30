@@ -9,8 +9,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol, cast
 
 from app.application.database import AsyncDatabaseExecutor
-from app.schemas.common import JsonData
-from app.schemas.types import MediaType, SystemConfigKey
+from app.schemas.types import MediaType
 
 
 class SystemConfigReader(Protocol):
@@ -32,22 +31,6 @@ class SystemConfigWriter(Protocol):
 
 class ConfigurationRepository(SystemConfigReader, SystemConfigWriter, Protocol):
     """兼容同时提供读写能力的旧配置仓储。"""
-
-
-class SystemConfigStagingPort(Protocol):
-    """跨表应用服务在调用方 Session 内读取并暂存系统配置。"""
-
-    def get_for_update(self, key: SystemConfigKey) -> JsonData:
-        """同步锁定并读取一项配置。"""
-
-    def stage_set(self, key: SystemConfigKey, value: JsonData) -> None:
-        """同步暂存一项配置，不提交事务。"""
-
-    async def async_get_for_update(self, key: SystemConfigKey) -> JsonData:
-        """异步锁定并读取一项配置。"""
-
-    async def async_stage_set(self, key: SystemConfigKey, value: JsonData) -> None:
-        """异步暂存一项配置，不提交事务。"""
 
 
 class MutableRuntimeSettings(Protocol):
@@ -99,6 +82,7 @@ class TokenRuntimeConfig:
 class ApiRuntimeConfig:
     """单次 API 请求使用的宿主配置快照。"""
 
+    advanced_mode: bool
     access_token_expire_minutes: int
     btrfs_fsid_dedup: bool
     ai_agent_enable: bool
@@ -171,7 +155,7 @@ class ChainRuntimeConfig:
     root_path: Path = Path(".")
     config_path: Path = Path(".")
     frontend_path: Path = Path(".")
-    superuser: str = ""
+    superuser: str = "admin"
     media_recognize_share: bool = False
     auxiliary_auth_enable: bool = False
     global_image_cache: bool = False
@@ -365,12 +349,6 @@ def configure_system_config(service: SystemConfigService) -> None:
     _configured_system_config = service
 
 
-def reset_system_config() -> None:
-    """清除当前 lifespan 的系统配置服务，避免重复启动复用旧实例。"""
-    global _configured_system_config
-    _configured_system_config = None
-
-
 def get_configured_system_config() -> SystemConfigService:
     """返回启动阶段登记的系统配置服务。"""
     if _configured_system_config is None:
@@ -384,12 +362,6 @@ def configure_transfer_retry_config(
     """由组合根登记整理失败重试快照工厂。"""
     global _transfer_retry_config_provider
     _transfer_retry_config_provider = provider
-
-
-def reset_transfer_retry_config() -> None:
-    """清除整理失败重试快照工厂，使未装配读取重新失败。"""
-    global _transfer_retry_config_provider
-    _transfer_retry_config_provider = None
 
 
 def get_transfer_retry_config() -> TransferRetryConfig:
@@ -407,12 +379,6 @@ def configure_token_runtime_config(
     _token_runtime_config_provider = provider
 
 
-def reset_token_runtime_config() -> None:
-    """清除令牌安全配置快照工厂，禁止复用上一 lifespan 的密钥。"""
-    global _token_runtime_config_provider
-    _token_runtime_config_provider = None
-
-
 def get_token_runtime_config() -> TokenRuntimeConfig:
     """返回当前令牌编解码使用的不可变配置快照。"""
     if _token_runtime_config_provider is None:
@@ -426,31 +392,10 @@ def configure_runtime_configuration(configuration: RuntimeConfiguration) -> None
     _runtime_configuration = configuration
 
 
-def reset_runtime_configuration() -> None:
-    """清除各运行面共享的类型化配置快照工厂。"""
-    global _runtime_configuration
-    _runtime_configuration = None
-
-
 def configure_runtime_settings(service: RuntimeSettingsService) -> None:
     """由组合根登记管理 API 使用的部署设置服务。"""
     global _runtime_settings_service
     _runtime_settings_service = service
-
-
-def reset_runtime_settings() -> None:
-    """清除管理 API 使用的部署设置服务。"""
-    global _runtime_settings_service
-    _runtime_settings_service = None
-
-
-def reset_configuration_services() -> None:
-    """清除当前 lifespan 登记的全部配置服务与快照 provider。"""
-    reset_system_config()
-    reset_transfer_retry_config()
-    reset_token_runtime_config()
-    reset_runtime_configuration()
-    reset_runtime_settings()
 
 
 def get_runtime_settings() -> RuntimeSettingsService:

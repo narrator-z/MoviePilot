@@ -1,7 +1,3 @@
-"""Chain 本地限流行为测试。"""
-
-# ruff: noqa: E402 - 可选下载器模块必须在导入 Chain 前完成隔离。
-
 import asyncio
 import sys
 import unittest
@@ -13,10 +9,10 @@ setattr(sys.modules["qbittorrentapi"], "TorrentFilesList", list)
 sys.modules.setdefault("transmission_rpc", ModuleType("transmission_rpc"))
 setattr(sys.modules["transmission_rpc"], "File", object)
 
+from app.chain import ChainBase
 from app.application.chain.context import ChainRuntimeContext
-from app.chain.base import ChainBase
 from app.runtime.extensions.module.dispatcher import ModuleInvocationDispatcher
-from app.schemas.exception import RateLimitExceededException
+from app.schemas import RateLimitExceededException
 
 
 class _LimitedModule:
@@ -61,8 +57,6 @@ class ChainRateLimitTest(unittest.TestCase):
         module_manager.get_running_modules.return_value = [limited_module]
         message_helper = Mock()
         event_manager = Mock()
-        message_queue = Mock()
-        message_queue.bind.return_value = Mock()
         chain = ChainBase(
             ChainRuntimeContext(
                 module_manager=module_manager,
@@ -72,24 +66,8 @@ class ChainRateLimitTest(unittest.TestCase):
                 message_helper=message_helper,
                 file_cache=Mock(),
                 async_file_cache=Mock(),
-                message_queue=message_queue,
+                message_queue_factory=lambda _callback: Mock(),
                 module_dispatcher_factory=ModuleInvocationDispatcher,
-                site_repository=Mock(),
-                subscription_repository=Mock(),
-                subscription_mutation_scope=Mock(),
-                sync_subscription_mutation_scope=Mock(),
-                subscription_delete_scope=Mock(),
-                sync_subscription_delete_scope=Mock(),
-                subscription_completion_scope=Mock(),
-                rule_group_mutation_scope=Mock(),
-                site_reference_mutation_scope=Mock(),
-                download_history_repository=Mock(),
-                transfer_history_repository=Mock(),
-                transfer_admission_repository=Mock(),
-                transfer_execution_repository=Mock(),
-                media_server_repository=Mock(),
-                download_failure_repository=Mock(),
-                user_repository=Mock(),
             )
         )
         return chain

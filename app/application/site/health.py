@@ -2,37 +2,51 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional, Protocol
 
-from app.application.site.contract import SiteWritePort
+
+class SiteHealthRepository(Protocol):
+    """站点健康统计所需的最小写端口。"""
+
+    def success(self, domain: str, seconds: Optional[int] = None) -> Any:
+        """记录站点访问成功。"""
+        ...
+
+    def fail(self, domain: str) -> Any:
+        """记录站点访问失败。"""
+        ...
+
+    async def async_success(self, domain: str, seconds: Optional[int] = None) -> Any:
+        """异步记录站点访问成功。"""
+        ...
+
+    async def async_fail(self, domain: str) -> Any:
+        """异步记录站点访问失败。"""
+        ...
 
 
 class SiteHealthService:
     """集中承接索引模块的站点健康统计写操作。"""
 
-    def __init__(self, repository: SiteWritePort) -> None:
+    def __init__(self, repository: SiteHealthRepository) -> None:
         """保存站点统计写端口。"""
         self._repository = repository
 
-    def success(self, domain: str, seconds: Optional[int] = None) -> None:
+    def success(self, domain: str, seconds: Optional[int] = None) -> Any:
         """记录同步站点访问成功。"""
-        self._repository.success(domain, seconds)
+        return self._repository.success(domain, seconds)
 
-    def fail(self, domain: str) -> None:
+    def fail(self, domain: str) -> Any:
         """记录同步站点访问失败。"""
-        self._repository.fail(domain)
+        return self._repository.fail(domain)
 
-    async def async_success(
-        self,
-        domain: str,
-        seconds: Optional[int] = None,
-    ) -> None:
+    async def async_success(self, domain: str, seconds: Optional[int] = None) -> Any:
         """记录异步站点访问成功。"""
-        await self._repository.async_success(domain, seconds)
+        return await self._repository.async_success(domain, seconds)
 
-    async def async_fail(self, domain: str) -> None:
+    async def async_fail(self, domain: str) -> Any:
         """记录异步站点访问失败。"""
-        await self._repository.async_fail(domain)
+        return await self._repository.async_fail(domain)
 
 
 _configured_site_health_service: SiteHealthService | None = None
@@ -42,12 +56,6 @@ def configure_site_health_service(service: SiteHealthService) -> None:
     """由启动组合根登记站点健康统计服务。"""
     global _configured_site_health_service
     _configured_site_health_service = service
-
-
-def reset_site_health_service() -> None:
-    """清除当前 lifespan 的站点健康统计服务。"""
-    global _configured_site_health_service
-    _configured_site_health_service = None
 
 
 def get_configured_site_health_service() -> SiteHealthService:

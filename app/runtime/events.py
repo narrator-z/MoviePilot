@@ -7,9 +7,10 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
 from queue import Empty, PriorityQueue
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 from app.foundation.singleton import Singleton
+from app.runtime.config import global_vars
 from app.runtime.correlation import get_correlation_id
 from app.runtime.event.binding import (
     EventBindingResolver,
@@ -21,7 +22,6 @@ from app.runtime.event.dispatch import EventDispatcher
 from app.runtime.event.errors import EventErrorNotifier, EventErrorPolicy
 from app.runtime.event.registry import EventRegistry
 from app.runtime.log import logger
-from app.runtime.loop import main_loop_registry
 from app.runtime.observability import record_metric
 from app.runtime.rate import ExponentialBackoffRateLimiter
 from app.runtime.thread import ThreadHelper
@@ -40,14 +40,6 @@ _CURRENT_EVENT_HANDLER_OWNER: ContextVar[object | None] = ContextVar(
     "current_event_handler_owner",
     default=None,
 )
-_EventHandler = TypeVar("_EventHandler", bound=Callable[..., Any])
-_EventKind = Union[EventType, ChainEventType]
-_EventRegistration = Union[
-    _EventKind,
-    List[_EventKind],
-    Type[EventType],
-    Type[ChainEventType],
-]
 
 
 @dataclass(slots=True)
@@ -191,10 +183,6 @@ class EventManager(metaclass=Singleton):
         """
         self.__binding_resolver.register(name, resolver)
 
-    def unregister_handler_instance_resolver(self, name: str) -> None:
-        """撤销命名实例解析器；重复撤销不影响其它 owner。"""
-        self.__binding_resolver.unregister(name)
-
     def unresolved_handler_bindings(self) -> tuple[str, ...]:
         """返回未命中显式 resolver 的类处理器诊断清单。"""
         return self.__binding_resolver.unresolved_handlers()
@@ -203,10 +191,6 @@ class EventManager(metaclass=Singleton):
         """设置事件处理异常的外部通知回调。"""
         with self.__lock:
             self.__error_notifier = notifier
-
-    def reset_error_notifier(self) -> None:
-        """撤销当前 lifespan 的事件错误通知回调。"""
-        self.set_error_notifier(None)
 
     def start(self):
         """
@@ -448,10 +432,7 @@ class EventManager(metaclass=Singleton):
 
             tracked = _tracked()
             try:
-                handle = asyncio.run_coroutine_threadsafe(
-                    tracked,
-                    main_loop_registry.require(),
-                )
+                handle = asyncio.run_coroutine_threadsafe(tracked, global_vars.loop)
             except RuntimeError:
                 tracked.close()
                 coroutine.close()
@@ -544,36 +525,6 @@ class EventManager(metaclass=Singleton):
         else:
             logger.error(f"Unknown event type: {etype}")
         return None
-
-    def send_event_strict(
-        self,
-        etype: EventType,
-        data: Optional[Union[dict[str, object], ChainEventData]] = None,
-        priority: Optional[int] = DEFAULT_EVENT_PRIORITY,
-    ) -> Event:
-        """同步等待全部广播处理器完成，任一失败时阻止 durable 消息结算。"""
-        event = Event(etype, data, priority)
-        with self.__lifecycle_lock:
-            if self.__lifecycle_state != "running":
-                raise RuntimeError(f"事件处理处于 {self.__lifecycle_state} 状态")
-        self.__dispatcher.dispatch_broadcast_strict(
-            event,
-            self.__wait_strict_async_handler,
-        )
-        return event
-
-    @staticmethod
-    def __wait_strict_async_handler(coroutine: Any) -> Any:
-        """在主事件循环等待异步处理器，禁止循环线程同步等待自身。"""
-        loop = main_loop_registry.require()
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-        if running_loop is loop:
-            coroutine.close()
-            raise RuntimeError("主事件循环线程不能同步等待 durable 事件处理器")
-        return asyncio.run_coroutine_threadsafe(coroutine, loop).result()
 
     async def async_send_event(self, etype: Union[EventType, ChainEventType],
                                data: Optional[Union[Dict, ChainEventData]] = None,
@@ -836,11 +787,8 @@ class EventManager(metaclass=Singleton):
             error=e,
         )
 
-    def register(
-            self,
-            etype: _EventRegistration,
-            priority: Optional[int] = DEFAULT_EVENT_PRIORITY,
-    ) -> Callable[[_EventHandler], _EventHandler]:
+    def register(self, etype: Union[EventType, ChainEventType, List[Union[EventType, ChainEventType]], type],
+                 priority: Optional[int] = DEFAULT_EVENT_PRIORITY):
         """
         事件注册装饰器，用于将函数注册为事件的处理器
         :param etype:
@@ -850,7 +798,7 @@ class EventManager(metaclass=Singleton):
         :param priority: 可选，链式事件的优先级，默认为 DEFAULT_EVENT_PRIORITY
         """
 
-        def decorator(f: _EventHandler) -> _EventHandler:
+        def decorator(f: Callable):
             # 将输入的事件类型统一转换为列表格式
             if isinstance(etype, list):
                 # 传入的已经是列表，直接使用
@@ -863,7 +811,7 @@ class EventManager(metaclass=Singleton):
             for event in event_list:
                 if isinstance(event, (EventType, ChainEventType)):
                     self.add_event_listener(event, f, priority)
-                elif event is EventType or event is ChainEventType:
+                elif isinstance(event, type) and issubclass(event, (EventType, ChainEventType)):
                     # 如果是 EventType 或 ChainEventType 类，提取该类中的所有成员
                     for et in event.__members__.values():
                         self.add_event_listener(et, f, priority)

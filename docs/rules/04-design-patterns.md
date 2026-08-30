@@ -61,7 +61,7 @@ class ExampleModule(_ModuleBase, _DownloaderBase):
 
 **When to use:** Adding a new business workflow that is shared across multiple entrypoints (API endpoint, CLI, agent, scheduler, webhook). Chains coordinate modules, helpers, databases, events, and caches.
 
-**Base class:** `ChainBase` in `app/chain/base.py`
+**Base class:** `ChainBase` in `app/chain/__init__.py`
 
 **Calling modules from a chain:**
 
@@ -76,7 +76,7 @@ result = await self.async_run_module("method_name", kwarg1=val1)
 
 **Chain-to-chain calls:** A chain may call another chain to reuse stable domain logic. Avoid introducing new circular dependencies between chains.
 
-**File convention:** small workflows use `app/chain/<domain>.py`; a stable workflow with several independently owned responsibilities uses the same-named `app/chain/<domain>/` package. The package root lazily exposes only `<Domain>Chain`, `facade.py` preserves its public identity, and focused child modules use single-word responsibility names. The retired monolith and `source.py` copies must not coexist with the package.
+**File convention:** `app/chain/<domain>.py`, class name `<Domain>Chain` (e.g., `DownloadChain`, `SearchChain`, `SubscribeChain`).
 
 ---
 

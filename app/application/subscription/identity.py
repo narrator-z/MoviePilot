@@ -1,28 +1,40 @@
 """按媒体身份批量删除订阅的应用用例。"""
 
 from datetime import datetime, timezone
-from typing import Callable, Optional, cast
+from typing import Any, Callable, Protocol
 
 from app.application.outbox import (
-    SUBSCRIBE_DELETED_TOPIC,
-    AsyncOutboxDispatchStore,
-    AsyncOutboxStager,
+    AsyncOutboxTransaction,
     OutboxIntent,
-    deliver_async_outbox_effect,
-)
-from app.application.subscription.contract import (
-    SubscribeDeletionCandidate,
-    SubscriptionIdentity,
-    SubscriptionStagingPort,
+    SUBSCRIBE_DELETED_TOPIC,
 )
 from app.application.subscription.delete import (
     AsyncUnitOfWork,
     SubscribeDeletedPublisher,
     SubscribeDeletionActor,
+    SubscribeDeletionCandidate,
     build_subscribe_deleted_payload,
 )
-from app.schemas.common import JsonData
 from app.schemas.types import MediaSource
+
+
+class SubscribeIdentityDeletionRepository(Protocol):
+    """按媒体身份删除订阅所需的数据访问端口。"""
+
+    async def list_candidates_by_identity(
+        self,
+        media_source: MediaSource,
+        media_id: str,
+        season: int | None,
+        music_type: str | None,
+    ) -> list[SubscribeDeletionCandidate]:
+        """读取匹配媒体身份的去重订阅快照。"""
+        ...
+
+    async def stage_delete(self, subscribe_id: int) -> None:
+        """把指定订阅登记为待删除，但不自行提交事务。"""
+        ...
+
 
 SubscribeDeletionEventErrorHandler = Callable[[int, Exception], None]
 
@@ -32,12 +44,11 @@ class DeleteSubscriptionsByIdentityCommand:
 
     def __init__(
         self,
-        repository: SubscriptionStagingPort,
+        repository: SubscribeIdentityDeletionRepository,
         unit_of_work: AsyncUnitOfWork,
         publish_deleted: SubscribeDeletedPublisher,
         handle_event_error: SubscribeDeletionEventErrorHandler,
-        outbox: Optional[AsyncOutboxStager] = None,
-        dispatch_store: Optional[AsyncOutboxDispatchStore] = None,
+        outbox: AsyncOutboxTransaction | None = None,
     ) -> None:
         """注入数据访问、事务、事件和事件错误处理端口。"""
         self._repository = repository
@@ -45,7 +56,6 @@ class DeleteSubscriptionsByIdentityCommand:
         self._publish_deleted = publish_deleted
         self._handle_event_error = handle_event_error
         self._outbox = outbox
-        self._dispatch_store = dispatch_store
 
     async def execute(
         self,
@@ -57,15 +67,17 @@ class DeleteSubscriptionsByIdentityCommand:
     ) -> int:
         """删除匹配订阅，并在提交后逐条发送兼容事件。"""
         candidates = await self._repository.list_candidates_by_identity(
-            SubscriptionIdentity(
-                media_source=media_source,
-                media_id=media_id,
-                season=season,
-                music_type=music_type,
-            )
+            media_source,
+            media_id,
+            season,
+            music_type,
         )
-        deletions = [candidate for candidate in candidates if self._can_delete(candidate, actor)]
-        events: list[tuple[SubscribeDeletionCandidate, dict[str, JsonData]]] = []
+        deletions = [
+            candidate
+            for candidate in candidates
+            if self._can_delete(candidate, actor)
+        ]
+        events: list[tuple[SubscribeDeletionCandidate, dict[str, Any]]] = []
         for candidate in deletions:
             await self._repository.stage_delete(candidate.subscribe_id)
             event_payload = build_subscribe_deleted_payload(
@@ -78,10 +90,9 @@ class DeleteSubscriptionsByIdentityCommand:
             if self._outbox:
                 now = datetime.now(timezone.utc)
                 for _, event_payload in events:
-                    event_key = cast(str, event_payload["idempotency_key"])
                     await self._outbox.stage(
                         OutboxIntent(
-                            event_key=event_key,
+                            event_key=event_payload["idempotency_key"],
                             topic=SUBSCRIBE_DELETED_TOPIC,
                             payload=event_payload,
                         ),
@@ -94,22 +105,12 @@ class DeleteSubscriptionsByIdentityCommand:
 
         for candidate, event_payload in events:
             try:
-                if self._dispatch_store:
-                    event_key = cast(str, event_payload["idempotency_key"])
-
-                    async def publish_event(
-                        payload: dict[str, JsonData] = event_payload,
-                    ) -> None:
-                        """发布当前删除候选对应的稳定事件快照。"""
-                        await self._publish_deleted(payload)
-
-                    await deliver_async_outbox_effect(
-                        self._dispatch_store,
-                        event_key,
-                        publish_event,
+                await self._publish_deleted(event_payload)
+                if self._outbox:
+                    await self._outbox.complete_by_event_key(
+                        event_payload["idempotency_key"],
+                        datetime.now(timezone.utc),
                     )
-                else:
-                    await self._publish_deleted(event_payload)
             except Exception as error:
                 self._handle_event_error(candidate.subscribe_id, error)
         return len(deletions)

@@ -7,7 +7,7 @@ from typing import Annotated, Any, List, Optional, Protocol, Union
 from fastapi import Depends, Request
 from starlette.responses import PlainTextResponse
 
-from app.adapters.external.wechat import WXBizMsgCrypt
+from app.adapters.external.wechat_crypt import WXBizMsgCrypt
 from app.adapters.web.security.access import verify_apitoken, verify_token
 from app.api.context import get_background_task_registry, resolve_background_task_registry
 from app.api.dependencies.agent import get_message_query_service
@@ -21,9 +21,9 @@ from app.application.configuration import (
 from app.application.messaging.message import MessageQueryService
 from app.application.notification import get_notification_configs
 from app.chain.message import MessageChain
+from app.runtime.config import global_vars
 from app.runtime.log import logger
 from app.runtime.tasks import TaskRegistry
-from app.runtime.webpush import webpush_registry
 from app.schemas.message import MessageClearBefore as _SchemaMessageClearBefore
 from app.schemas.message import MessageClearData as _SchemaMessageClearData
 from app.schemas.message import MessageClearScope as _SchemaMessageClearScope
@@ -357,7 +357,7 @@ async def subscribe(
     客户端webpush通知订阅
     """
     subinfo = subscription.model_dump()
-    webpush_registry.upsert(subinfo)
+    global_vars.push_subscription(subinfo)
     logger.debug(f"通知订阅成功: {subinfo}")
     return _SchemaResponse(success=True)
 
@@ -374,7 +374,7 @@ def send_notification(
     """
     from pywebpush import WebPushException, webpush
 
-    for sub in webpush_registry.list():
+    for sub in global_vars.get_subscriptions():
         try:
             webpush(
                 subscription_info=sub,
@@ -385,7 +385,7 @@ def send_notification(
             )
         except WebPushException as err:
             logger.error(f"WebPush发送失败: {str(err)}")
-            if is_webpush_subscription_gone(err) and webpush_registry.remove(sub):
+            if is_webpush_subscription_gone(err) and global_vars.remove_subscription(sub):
                 logger.info(f"已移除失效WebPush订阅: {sub.get('endpoint')}")
             continue
     return _SchemaResponse(success=True)

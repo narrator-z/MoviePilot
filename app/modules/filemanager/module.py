@@ -4,8 +4,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from app.adapters.system.host import SystemUtils
 from app.application.directory import DirectoryHelper
 from app.application.messaging.message import MessageHelper
-from app.application.transfer.execution import TransferStepRunner
-from app.application.transfer.workflow import TransferPlanCheckpoint, TransferPlanningInput
+from app.application.transfer import TransferPlanCheckpoint, TransferPlanningInput
 from app.domain.context import MediaInfo, MusicInfo
 from app.domain.meta.metabase import MetaBase
 from app.domain.meta.metamusic import MetaMusic
@@ -73,31 +72,9 @@ class FileManagerModule(_ModuleBase):
         """
         return 4
 
-    def stop(self) -> bool:
-        """关闭已物化存储并释放其弱单例，未使用实现不会因关停而创建。"""
-        converged = True
-        for storage_schema in self._storage_schemas:
-            get_existing = getattr(storage_schema, "get_existing_instance", None)
-            release_existing = getattr(storage_schema, "release_existing_instance", None)
-            if not get_existing or not release_existing:
-                continue
-            instance = get_existing()
-            if instance is None:
-                continue
-            try:
-                stopped = instance.close()
-            except Exception as err:
-                converged = False
-                logger.error(
-                    f"关闭存储 {storage_schema.schema.value} 失败：{str(err)}"
-                )
-                continue
-            if stopped is False:
-                converged = False
-                continue
-            if not release_existing(instance):
-                converged = False
-        return converged
+    def stop(self):
+        """停止文件整理模块"""
+        pass
 
     def test(self) -> Tuple[bool, str]:
         """
@@ -565,13 +542,10 @@ class FileManagerModule(_ModuleBase):
             source_oper: Optional[StorageBase] = None,
             target_oper: Optional[StorageBase] = None,
             cleanup_media_file: Optional[Callable[[FileItem], bool]] = None,
-            observe_cleanup_media_file: Optional[Callable[[FileItem], bool]] = None,
-            step_runner: Optional[TransferStepRunner] = None,
     ) -> TransferInfo:
         """解析存储适配器并通过统一删除能力执行已冻结计划。"""
         source_fileitem = FileItem(**checkpoint.planning_input.source_fileitem)
         cleanup_before_transfer = None
-        observe_cleanup_before_transfer = None
         cleanup_payload = checkpoint.planning_input.options.get(
             "cleanup_dest_fileitem"
         )
@@ -590,11 +564,6 @@ class FileManagerModule(_ModuleBase):
                     raise RuntimeError(
                         f"{cleanup_fileitem.path} 删除失败，整理计划保留待重试"
                     )
-
-            if observe_cleanup_media_file:
-                def observe_cleanup_before_transfer() -> bool:
-                    """只读确认旧目标是否已经由统一能力清理。"""
-                    return observe_cleanup_media_file(cleanup_fileitem)
 
         source_storage = source_fileitem.storage or "local"
         if not source_oper:
@@ -626,8 +595,6 @@ class FileManagerModule(_ModuleBase):
             source_oper=source_oper,
             target_oper=target_oper,
             cleanup_before_transfer=cleanup_before_transfer,
-            observe_cleanup_before_transfer=observe_cleanup_before_transfer,
-            step_runner=step_runner,
         )
 
     @staticmethod

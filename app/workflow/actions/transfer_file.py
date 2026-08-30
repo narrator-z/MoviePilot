@@ -4,8 +4,9 @@ from typing import Optional
 
 from pydantic import Field
 
+from app.application.chain.data import get_chain_transfer_history_port
 from app.chain.storage import StorageChain
-from app.chain.transfer.facade import TransferChain
+from app.chain.transfer import TransferChain
 from app.runtime.log import logger
 from app.runtime.stop import runtime_stop_state
 from app.schemas.workflow import ActionContext, ActionParams
@@ -65,7 +66,7 @@ class TransferFileAction(BaseAction):
         _failed_count = 0
         storagechain = StorageChain()
         transferchain = TransferChain()
-        transferhis = transferchain.transfer_history_repository
+        transferhis = get_chain_transfer_history_port()
         if params.source == "downloads":
             # 从下载任务中整理文件
             for download in context.downloads:
@@ -82,9 +83,6 @@ class TransferFileAction(BaseAction):
                 fileitem = storagechain.get_file_item(storage="local", path=Path(download.path))
                 if not fileitem:
                     logger.info(f"文件 {download.path} 不存在")
-                    continue
-                if not fileitem.path:
-                    logger.warn("工作流文件缺少可查询的源路径，跳过")
                     continue
                 transferd = transferhis.get_by_src(fileitem.path, storage=fileitem.storage)
                 if transferd:
@@ -104,9 +102,6 @@ class TransferFileAction(BaseAction):
             for fileitem in copy.deepcopy(context.fileitems):
                 if not check_continue():
                     break
-                if not fileitem.path:
-                    logger.warn("工作流文件缺少可查询的源路径，跳过")
-                    continue
                 # 检查缓存
                 cache_key = f"{fileitem.path}"
                 if self.check_cache(workflow_id, cache_key):

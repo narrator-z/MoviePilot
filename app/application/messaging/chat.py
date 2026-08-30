@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, List, Optional, Protocol
+from collections.abc import Callable
+from typing import Any, Optional, Protocol
 from weakref import WeakValueDictionary
 
 from app.application.database import (
     AsyncDatabaseExecutor,
 )
-from app.runtime.observability import record_metric
 from app.schemas.agent import AgentChatSessionDetail, AgentChatSessionSummary
 from app.schemas.exception import AgentChatPersistenceUnavailableError
+from app.runtime.observability import record_metric
+
 
 DEFAULT_AGENT_CHAT_WRITE_CAPACITY = 32
 DEFAULT_AGENT_CHAT_SESSION_CAPACITY = 4
@@ -27,20 +28,9 @@ def has_custom_agent_chat_title(value: Optional[str]) -> bool:
 class AgentChatPrincipal(Protocol):
     """会话访问控制所需的最小用户身份。"""
 
-    @property
-    def id(self) -> Any:
-        """返回稳定用户标识。"""
-        ...
-
-    @property
-    def name(self) -> Optional[str]:
-        """返回可选用户显示名。"""
-        ...
-
-    @property
-    def is_superuser(self) -> bool:
-        """返回是否具备超级管理员权限。"""
-        ...
+    id: Any
+    name: Optional[str]
+    is_superuser: bool
 
 
 class AsyncAgentChatRepository(Protocol):
@@ -255,27 +245,10 @@ class AgentChatService:
             await self._unit_of_work.rollback()
             raise
 
-    def get_sync(
-        self,
-        session_id: str,
-        user_id: Optional[str] = None,
-    ) -> Optional[AgentChatRecord]:
+    def get_sync(self, session_id: str) -> Optional[AgentChatRecord]:
         """同步读取会话投影，供同步 Agent 编排路径使用。"""
-        record = self._repository.get(session_id=session_id, user_id=user_id)
+        record = self._repository.get(session_id=session_id)
         return self._project(record) if record is not None else None
-
-    def save_agent_messages(
-        self,
-        session_id: str,
-        user_id: str,
-        messages: List[dict[str, Any]],
-    ) -> None:
-        """同步保存可恢复消息，兼容非协程 Agent 调用路径。"""
-        sync_repository = self._repository
-        save = getattr(sync_repository, "save_agent_messages", None)
-        if not callable(save):
-            raise RuntimeError("Agent 会话仓储不支持同步消息保存")
-        save(session_id=session_id, user_id=user_id, messages=messages)
 
     @staticmethod
     def can_access(
@@ -561,18 +534,6 @@ def configure_agent_chat_persistence(
     """由启动组合根登记 Agent 编排所需的同步持久化端口。"""
     global _configured_agent_chat_persistence
     _configured_agent_chat_persistence = service
-
-
-def reset_agent_chat_service() -> None:
-    """清除当前 lifespan 的 Agent 会话查询服务。"""
-    global _configured_agent_chat_service
-    _configured_agent_chat_service = None
-
-
-def reset_agent_chat_persistence() -> None:
-    """清除当前 lifespan 的 Agent 会话持久化服务。"""
-    global _configured_agent_chat_persistence
-    _configured_agent_chat_persistence = None
 
 
 def get_configured_agent_chat_persistence() -> AgentChatPersistenceService:

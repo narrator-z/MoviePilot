@@ -6,7 +6,7 @@ from app.chain.download import DownloadChain
 from app.domain.context import TorrentInfo
 from app.modules.indexer.parser.yema import YemaSiteUserInfo
 from app.modules.indexer.spider.yema import YemaSpider
-from app.schemas.types import MediaType
+from app.schemas import MediaType
 
 
 class _FakeResponse:
@@ -26,10 +26,6 @@ class _FakeResponse:
     def json(self) -> dict:
         """返回预设 JSON 数据。"""
         return self._payload
-
-    def close(self) -> None:
-        """模拟释放短生命周期响应。"""
-
 
 
 def _build_indexer() -> dict:
@@ -278,9 +274,9 @@ def test_yemapt_user_parser_uses_basic_info_only(monkeypatch):
         },
     }
 
-    def fake_post_res(_request, url: str, json: dict = None, **kwargs):
+    def fake_post_res(request, url: str, json: dict = None, **_kwargs):
         """记录用户基本信息请求并回放开放 API 响应。"""
-        captured.append((url, json, kwargs.get("headers"), kwargs.get("cookies")))
+        captured.append((url, json, request._headers, request._cookies))
         return _FakeResponse(payload)
 
     monkeypatch.setattr(
@@ -331,12 +327,9 @@ def test_yemapt_download_generates_and_urlencodes_temporary_key(monkeypatch):
         captured.update(kwargs)
         return None, b"torrent-content", "Movie", ["Movie.mkv"], ""
 
+    monkeypatch.setattr("app.chain.download.RequestUtils.post_res", fake_post_res)
     monkeypatch.setattr(
-        "app.adapters.network.http.RequestUtils.post_res",
-        fake_post_res,
-    )
-    monkeypatch.setattr(
-            "app.chain.download.submission.TorrentHelper.download_torrent",
+        "app.chain.download.TorrentHelper.download_torrent",
         fake_download_torrent,
     )
     enclosure = YemaSpider(_build_indexer())._build_download_url(100)

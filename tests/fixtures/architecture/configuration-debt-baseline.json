@@ -1,7 +1,13 @@
 {
   "composition_root_oper_boundaries": {
-    "count": 0,
-    "entries": []
+    "count": 1,
+    "entries": [
+      {
+        "file": "app/startup/initializers/modules.py",
+        "name": "SystemConfigOper",
+        "reason": "启动组合根负责构造唯一的系统配置数据库适配器"
+      }
+    ]
   },
   "foundational_settings_boundaries": {
     "count": 0,
@@ -18,11 +24,41 @@
     "root": "app"
   },
   "settings_imports": {
-    "count": 0,
-    "files": []
+    "count": 4,
+    "files": [
+      "app/chain/download_backfill.py",
+      "app/startup/agent_initializer.py",
+      "app/startup/modules_initializer.py",
+      "app/utils/media.py"
+    ]
   },
   "system_config_oper_constructions": {
-    "calls": [],
-    "count": 0
+    "calls": [
+      {
+        "file": "app/startup/modules_initializer.py",
+        "name": "SystemConfigOper"
+      },
+      {
+        "file": "app/startup/modules_initializer.py",
+        "name": "SystemConfigOper"
+      },
+      {
+        "file": "app/startup/modules_initializer.py",
+        "name": "SystemConfigOper"
+      },
+      {
+        "file": "app/startup/modules_initializer.py",
+        "name": "SystemConfigOper"
+      },
+      {
+        "file": "app/startup/modules_initializer.py",
+        "name": "SystemConfigOper"
+      },
+      {
+        "file": "app/startup/modules_initializer.py",
+        "name": "SystemConfigOper"
+      }
+    ],
+    "count": 6
   }
 }

@@ -189,89 +189,6 @@ for legacy_name, alias in MODULE_ALIASES.items():
     )
 
 
-def test_renamed_modules_use_exact_compat_routes() -> None:
-    """旧模块路径只经 manifest 复用新的 canonical 模块。"""
-    expected = {
-        "app.application.chain.durable_events": "app.application.chain.events",
-        "app.application.transfer_execution": "app.application.transfer.execution",
-        "app.runtime.managed_resources": "app.runtime.resources",
-    }
-    configure_legacy_import_diagnostics(enabled=False, emitter=lambda _: None)
-    try:
-        for legacy_name, target_name in expected.items():
-            assert MODULE_ALIASES[legacy_name].target == target_name
-            assert importlib.import_module(legacy_name) is importlib.import_module(target_name)
-    finally:
-        reset_legacy_import_diagnostics()
-
-
-def test_transfer_package_exposes_plugin_symbols_only_through_overlay() -> None:
-    """整理包不重导出宿主实现，只按兼容清单惰性提供插件旧符号。"""
-    configure_legacy_import_diagnostics(enabled=False, emitter=lambda _: None)
-    try:
-        package = importlib.import_module("app.application.transfer")
-        legacy = importlib.import_module("app.sdk._legacy.transfer")
-
-        assert package.TransferTask is legacy.TransferTask
-        assert package.TransferQueue is legacy.TransferQueue
-        assert "TransferTask" not in package.__all__
-        assert "TransferQueue" not in package.__all__
-    finally:
-        reset_legacy_import_diagnostics()
-
-
-def test_transfer_legacy_symbols_support_all_explicit_imports() -> None:
-    """六个旧整理符号显式导入应在隔离进程中共享同一兼容类型。"""
-    code = """
-from app.application.transfer import TransferTask as ApplicationTask
-from app.application.transfer import TransferQueue as ApplicationQueue
-from app.schemas import TransferTask as SchemaTask
-from app.schemas import TransferQueue as SchemaQueue
-from app.schemas.transfer import TransferTask as TransferSchemaTask
-from app.schemas.transfer import TransferQueue as TransferSchemaQueue
-
-import app.application.transfer as application_package
-import app.schemas as schemas_package
-import app.schemas.transfer as transfer_schema
-from app.application.transfer.workflow import TransferQueue as CanonicalQueue
-from app.application.transfer.workflow import TransferTask as CanonicalTask
-from app.sdk._legacy.transfer import TransferQueue as LegacyQueue
-from app.sdk._legacy.transfer import TransferTask as LegacyTask
-
-
-class LegacyPayload:
-    def model_dump(self):
-        return {"kind": "legacy"}
-
-
-task_types = (ApplicationTask, SchemaTask, TransferSchemaTask)
-queue_types = (ApplicationQueue, SchemaQueue, TransferSchemaQueue)
-assert all(task_type is LegacyTask for task_type in task_types)
-assert all(queue_type is LegacyQueue for queue_type in queue_types)
-assert issubclass(LegacyTask, CanonicalTask)
-assert issubclass(LegacyQueue, CanonicalQueue)
-
-task = ApplicationTask(
-    fileitem={"storage": "local", "path": "/downloads/movie.mkv", "type": "file"},
-    meta=LegacyPayload(),
-)
-assert isinstance(task, CanonicalTask)
-assert task.to_dict()["meta"] == {"kind": "legacy"}
-for queue_type in queue_types:
-    queue = queue_type(task=task)
-    assert queue.task is task
-
-for package in (application_package, schemas_package, transfer_schema):
-    assert "TransferTask" not in package.__all__
-    assert "TransferQueue" not in package.__all__
-"""
-    subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=Path(__file__).parents[1],
-        check=True,
-    )
-
-
 def test_virtual_package_exports_resolve_exact_manifest_symbols():
     """合成旧包仅公开 manifest 声明的符号，并记录 DEBUG 兼容警告。"""
     legacy_package = "app.core.meta"
@@ -312,19 +229,6 @@ def test_db_refactor_legacy_modules_are_all_registered():
     }
 
     assert expected <= set(MODULE_ALIASES)
-
-
-def test_workflow_oper_compatibility_is_only_exposed_by_overlay():
-    """旧工作流写入口只由 Legacy facade 和精确符号映射提供。"""
-    legacy = importlib.import_module("app.db.workflow_oper")
-    canonical = importlib.import_module("app.db.oper.workflow")
-    oper_package = importlib.import_module("app.db.oper")
-
-    assert MODULE_ALIASES["app.db.workflow_oper"].target == "app.sdk._legacy.workflow"
-    assert issubclass(legacy.WorkflowOper, canonical.WorkflowOper)
-    assert legacy.WorkflowOper is not canonical.WorkflowOper
-    assert oper_package.WorkflowOper is legacy.WorkflowOper
-    assert "WorkflowOper" not in oper_package.__all__
 
 
 def test_split_user_oper_facade_exports_data_and_auth_contracts():
@@ -401,16 +305,10 @@ def test_legacy_transfer_task_hides_internal_admission_identity():
     public_fields = set(task.to_dict())
 
     task.bind_admission_task_id("internal-task-id")
-    task.bind_execution_lease(
-        owner_id="internal-worker",
-        lease_token="internal-lease-token",
-    )
 
     assert set(task.to_dict()) == public_fields
     assert "task_id" not in task.to_dict()
     assert "admission_task_id" not in task.to_dict()
-    assert "lease_owner" not in task.to_dict()
-    assert "lease_token" not in task.to_dict()
 
 
 def test_chain_media_legacy_scraping_symbols_resolve_to_scraping_chain():
@@ -421,16 +319,6 @@ def test_chain_media_legacy_scraping_symbols_resolve_to_scraping_chain():
     assert legacy_media.ScrapingChain is canonical_scraping.ScrapingChain
     assert legacy_media.ScrapingOption is canonical_scraping.ScrapingOption
     assert legacy_media.ScrapingConfig is canonical_scraping.ScrapingConfig
-
-
-def test_workflow_manager_legacy_name_resolves_only_through_symbol_overlay():
-    """旧 WorkFlowManager 仍可显式导入，但不进入 canonical 模块公开面。"""
-    install_legacy_import_hook()
-    workflow_module = importlib.import_module("app.workflow")
-
-    assert workflow_module.WorkFlowManager is workflow_module.WorkflowManager
-    assert "WorkFlowManager" not in vars(workflow_module)
-    assert "WorkFlowManager" not in workflow_module.__all__
 
 
 def test_rules_domain_legacy_modules_resolve_to_rules():
@@ -482,15 +370,6 @@ def test_plugin_scan_reports_moved_symbol_import(tmp_path: Path):
 
 def test_symbol_alias_manifest_covers_all_moved_public_symbols():
     """符号级映射清单应覆盖媒体身份、整理工作项、刮削拆分与消息/通知命名统一的旧入口。"""
-    assert set(SYMBOL_ALIASES["app.chain"]) == {"ChainBase"}
-    assert set(SYMBOL_ALIASES["app.db.oper"]) == {
-        "SiteOper",
-        "SubscribeHistoryOper",
-        "SubscribeOper",
-        "TransferHistoryOper",
-        "WorkflowOper",
-    }
-    assert set(SYMBOL_ALIASES["app.workflow"]) == {"WorkFlowManager"}
     assert set(SYMBOL_ALIASES["app.domain.media"]) == {
         "MEDIA_SOURCE_ALIASES",
         "MEDIA_SOURCE_PREFIXES",
@@ -536,18 +415,3 @@ def test_symbol_alias_manifest_covers_all_moved_public_symbols():
     assert set(SYMBOL_ALIASES["app.schemas.message"]) == set(
         _MESSAGE_NOTIFICATION_SYMBOL_ALIASES
     )
-
-
-def test_chain_base_legacy_sdk_and_canonical_imports_share_identity(monkeypatch):
-    """旧包根与 SDK 必须解析到 canonical ChainBase，方法补丁对三条路径同时可见。"""
-    legacy_chain = importlib.import_module("app.chain")
-    canonical = importlib.import_module("app.chain.base").ChainBase
-    sdk = importlib.import_module("app.sdk.chain").ChainBase
-    marker = object()
-
-    monkeypatch.setattr(canonical, "_compat_identity_marker", marker, raising=False)
-
-    assert legacy_chain.ChainBase is canonical
-    assert sdk is canonical
-    assert legacy_chain.ChainBase._compat_identity_marker is marker
-    assert sdk._compat_identity_marker is marker

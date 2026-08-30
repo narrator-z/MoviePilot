@@ -1,12 +1,11 @@
 """工作流状态与定义写操作应用用例。"""
 
+from dataclasses import dataclass
 import json
 from collections.abc import Awaitable
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, List, Mapping, Optional, Protocol, TypeVar
+from typing import Any, Callable, Mapping, Optional, Protocol, TypeVar
 
-from app.schemas.common import JsonData
 
 WORKFLOW_TRIGGER_TIMER = "timer"
 WORKFLOW_TRIGGER_EVENT = "event"
@@ -16,30 +15,6 @@ SUPPORTED_WORKFLOW_TRIGGERS = {
     WORKFLOW_TRIGGER_EVENT,
     WORKFLOW_TRIGGER_MANUAL,
 }
-
-
-@dataclass(frozen=True, slots=True)
-class WorkflowSnapshot:
-    """工作流查询返回的脱离数据库会话的冻结快照。"""
-
-    id: int
-    name: str
-    description: Optional[str]
-    timer: Optional[str]
-    trigger_type: Optional[str]
-    event_type: Optional[str]
-    event_conditions: Mapping[str, JsonData]
-    state: str
-    current_action: Optional[str]
-    result: Optional[str]
-    run_count: Optional[int]
-    actions: tuple[Mapping[str, JsonData], ...]
-    flows: tuple[Mapping[str, JsonData], ...]
-    context: Mapping[str, JsonData]
-    execution_config: Mapping[str, JsonData]
-    execution_state: Mapping[str, JsonData]
-    add_time: Optional[str]
-    last_time: Optional[str]
 
 
 class WorkflowRuntime(Protocol):
@@ -65,7 +40,7 @@ class WorkflowRuntime(Protocol):
         """移除全部或指定工作流的事件触发器。"""
         ...
 
-    def update_workflow_event(self, workflow: WorkflowSnapshot) -> None:
+    def update_workflow_event(self, workflow: Any) -> None:
         """按最新定义刷新工作流事件触发器。"""
         ...
 
@@ -101,19 +76,10 @@ def _unconfigured_workflow_runtime() -> WorkflowRuntime:
 _workflow_runtime_provider: WorkflowRuntimeProvider = _unconfigured_workflow_runtime
 
 
-def configure_workflow_runtime(
-    provider: Optional[WorkflowRuntimeProvider],
-) -> WorkflowRuntimeProvider:
-    """登记工作流运行时 provider，并返回先前 provider 供失败回滚。"""
+def configure_workflow_runtime(provider: WorkflowRuntimeProvider) -> None:
+    """由启动组合根登记工作流运行时实例提供器。"""
     global _workflow_runtime_provider
-    previous = _workflow_runtime_provider
-    _workflow_runtime_provider = provider or _unconfigured_workflow_runtime
-    return previous
-
-
-def reset_workflow_runtime() -> None:
-    """恢复未装配 provider，禁止重复 lifespan 复用旧运行时。"""
-    configure_workflow_runtime(None)
+    _workflow_runtime_provider = provider
 
 
 def get_workflow_manager() -> WorkflowRuntime:
@@ -121,31 +87,15 @@ def get_workflow_manager() -> WorkflowRuntime:
     return _workflow_runtime_provider()
 
 
-class WorkflowQueryRepository(Protocol):
-    """工作流查询用例需要的同步与异步快照端口。"""
+class AsyncWorkflowQueryRepository(Protocol):
+    """工作流查询用例需要的异步读取端口。"""
 
-    def get(self, workflow_id: int) -> Optional[WorkflowSnapshot]:
-        """按 ID 读取工作流快照。"""
+    async def async_list(self) -> list[Any]:
+        """读取全部工作流。"""
         ...
 
-    def list_enabled(self) -> List[WorkflowSnapshot]:
-        """读取全部启用的工作流快照。"""
-        ...
-
-    def list_timer_enabled(self) -> List[WorkflowSnapshot]:
-        """读取启用的定时工作流快照。"""
-        ...
-
-    def list_event_enabled(self) -> List[WorkflowSnapshot]:
-        """读取启用的事件工作流快照。"""
-        ...
-
-    async def async_list(self) -> List[WorkflowSnapshot]:
-        """异步读取全部工作流快照。"""
-        ...
-
-    async def async_get(self, workflow_id: int) -> Optional[WorkflowSnapshot]:
-        """异步按 ID 读取工作流快照。"""
+    async def async_get(self, workflow_id: int) -> Optional[Any]:
+        """按 ID 读取工作流。"""
         ...
 
 
@@ -164,33 +114,17 @@ class WorkflowCachePort(Protocol):
 class WorkflowQueryService:
     """提供工作流列表和详情查询，隔离 API 与数据库会话。"""
 
-    def __init__(self, repository: WorkflowQueryRepository) -> None:
-        """保存可返回脱离会话快照的查询端口。"""
+    def __init__(self, repository: AsyncWorkflowQueryRepository) -> None:
+        """保存请求级异步查询端口。"""
         self._repository = repository
 
-    async def list(self) -> List[WorkflowSnapshot]:
-        """返回全部工作流快照。"""
+    async def list(self) -> list[Any]:
+        """返回全部工作流。"""
         return await self._repository.async_list()
 
-    async def get(self, workflow_id: int) -> Optional[WorkflowSnapshot]:
-        """返回指定工作流快照。"""
+    async def get(self, workflow_id: int) -> Optional[Any]:
+        """返回指定工作流。"""
         return await self._repository.async_get(workflow_id)
-
-    def get_sync(self, workflow_id: int) -> Optional[WorkflowSnapshot]:
-        """同步返回指定工作流快照。"""
-        return self._repository.get(workflow_id)
-
-    def list_enabled(self) -> List[WorkflowSnapshot]:
-        """同步返回全部启用的工作流快照。"""
-        return self._repository.list_enabled()
-
-    def list_timer_enabled(self) -> List[WorkflowSnapshot]:
-        """同步返回启用的定时工作流快照。"""
-        return self._repository.list_timer_enabled()
-
-    def list_event_enabled(self) -> List[WorkflowSnapshot]:
-        """同步返回启用的事件工作流快照。"""
-        return self._repository.list_event_enabled()
 
 
 _configured_workflow_query: WorkflowQueryService | None = None
@@ -200,12 +134,6 @@ def configure_workflow_query(service: WorkflowQueryService) -> None:
     """由启动组合根登记工作流查询服务。"""
     global _configured_workflow_query
     _configured_workflow_query = service
-
-
-def reset_workflow_query() -> None:
-    """清除当前 lifespan 的工作流查询服务。"""
-    global _configured_workflow_query
-    _configured_workflow_query = None
 
 
 def get_configured_workflow_query() -> WorkflowQueryService:
@@ -253,62 +181,6 @@ class UnitOfWork(Protocol):
     def rollback(self) -> None:
         """回滚当前事务。"""
         ...
-
-
-class WorkflowExecutionPort(Protocol):
-    """工作流 Chain 提交执行状态所需的类型化事务端口。"""
-
-    def start(self, workflow_id: int) -> bool:
-        """提交工作流运行中状态。"""
-        ...
-
-    def success(
-            self,
-            workflow_id: int,
-            result: Optional[str] = None,
-    ) -> bool:
-        """提交工作流成功状态。"""
-        ...
-
-    def fail(self, workflow_id: int, result: str) -> bool:
-        """提交工作流失败状态。"""
-        ...
-
-    def step(
-            self,
-            workflow_id: int,
-            action_id: str,
-            context: dict[str, Any],
-            execution_state: Optional[dict[str, Any]] = None,
-    ) -> bool:
-        """提交工作流动作进度。"""
-        ...
-
-    def reset(self, workflow_id: int, reset_count: bool = False) -> bool:
-        """提交工作流执行状态重置。"""
-        ...
-
-
-_configured_workflow_execution: Optional[WorkflowExecutionPort] = None
-
-
-def configure_workflow_execution(service: WorkflowExecutionPort) -> None:
-    """由启动组合根登记唯一工作流执行状态事务服务。"""
-    global _configured_workflow_execution
-    _configured_workflow_execution = service
-
-
-def reset_workflow_execution() -> None:
-    """清除当前 lifespan 的工作流执行状态事务服务。"""
-    global _configured_workflow_execution
-    _configured_workflow_execution = None
-
-
-def get_configured_workflow_execution() -> WorkflowExecutionPort:
-    """返回启动阶段登记的工作流执行状态事务服务。"""
-    if _configured_workflow_execution is None:
-        raise RuntimeError("工作流执行状态事务服务尚未配置")
-    return _configured_workflow_execution
 
 
 class WorkflowExecutionRepository(Protocol):

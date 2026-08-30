@@ -1,8 +1,6 @@
-"""缓存依赖的启动入口。"""
-
-from app.startup.composition.cache import configure_cache_composition
+from app.adapters.cache.backends import configure_platform_cache
 
 
 def configure_cache_dependencies() -> None:
-    """委托组合根登记平台缓存具体实现。"""
-    configure_cache_composition()
+    """在导入使用缓存装饰器的业务模块前注册具体缓存适配器。"""
+    configure_platform_cache()

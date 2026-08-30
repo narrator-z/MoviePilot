@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from app.agent.policy.contracts import ToolPolicyContext
     from app.agent.policy.orchestrator import AgentToolPolicyOrchestrator
     from app.agent.tools.catalog import ToolCatalogSnapshot
-    from app.application.agent import AgentDataContext
 
 
 class ToolDefinition:
@@ -37,7 +36,6 @@ class MoviePilotToolsManager:
         session_id: str = uuid.uuid4(),
         is_admin: bool = True,
         policy_orchestrator: Optional[AgentToolPolicyOrchestrator] = None,
-        data: Optional[AgentDataContext] = None,
     ):
         """
         初始化工具管理器
@@ -50,7 +48,6 @@ class MoviePilotToolsManager:
         self.session_id = session_id
         self.is_admin = is_admin
         self.policy_orchestrator = policy_orchestrator
-        self._data = data
         self._policy_context: Optional[ToolPolicyContext] = None
         self.tools: List[Any] = []
         self.catalog: Optional[ToolCatalogSnapshot] = None
@@ -58,30 +55,6 @@ class MoviePilotToolsManager:
         self._plugin_agent_tools_revision = -1
         self._catalog_materialized = False
         self._catalog_managed_by_factory = False
-
-    def _invalidate_catalog_locked(self) -> None:
-        """在持有工具锁时清除由旧数据上下文构造的目录快照。"""
-        self.tools = []
-        self.catalog = None
-        self._plugin_agent_tools_revision = -1
-        self._catalog_materialized = False
-        self._catalog_managed_by_factory = False
-
-    def set_data_context(self, data: AgentDataContext) -> None:
-        """绑定组合根上下文，并使工厂拥有的旧工具快照原子失效。"""
-        with self._tools_lock:
-            if self._data is data:
-                return
-            if self._catalog_materialized and not self._catalog_managed_by_factory:
-                raise RuntimeError("调用方工具目录已物化，不能替换数据上下文")
-            self._data = data
-            self._invalidate_catalog_locked()
-
-    def reset_data_context(self) -> None:
-        """撤销当前 lifespan 数据上下文，并清除引用旧仓储的工具快照。"""
-        with self._tools_lock:
-            self._data = None
-            self._invalidate_catalog_locked()
 
     @staticmethod
     def _summarize_error(error: Exception) -> str:
@@ -97,7 +70,7 @@ class MoviePilotToolsManager:
         工厂负责插件 revision 前后稳定窗口；manager 只发布完整快照，避免
         并发调用观察到一半刷新后的工具列表。
         """
-        from app.agent.loader import get_tool_factory
+        from app.agent.runtime_loader import get_tool_factory
 
         try:
             catalog = get_tool_factory().create_catalog(
@@ -108,7 +81,6 @@ class MoviePilotToolsManager:
                 username="API Client",
                 stream_handler=None,
                 agent_context={"is_admin": self.is_admin},
-                data=self._data,
             )
             self.catalog = catalog
             self.tools = catalog.tools
@@ -255,7 +227,7 @@ class MoviePilotToolsManager:
             if self.catalog is None or [
                 id(tool) for tool in self.catalog.tools
             ] != [id(tool) for tool in self.tools]:
-                from app.agent.loader import get_tool_factory
+                from app.agent.runtime_loader import get_tool_factory
                 from app.agent.tools.catalog import ToolCatalogSnapshot
 
                 self.catalog = ToolCatalogSnapshot.from_tools(

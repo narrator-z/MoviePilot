@@ -4,8 +4,9 @@ from typing import Any
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-from app.api.context import get_async_session, get_host_runtime
+from app.api.context import get_async_session, get_host_runtime, get_sync_session
 from app.application.site.mutation import SiteMutationCommand
 from app.application.site.query import SiteQueryService
 from app.application.site.sites import SitesHelper  # pylint: disable=import-error,no-name-in-module
@@ -59,7 +60,8 @@ def get_site_query_service(
 
 
 def get_site_sync_query_service(
+    db: Session = Depends(get_sync_session),
     runtime: HostRuntime = Depends(get_host_runtime),
 ) -> SiteQueryService:
     """组装站点同步查询服务，用于同步 Chain 路由。"""
-    return SiteQueryService(repository=runtime.site.standalone)
+    return SiteQueryService(repository=runtime.site.repository(db))

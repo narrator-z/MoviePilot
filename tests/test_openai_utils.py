@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from app.api.protocol import (
+from app.api.openai_utils import (
     build_anthropic_messages,
     build_completion_payload,
     build_prompt,

@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: read  # 门禁步骤需查询同 SHA 的 Unit Tests 运行状态
 
 jobs:
   Docker-build:

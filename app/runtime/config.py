@@ -568,7 +568,7 @@ class ConfigModel(BaseModel):
     # ==================== 插件配置 ====================
     # 插件市场仓库地址，多个地址使用,分隔，地址以/结尾
     PLUGIN_MARKET: str = (
-        "https://github.com/jxxghp/MoviePilot-Plugins"
+        "https://github.com/narrator-z/MoviePilot-PluginsV2"
     )
     # 插件安装数据共享
     PLUGIN_STATISTIC_SHARE: bool = True
@@ -942,6 +942,15 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
             if needs_update:
                 cls.update_env_config("API_TOKEN", data["API_TOKEN"], converted_value)
                 data["API_TOKEN"] = converted_value
+
+        # 处理签名密钥持久化：未在 app.env/环境变量中显式配置时，随机生成并写回 app.env。
+        # 否则每次进程启动都会用新的随机密钥，导致已签发的 JWT 全部验签失败（403），前端被强制登出。
+        for _secret_field in ("SECRET_KEY", "RESOURCE_SECRET_KEY"):
+            if _secret_field not in data:
+                _new_key = secrets.token_urlsafe(32)
+                cls.update_env_config(_secret_field, None, _new_key)
+                logger.info(f"'{_secret_field}' 未持久化，已随机生成并写入 'app.env'")
+                data[_secret_field] = _new_key
 
         # 对其他字段进行类型转换
         for field_name, field_info in cls.model_fields.items():

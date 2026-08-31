@@ -219,6 +219,53 @@ class SubscribeOper(DbOper):
 
         return cast(Optional[Subscribe], await self._execute_async_query(query))
 
+    def __merge_subscribe_identity(
+        self, existing: Subscribe, payload: Mapping[str, JsonData]
+    ) -> None:
+        """跨来源同剧去重：把 payload 中非空的身份/元数据字段合并回既有订阅。
+
+        身份字段（tmdbid/media_source 等）仅在既有订阅对应字段为空时才补全，
+        禁止用新来源的空值或不同身份覆盖既有已有有效身份，避免 TMDB 订阅被
+        错误改写成豆瓣来源或反之。命中既有订阅时不插入新行。
+        """
+        valid_columns = set(Subscribe.__table__.columns.keys())
+        identity_fields = {
+            "tmdbid", "imdbid", "tvdbid", "doubanid",
+            "bangumiid", "anilistid", "media_source", "media_id",
+        }
+        updates: dict = {}
+        for column, value in payload.items():
+            if column not in valid_columns or value is None:
+                continue
+            if column in identity_fields:
+                current = getattr(existing, column, None)
+                if current not in (None, ""):
+                    continue
+            updates[column] = value
+        if updates:
+            self.update(existing.id, updates)
+
+    async def __async_merge_subscribe_identity(
+        self, existing: Subscribe, payload: Mapping[str, JsonData]
+    ) -> None:
+        """异步版：跨来源同剧去重合并（语义同 ``__merge_subscribe_identity``）。"""
+        valid_columns = set(Subscribe.__table__.columns.keys())
+        identity_fields = {
+            "tmdbid", "imdbid", "tvdbid", "doubanid",
+            "bangumiid", "anilistid", "media_source", "media_id",
+        }
+        updates: dict = {}
+        for column, value in payload.items():
+            if column not in valid_columns or value is None:
+                continue
+            if column in identity_fields:
+                current = getattr(existing, column, None)
+                if current not in (None, ""):
+                    continue
+            updates[column] = value
+        if updates:
+            await self.async_update(existing.id, updates)
+
     def stage_add(
         self,
         identity: Mapping[str, JsonData],
@@ -288,6 +335,23 @@ class SubscribeOper(DbOper):
             if after_commit:
                 after_commit(subscribe.id)
             return subscribe.id, "订阅已存在"
+        # 跨身份同剧去重：精确身份未命中时，按 标题+年份+剧集组+用户 找同剧不同身份既有订阅，
+        # 命中则合并身份字段到既有订阅（不新建），防止主季吞掉自定义剧集组。
+        same_media = self._execute_sync_query(
+            lambda session: Subscribe.find_same_media(
+                session,
+                name=payload.get("name"),
+                year=payload.get("year"),
+                season=identity.get("season"),
+                episode_group=identity.get("episode_group"),
+                username=username,
+            )
+        )
+        if same_media:
+            self.__merge_subscribe_identity(same_media, payload)
+            if after_commit:
+                after_commit(same_media.id)
+            return same_media.id, "订阅已存在"
         self._stage_create(Subscribe(**_persistable(payload)))
         subscribe = self._exists(identity, username)
         if not subscribe:
@@ -316,6 +380,22 @@ class SubscribeOper(DbOper):
             if after_commit:
                 await after_commit(subscribe.id)
             return subscribe.id, "订阅已存在"
+        # 跨身份同剧去重（异步）：语义同 add。
+        async def _query_same_media(session):
+            return await Subscribe.async_find_same_media(
+                session,
+                name=payload.get("name"),
+                year=payload.get("year"),
+                season=identity.get("season"),
+                episode_group=identity.get("episode_group"),
+                username=username,
+            )
+        same_media = await self._execute_async_query(_query_same_media)
+        if same_media:
+            await self.__async_merge_subscribe_identity(same_media, payload)
+            if after_commit:
+                await after_commit(same_media.id)
+            return same_media.id, "订阅已存在"
         await self._stage_async_create(Subscribe(**_persistable(payload)))
         subscribe = await self._async_exists(identity, username)
         if not subscribe:

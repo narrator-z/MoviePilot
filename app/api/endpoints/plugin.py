@@ -9,6 +9,7 @@ from starlette import status
 from starlette.responses import StreamingResponse
 
 from app.adapters.web.security.access import (
+    oauth2_scheme_manual_error,
     resource_token_cookie,
     verify_resource_token,
     verify_token,
@@ -161,6 +162,7 @@ def _verify_plugin_static_file_access(
     plugin_id: str,
     filepath: str,
     resource_token: Annotated[Optional[str], Security(resource_token_cookie)] = None,
+    jwt_token: Annotated[Optional[str], Security(oauth2_scheme_manual_error)] = None,
 ) -> None:
     """
     校验插件静态文件访问权限。
@@ -170,7 +172,7 @@ def _verify_plugin_static_file_access(
     """
     if _is_plugin_auth_remote_file(plugin_id, filepath):
         return
-    verify_resource_token(resource_token)
+    verify_resource_token(resource_token, jwt_token)
 
 
 @router.get("/", summary="所有插件", response_model=List[_SchemaPlugin])

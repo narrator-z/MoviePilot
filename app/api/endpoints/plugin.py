@@ -172,7 +172,12 @@ def _verify_plugin_static_file_access(
     """
     if _is_plugin_auth_remote_file(plugin_id, filepath):
         return
-    verify_resource_token(resource_token, jwt_token)
+    # 仅请求携带 Bearer 时透传 jwt_token 做资源令牌回落；无 Bearer 保持单参调用，
+    # 兼容按上游单参签名注入的 mock/调用方。
+    if jwt_token is not None:
+        verify_resource_token(resource_token, jwt_token)
+    else:
+        verify_resource_token(resource_token)
 
 
 @router.get("/", summary="所有插件", response_model=List[_SchemaPlugin])

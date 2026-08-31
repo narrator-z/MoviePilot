@@ -994,10 +994,14 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
             logger.warning(message)
             return False, message
         else:
+            # 写盘前确保 app.env 所在目录存在：Settings 构造期（pydantic 校验）可能先于
+            # __init__ 建目录触发持久化写入，且测试/子进程可能指向未创建的 CONFIG_DIR。
+            env_path = get_env_path()
+            env_path.parent.mkdir(parents=True, exist_ok=True)
             # 当值为 None 时，从 env 文件中删除该键，恢复为默认值
             if converted_value is None:
                 unset_key(
-                    dotenv_path=get_env_path(),
+                    dotenv_path=env_path,
                     key_to_unset=field_name,
                 )
                 logger.info(f"配置项 '{field_name}' 已清空，从 'app.env' 中移除")
@@ -1009,7 +1013,7 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
                 value_to_write = str(converted_value)
 
             set_key(
-                dotenv_path=get_env_path(),
+                dotenv_path=env_path,
                 key_to_set=field_name,
                 value_to_set=value_to_write,
                 quote_mode="always",

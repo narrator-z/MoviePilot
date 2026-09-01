@@ -1089,8 +1089,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 7688,
-  "edge_sha256": "3fd19c9e83839d9fca024010ca2826658af311b1d8cc5f19c8539c259da4f7ec",
+  "edge_count": 7690,
+  "edge_sha256": "8f379441733e9a60d67a6c773ce4dba65d00f4d86570abbaf73258aa592d3f72",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -5056,6 +5056,8 @@
     "app.db.adapters.pluginidentity -> app.db.oper",
     "app.db.adapters.pluginidentity -> app.db.oper.pluginidentity",
     "app.db.adapters.pluginidentity -> app.db.uow",
+    "app.db.adapters.pluginidentity -> app.runtime",
+    "app.db.adapters.pluginidentity -> app.runtime.log",
     "app.db.adapters.plugininstallation -> app.application",
     "app.db.adapters.plugininstallation -> app.application.plugin",
     "app.db.adapters.plugininstallation -> app.application.plugin.declaration",

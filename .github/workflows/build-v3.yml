@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: read  # 门禁步骤需查询同 SHA 的 Unit Tests 运行状态
 
 jobs:
   Docker-build:
@@ -27,6 +28,41 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Check Unit Tests gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # 与 test.yml 同事件触发，两边并行跑；此处等 Unit Tests 出结论，
+          # 未通过则中止构建，避免把「校验失败的版本」发布成 Release / 镜像。
+          set -eu
+          sha="$(git rev-parse HEAD)"
+          deadline=$((SECONDS + 600))
+          run_id=""
+          while [ $SECONDS -lt $deadline ]; do
+            run_id="$(curl -fsSL \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}&per_page=10" 2>/dev/null \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); runs=[r for r in d.get('workflow_runs',[]) if r['name']=='Unit Tests']; print(runs[0]['id'] if runs else '')" \
+              || true)"
+            if [ -n "$run_id" ]; then
+              conclusion="$(curl -fsSL \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" 2>/dev/null \
+                | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status','')+' '+str(d.get('conclusion')))" \
+                || true)"
+              echo "Unit Tests run ${run_id}: ${conclusion}"
+              case "$conclusion" in
+                completed\ success) echo "Unit Tests 通过，继续构建"; exit 0 ;;
+                completed\ failure|completed\ cancelled|completed\ timed_out) \
+                  echo "Unit Tests 未通过，中止构建（不发布失败版本）"; exit 1 ;;
+              esac
+            fi
+            sleep 20
+          done
+          echo "等待 Unit Tests 结论超时，中止构建"; exit 1
 
       - name: Verify dependency lock
         run: uv lock --check

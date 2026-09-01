@@ -220,6 +220,9 @@ RUN set -eu; \
 FROM prepare_payload AS prepare_plugins
 
 ARG MOVIEPILOT_PLUGINS_REF="main"
+# fork 插件覆盖层使用独立 ref：官方 PLUGINS_REF 是 jxxghp 仓库的 pinned sha，
+# fork 仓库没有该 sha，复用会导致 archive 下载 404 并中断构建。
+ARG MOVIEPILOT_FORK_PLUGINS_REF="refs/heads/main"
 
 RUN set -eu; \
     test -n "${MOVIEPILOT_PLUGINS_REF}"; \
@@ -235,6 +238,25 @@ RUN set -eu; \
             cp -a "${plugin_root}/plugins/${plugin_id}" /plugins/; \
         fi; \
     done
+
+# 叠加 fork 插件覆盖层：同名插件以 fork 版本为准（fork 优先覆盖官方）
+RUN set -eu; \
+    curl -fsSL "https://github.com/narrator-z/MoviePilot-PluginsV2/archive/${MOVIEPILOT_FORK_PLUGINS_REF}.zip" -o /tmp/plugins-fork.zip; \
+    busybox unzip -q /tmp/plugins-fork.zip -d /tmp/plugins-fork-src; \
+    fork_root="$(find /tmp/plugins-fork-src -mindepth 1 -maxdepth 1 -type d -print -quit)"; \
+    test -n "${fork_root}"; \
+    if [ -d "${fork_root}/plugins.v2" ]; then \
+        cp -a "${fork_root}/plugins.v2/." /plugins/; \
+    fi; \
+    if [ -f "${fork_root}/package.json" ]; then \
+        jq -r 'to_entries[] | select(.value.v2 == true) | .key' "${fork_root}/package.json" | awk '{print tolower($0)}' | \
+        while read -r plugin_id; do \
+            if [ -d "${fork_root}/plugins/${plugin_id}" ]; then \
+                rm -rf "/plugins/${plugin_id}"; \
+                cp -a "${fork_root}/plugins/${plugin_id}" /plugins/; \
+            fi; \
+        done; \
+    fi
 
 
 # 准备站点资源

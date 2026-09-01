@@ -295,9 +295,44 @@ def verify_resource_token(
         str | None,
         Security(resource_token_cookie),
     ],
+    jwt_token: Annotated[
+        str | None,
+        Security(oauth2_scheme_manual_error),
+    ] = None,
 ) -> TokenPayload:
-    """验证 Cookie 中携带的资源访问令牌。"""
-    return _validate_token_identity(_decode_or_http_error(resource_token, "resource"))
+    """
+    验证资源访问令牌（优先从 Cookie 获取，缺失时回落到 Bearer）。
+
+    插件自定义前端、图片代理等子资源请求通常只携带同源资源 Cookie；而经前端
+    axios 发起的 API 请求会携带 Bearer，资源 Cookie 可能因首次加载、跨上下文或
+    旧镜像未下发而缺失。Bearer（purpose="authentication"）是比资源令牌更强的
+    凭据，安全等价，接受它可以避免这些请求拿到 401 被前端判定为未登录而强制登出。
+
+    :param resource_token: 从 Cookie 中获取的资源访问令牌
+    :param jwt_token: 从 Authorization 头部获取的 JWT 令牌（Bearer 兜底）
+    :return: 解析后的 TokenPayload
+    :raises HTTPException: 如果两种凭据均无效
+    """
+    # 优先使用资源 Cookie 鉴权（同源子资源请求自动携带，无需重复 Bearer）
+    if resource_token:
+        try:
+            return _validate_token_identity(_decode_or_http_error(resource_token, "resource"))
+        except HTTPException:
+            # 资源 Cookie 无效时继续尝试 Bearer 兜底
+            pass
+
+    # 兜底：资源 Cookie 缺失时使用 Bearer 鉴权，避免被误判为未登录而强制登出
+    if jwt_token:
+        try:
+            return _validate_token_identity(_decode_or_http_error(jwt_token, "authentication"))
+        except HTTPException:
+            pass
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def _verify_key(key: str | None, expected_key: str, key_type: str) -> str:

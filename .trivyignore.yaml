@@ -69,3 +69,10 @@ vulnerabilities:
       - pkg:golang/stdlib@v1.26.5
     expired_at: 2026-11-20
     statement: The official rclone binary has no patched release for this embedded Go runtime yet.
+  - id: CVE-2026-56854
+    paths:
+      - usr/bin/rclone
+    purls:
+      - pkg:golang/golang.org/x/crypto@v0.54.0
+    expired_at: 2026-11-20
+    statement: The official rclone binary (1.75.0) embeds golang.org/x/crypto v0.54.0; CVE-2026-56854 is fixed only in x/crypto 0.55.0, for which no patched rclone release is available yet.

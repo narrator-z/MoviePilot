@@ -60,7 +60,7 @@ def _read_json_file(path: Path) -> Optional[Dict[str, Any]]:
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
 
 
@@ -83,7 +83,7 @@ def _get_process(runtime: Optional[Dict[str, Any]] = None) -> Optional[psutil.Pr
 
     try:
         process = psutil.Process(int(pid))
-    except psutil.NoSuchProcess, psutil.AccessDenied, ValueError:
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
         return None
 
     try:
@@ -91,7 +91,7 @@ def _get_process(runtime: Optional[Dict[str, Any]] = None) -> Optional[psutil.Pr
             return None
         if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
             return None
-    except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return None
 
     return process
@@ -210,7 +210,7 @@ def _frontend_health(
         with urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8", errors="replace").strip()
             return response.status == 200, {"version": raw}
-    except HTTPError, URLError:
+    except (HTTPError, URLError):
         return False, None
 
 
@@ -233,7 +233,7 @@ def _git_current_branch() -> Optional[str]:
             cwd=str(_repo_root()),
             text=True,
         ).strip()
-    except OSError, subprocess.CalledProcessError:
+    except (OSError, subprocess.CalledProcessError):
         return None
     return branch or None
 

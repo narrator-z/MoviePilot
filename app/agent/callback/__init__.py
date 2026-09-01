@@ -226,7 +226,7 @@ class StreamingHandler:
         try:
             channel_enum = NotificationChannel(self._channel)
             self._max_message_length = ChannelCapabilityManager.get_max_message_length(channel_enum)
-        except ValueError, KeyError:
+        except (ValueError, KeyError):
             self._max_message_length = 0
 
         # 启动异步定时刷新任务
@@ -526,7 +526,7 @@ class StreamingHandler:
         try:
             channel_enum = NotificationChannel(self._channel)
             return ChannelCapabilityManager.supports_capability(channel_enum, ChannelCapability.MESSAGE_EDITING)
-        except ValueError, KeyError:
+        except (ValueError, KeyError):
             return False
 
     def _get_rich_message(self, text: str) -> Optional[str]:
@@ -666,7 +666,7 @@ class StreamingHandler:
                     # 后续更新：编辑已有消息
                     try:
                         channel_enum = NotificationChannel(self._channel)
-                    except ValueError, KeyError:
+                    except (ValueError, KeyError):
                         return
 
                     metadata = dict(self._message_response.metadata or {})

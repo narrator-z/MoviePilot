@@ -658,14 +658,22 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin,
             page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
         """搜索指定站点索引器；插件注册的索引器优先交由插件模块认领，未认领时回落宿主索引器。"""
-        plugin_results = self._module_dispatcher.execute_plugin_modules(
-            "search_torrents", None, site=site, keyword=keyword, mtype=mtype, page=page
-        ) or []
+        plugin_results = cast(
+            List[TorrentInfo],
+            self._module_dispatcher.execute_plugin_modules(
+                "search_torrents", None, site=site, keyword=keyword, mtype=mtype, page=page
+            )
+            or [],
+        )
         if plugin_results:
             return plugin_results
-        return self._module_dispatcher.execute_system_modules(
-            "search_torrents", None, site=site, keyword=keyword, mtype=mtype, page=page
-        ) or []
+        return cast(
+            List[TorrentInfo],
+            self._module_dispatcher.execute_system_modules(
+                "search_torrents", None, site=site, keyword=keyword, mtype=mtype, page=page
+            )
+            or [],
+        )
 
     def search_subtitles(
             self,
@@ -723,16 +731,24 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin,
             page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
         """异步搜索指定站点索引器；插件注册的索引器优先交由插件模块认领，未认领时回落宿主索引器。"""
-        plugin_results = (await self._module_dispatcher.async_execute_plugin_modules(
-            "async_search_torrents", None,
-            site=site, keyword=keyword, mtype=mtype, page=page
-        )) or []
+        plugin_results = cast(
+            List[TorrentInfo],
+            (await self._module_dispatcher.async_execute_plugin_modules(
+                "async_search_torrents", None,
+                site=site, keyword=keyword, mtype=mtype, page=page
+            ))
+            or [],
+        )
         if plugin_results:
             return plugin_results
-        return (await self._module_dispatcher.async_execute_system_modules(
-            "async_search_torrents", None,
-            site=site, keyword=keyword, mtype=mtype, page=page
-        )) or []
+        return cast(
+            List[TorrentInfo],
+            (await self._module_dispatcher.async_execute_system_modules(
+                "async_search_torrents", None,
+                site=site, keyword=keyword, mtype=mtype, page=page
+            ))
+            or [],
+        )
 
     async def async_search_subtitles(
             self,

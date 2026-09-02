@@ -4,8 +4,9 @@
 必须能在站点搜索入口被插件模块认领，否则会静默返回空结果。
 """
 
-import pytest
 from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from app.chain.base import ChainBase
 from app.schemas.types import MediaType

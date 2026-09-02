@@ -225,7 +225,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          exit-code: 0  # TEMP-STOPGAP: 镜像发布前供应链门禁临时放行，待补 .trivyignore.yaml 后恢复为 1
+          exit-code: 1
 
       - name: Build arm64 candidate
         uses: docker/build-push-action@v7
@@ -257,7 +257,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          exit-code: 0  # TEMP-STOPGAP: 镜像发布前供应链门禁临时放行，待补 .trivyignore.yaml 后恢复为 1
+          exit-code: 1
 
       - name: Build free-threaded amd64 candidate
         uses: docker/build-push-action@v7
@@ -289,7 +289,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          exit-code: 0  # TEMP-STOPGAP: 镜像发布前供应链门禁临时放行，待补 .trivyignore.yaml 后恢复为 1
+          exit-code: 1
 
       - name: Build free-threaded arm64 candidate
         uses: docker/build-push-action@v7
@@ -321,7 +321,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          exit-code: 0  # TEMP-STOPGAP: 镜像发布前供应链门禁临时放行，待补 .trivyignore.yaml 后恢复为 1
+          exit-code: 1
 
       - name: Login DockerHub
         uses: docker/login-action@v4

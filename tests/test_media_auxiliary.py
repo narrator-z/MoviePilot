@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.chain.search import SearchChain
+from app.chain.search.facade import SearchChain
 from app.domain.context import MediaInfo
 from app.modules._base.media import MediaAuxiliaryProviderMixin
 from app.schemas.types import MediaSource, MediaType

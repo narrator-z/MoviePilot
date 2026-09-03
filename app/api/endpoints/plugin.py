@@ -136,67 +136,27 @@ def register_plugin(plugin_id: str):
     register_plugin_api(plugin_id)
 
 
-def _is_plugin_auth_remote_file(plugin_id: str, filepath: str) -> bool:
-    """
-    判断静态文件是否属于插件声明的匿名登录认证远程组件。
-
-    登录页加载插件认证组件时尚未产生登录态和资源 Cookie，因此仅对插件主动
-    声明的认证 remote 保留匿名读取能力，其余插件静态资源仍需资源令牌。
-    """
-    path = filepath.lstrip("/")
-    normalized_plugin_id = plugin_id.lower()
-    plugin_manager = get_plugin_manager()
-    for provider in plugin_manager.get_plugin_auth_providers():
-        remote = provider.get("remote") or {}
-        if str(remote.get("id") or "").lower() != normalized_plugin_id:
-            continue
-        remote_path = str(remote.get("url") or "").lstrip("/")
-        remote_path_lower = remote_path.lower()
-        expected_prefix = f"plugin/file/{normalized_plugin_id}/"
-        if not remote_path_lower.startswith(expected_prefix):
-            continue
-        remote_file = remote_path[len(expected_prefix) :]
-        remote_dir = remote_file.rsplit("/", 1)[0] if "/" in remote_file else ""
-        if path == remote_file or (remote_dir and path.startswith(f"{remote_dir}/")):
-            return True
-    return False
-
-
-def _is_plugin_frontend_remote_file(plugin_id: str, filepath: str) -> bool:
-    """
-    判断静态文件是否属于插件以模块联邦（Module Federation）暴露的前端远程组件。
-
-    插件前端（Vue render mode）经 plugin/remotes 声明 remoteEntry.js 及其 dist 资源，
-    由前端以浏览器脚本方式动态加载，不携带 Bearer，仅可能带上同源资源 Cookie。
-    若资源 Cookie 缺失/失效，令牌门禁会返回 401，边缘代理（Cloudflare/反代）常将其
-    判定为未授权并返回 403 HTML，导致进入插件页时前端看到原生 axios 错误而非正常
-    加载。此类公开前端产物无需鉴权即可读取，故放行匿名访问——与登录认证远程组件
-    的处理方式一致，仅作用于确实声明了前端远程入口的插件，普通插件静态资源仍须令牌。
-    """
-    path = filepath.lstrip("/")
-    # 前端远程资源必然位于 dist/ 下，非 dist 资源直接短路，避免无谓的插件投影遍历
-    if not path.startswith("dist"):
+def _plugin_remote_file_anonymous(plugin_id: str, filepath: str) -> bool:
+    # 插件声明的登录认证/前端(Vue) remote 均以浏览器脚本加载、不携带 Bearer；
+    # 放行其 dist/ 资源匿名读取，避免令牌门禁 401 被边缘代理转 403。
+    if not filepath.lstrip("/").startswith("dist"):
         return False
-    normalized_plugin_id = plugin_id.lower()
-    plugin_manager = get_plugin_manager()
-    try:
-        remotes = plugin_manager.get_plugin_remotes()
-    except Exception:
-        return False
-    for remote in remotes:
-        remote_id = str(remote.get("id") or remote.get("source_plugin_id") or "").lower()
-        if remote_id and remote_id != normalized_plugin_id:
-            continue
-        remote_path = str(remote.get("url") or "").lstrip("/")
-        remote_path_lower = remote_path.lower()
-        expected_prefix = f"plugin/file/{normalized_plugin_id}/"
-        if not remote_path_lower.startswith(expected_prefix):
-            continue
-        remote_file = remote_path[len(expected_prefix):]
-        remote_dir = remote_file.rsplit("/", 1)[0] if "/" in remote_file else ""
-        if path == remote_file or (remote_dir and path.startswith(f"{remote_dir}/")):
-            return True
-    return False
+    normalized = plugin_id.lower()
+    manager = get_plugin_manager()
+    remotes: list = []
+    for fetcher in (manager.get_plugin_auth_providers, manager.get_plugin_remotes):
+        try:
+            result = fetcher() or []
+        except Exception:
+            result = []
+        if isinstance(result, list):
+            remotes += result
+    return any(
+        str((r.get("remote", r) if isinstance(r, dict) else {}).get("id")
+            or (r.get("remote", r) if isinstance(r, dict) else {}).get("source_plugin_id")
+            or "").lower() == normalized
+        for r in remotes
+    )
 
 
 def _verify_plugin_static_file_access(
@@ -205,17 +165,8 @@ def _verify_plugin_static_file_access(
     resource_token: Annotated[Optional[str], Security(resource_token_cookie)] = None,
     jwt_token: Annotated[Optional[str], Security(oauth2_scheme_manual_error)] = None,
 ) -> None:
-    """
-    校验插件静态文件访问权限。
-
-    登录认证插件的远程组件需要在登录前加载，因此仅对插件声明的认证 remote
-    放行匿名读取；插件前端构建产物（dist/ 下的 remoteEntry.js 及其资源）是
-    公开的前端代码，同样放行匿名读取，避免模块联邦在无 Bearer 场景下被令牌
-    门禁 401 拦截、进而被边缘代理转成 403。其余插件文件仍需资源令牌或 Bearer。
-    """
-    if _is_plugin_auth_remote_file(plugin_id, filepath):
-        return
-    if _is_plugin_frontend_remote_file(plugin_id, filepath):
+    """校验插件静态文件访问权限：认证/前端 remote 的 dist/ 资源匿名读取，其余须资源令牌或 Bearer。"""
+    if _plugin_remote_file_anonymous(plugin_id, filepath):
         return
     # 资源 Cookie 缺失时回落 Bearer：仅当请求带 Bearer 才双参调用；
     # 无 Bearer 时保持单参调用，以兼容上游 mock 与既有测试契约
@@ -754,13 +705,10 @@ async def plugin_static_file(
 
     source_plugin_id = get_plugin_manager().get_plugin_source_id(plugin_id)
     plugins_root = AsyncPath(get_api_runtime_config_snapshot().root_path) / "app" / "plugins"
-    # 插件安装目录的大小写可能与 source id 不一致（如 LunaTVSource 目录对应小写路由参数），
-    # Linux 文件系统大小写敏感，直接小写拼接会找不到目录导致 404。改为按不区分大小写
-    # 匹配真实目录名，避免模块联邦前端资源（dist/）加载失败。
+    # 安装目录大小写可能与 source id 不一致（如 LunaTVSource），按真实目录名匹配避免 Linux 404
     plugin_base_dir = plugins_root / source_plugin_id.lower()
     try:
-        resolved_root = await plugins_root.resolve()
-        for entry in await resolved_root.iterdir():
+        for entry in await (await plugins_root.resolve()).iterdir():
             if entry.is_dir() and entry.name.lower() == source_plugin_id.lower():
                 plugin_base_dir = plugins_root / entry.name
                 break

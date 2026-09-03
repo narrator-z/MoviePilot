@@ -137,26 +137,26 @@ def register_plugin(plugin_id: str):
 
 
 def _plugin_remote_file_anonymous(plugin_id: str, filepath: str) -> bool:
-    # 插件声明的登录认证/前端(Vue) remote 均以浏览器脚本加载、不携带 Bearer；
-    # 放行其 dist/ 资源匿名读取，避免令牌门禁 401 被边缘代理转 403。
+    # 放行确实声明登录认证/前端 remote 的插件 dist/ 资源匿名读取，避免令牌门禁 401 被边缘代理转 403。
     if not filepath.lstrip("/").startswith("dist"):
         return False
     normalized = plugin_id.lower()
     manager = get_plugin_manager()
     remotes: list[Any] = []
-    for fetcher in (manager.get_plugin_auth_providers, manager.get_plugin_remotes):
+    frontend = getattr(manager, "get_plugin_remotes", None)
+    fetchers: list[Any] = [manager.get_plugin_auth_providers]
+    if frontend:
+        fetchers.append(frontend)
+    for fetcher in fetchers:
         try:
             result = fetcher() or []
         except Exception:
             result = []
         if isinstance(result, list):
             remotes += result
-    return any(
-        str((r.get("remote", r) if isinstance(r, dict) else {}).get("id")
-            or (r.get("remote", r) if isinstance(r, dict) else {}).get("source_plugin_id")
-            or "").lower() == normalized
-        for r in remotes
-    )
+    return any(str((r.get("remote", r) if isinstance(r, dict) else {}).get("id")
+                   or (r.get("remote", r) if isinstance(r, dict) else {}).get("source_plugin_id")
+                   or "").lower() == normalized for r in remotes)
 
 
 def _verify_plugin_static_file_access(

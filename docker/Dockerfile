@@ -241,7 +241,7 @@ RUN set -eu; \
 
 # 叠加 fork 插件覆盖层：同名插件以 fork 版本为准（fork 优先覆盖官方）
 RUN set -eu; \
-    curl -fsSL "https://github.com/narrator-z/MoviePilot-PluginsV2/archive/${MOVIEPILOT_FORK_PLUGINS_REF}.zip" -o /tmp/plugins-fork.zip; \
+    curl -fsSL "https://github.com/narrator-z/MoviePilot-Plugins/archive/${MOVIEPILOT_FORK_PLUGINS_REF}.zip" -o /tmp/plugins-fork.zip; \
     busybox unzip -q /tmp/plugins-fork.zip -d /tmp/plugins-fork-src; \
     fork_root="$(find /tmp/plugins-fork-src -mindepth 1 -maxdepth 1 -type d -print -quit)"; \
     test -n "${fork_root}"; \

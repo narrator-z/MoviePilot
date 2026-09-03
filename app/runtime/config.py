@@ -568,7 +568,7 @@ class ConfigModel(BaseModel):
     # ==================== 插件配置 ====================
     # 插件市场仓库地址，多个地址使用,分隔，地址以/结尾
     PLUGIN_MARKET: str = (
-        "https://github.com/narrator-z/MoviePilot-PluginsV2"
+        "https://github.com/narrator-z/MoviePilot-Plugins"
     )
     # 插件安装数据共享
     PLUGIN_STATISTIC_SHARE: bool = True

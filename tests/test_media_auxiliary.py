@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.chain.search import SearchChain
+from app.chain.search.facade import SearchChain
 from app.domain.context import MediaInfo
 from app.modules._base.media import MediaAuxiliaryProviderMixin
 from app.schemas.types import MediaSource, MediaType
@@ -107,3 +107,48 @@ def test_site_search_keywords_include_aggregated_aliases() -> None:
         "Frieren",
         "Frieren: Beyond Journey's End",
     ]
+
+
+def test_site_search_keywords_prioritize_english_original_title() -> None:
+    """[fork/narrator-z] 单关键词场景下应优先用英文/原片名，中文名兜底。
+
+    内置公开索引器（JackettExtend）多索引英文名，若中文名排第一且 max_search_name_limit=1，
+    会直接用中文名搜索导致 0 匹配。本测试锁定英文/原片名置顶顺序。
+    """
+    media = MediaInfo(
+        media_source=MediaSource.TMDB,
+        media_id="1339713",
+        type=MediaType.MOVIE,
+        title="痴迷",
+        original_title="Possession",
+        en_title="Possession",
+        names=["痴迷"],
+    )
+
+    with patch(
+        "app.chain.search.plan.get_chain_runtime_config_snapshot",
+        return_value=SimpleNamespace(max_search_name_limit=1),
+    ):
+        _, keywords = SearchChain._prepare_params(media)
+
+    # 单关键词限制下，必须取英文名而非中文名
+    assert keywords == ["Possession"]
+
+
+def test_site_search_keywords_fallback_to_title_when_no_english() -> None:
+    """[fork/narrator-z] 无英文/原片名时，关键词回落到中文 title，保持原语义。"""
+    media = MediaInfo(
+        media_source=MediaSource.Douban,
+        media_id="1",
+        type=MediaType.TV,
+        title="葬送的芙莉莲",
+        names=["Frieren"],
+    )
+
+    with patch(
+        "app.chain.search.plan.get_chain_runtime_config_snapshot",
+        return_value=SimpleNamespace(max_search_name_limit=3),
+    ):
+        _, keywords = SearchChain._prepare_params(media)
+
+    assert keywords == ["葬送的芙莉莲", "Frieren"]

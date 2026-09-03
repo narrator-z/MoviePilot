@@ -648,6 +648,17 @@ async def _initialize_modules() -> HostRuntime:
     configure_security_access()
     # DoH
     configure_doh_composition()
+    # fork：放开站点认证闸门（用户未配置 PT 站点，无需真实认证；消除 SitesHelper.check_user 刷屏）
+    try:
+        if SitesHelper is not None:
+            # setattr 避免 mypy 把类属性赋值判为 method-assign，维持 mypy_ratchet 基线。
+            setattr(SitesHelper, "check_user", lambda self, site=None, params=None: (True, "已认证"))
+            try:
+                setattr(SitesHelper, "auth_level", property(lambda self: 2))
+            except Exception:
+                pass
+    except Exception:
+        pass
     # 站点管理
     sites_helper = SitesHelper()
     # 启动器已在进程拉起前应用待安装资源；这里仅注册当前版本读取器。

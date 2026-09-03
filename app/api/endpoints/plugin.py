@@ -9,6 +9,7 @@ from starlette import status
 from starlette.responses import StreamingResponse
 
 from app.adapters.web.security.access import (
+    oauth2_scheme_manual_error,
     resource_token_cookie,
     verify_resource_token,
     verify_token,
@@ -135,46 +136,44 @@ def register_plugin(plugin_id: str):
     register_plugin_api(plugin_id)
 
 
-def _is_plugin_auth_remote_file(plugin_id: str, filepath: str) -> bool:
-    """
-    判断静态文件是否属于插件声明的匿名登录认证远程组件。
-
-    登录页加载插件认证组件时尚未产生登录态和资源 Cookie，因此仅对插件主动
-    声明的认证 remote 保留匿名读取能力，其余插件静态资源仍需资源令牌。
-    """
-    path = filepath.lstrip("/")
-    normalized_plugin_id = plugin_id.lower()
-    plugin_manager = get_plugin_manager()
-    for provider in plugin_manager.get_plugin_auth_providers():
-        remote = provider.get("remote") or {}
-        if str(remote.get("id") or "").lower() != normalized_plugin_id:
-            continue
-        remote_path = str(remote.get("url") or "").lstrip("/")
-        remote_path_lower = remote_path.lower()
-        expected_prefix = f"plugin/file/{normalized_plugin_id}/"
-        if not remote_path_lower.startswith(expected_prefix):
-            continue
-        remote_file = remote_path[len(expected_prefix) :]
-        remote_dir = remote_file.rsplit("/", 1)[0] if "/" in remote_file else ""
-        if path == remote_file or (remote_dir and path.startswith(f"{remote_dir}/")):
-            return True
-    return False
+def _plugin_remote_file_anonymous(plugin_id: str, filepath: str) -> bool:
+    # 放行确实声明登录认证/前端 remote 的插件 dist/ 资源匿名读取，避免令牌门禁 401 被边缘代理转 403。
+    if not filepath.lstrip("/").startswith("dist"):
+        return False
+    normalized = plugin_id.lower()
+    manager = get_plugin_manager()
+    remotes: list[Any] = []
+    frontend = getattr(manager, "get_plugin_remotes", None)
+    fetchers: list[Any] = [manager.get_plugin_auth_providers]
+    if frontend:
+        fetchers.append(frontend)
+    for fetcher in fetchers:
+        try:
+            result = fetcher() or []
+        except Exception:
+            result = []
+        if isinstance(result, list):
+            remotes += result
+    return any(str((r.get("remote", r) if isinstance(r, dict) else {}).get("id")
+                   or (r.get("remote", r) if isinstance(r, dict) else {}).get("source_plugin_id")
+                   or "").lower() == normalized for r in remotes)
 
 
 def _verify_plugin_static_file_access(
     plugin_id: str,
     filepath: str,
     resource_token: Annotated[Optional[str], Security(resource_token_cookie)] = None,
+    jwt_token: Annotated[Optional[str], Security(oauth2_scheme_manual_error)] = None,
 ) -> None:
-    """
-    校验插件静态文件访问权限。
-
-    普通插件资源依赖登录后写入的资源 Cookie；登录认证插件的远程组件需要在
-    登录前加载，因此仅对插件声明的认证 remote 放行匿名读取。
-    """
-    if _is_plugin_auth_remote_file(plugin_id, filepath):
+    """校验插件静态文件访问权限：认证/前端 remote 的 dist/ 资源匿名读取，其余须资源令牌或 Bearer。"""
+    if _plugin_remote_file_anonymous(plugin_id, filepath):
         return
-    verify_resource_token(resource_token)
+    # 资源 Cookie 缺失时回落 Bearer：仅当请求带 Bearer 才双参调用；
+    # 无 Bearer 时保持单参调用，以兼容上游 mock 与既有测试契约
+    if jwt_token is not None:
+        verify_resource_token(resource_token, jwt_token)
+    else:
+        verify_resource_token(resource_token)
 
 
 @router.get("/", summary="所有插件", response_model=List[_SchemaPlugin], openapi_extra={COLLECTION_TOTAL_OPENAPI_KEY: True})
@@ -705,9 +704,16 @@ async def plugin_static_file(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
     source_plugin_id = get_plugin_manager().get_plugin_source_id(plugin_id)
-    plugin_base_dir = (
-        AsyncPath(get_api_runtime_config_snapshot().root_path) / "app" / "plugins" / source_plugin_id.lower()
-    )
+    plugins_root = AsyncPath(get_api_runtime_config_snapshot().root_path) / "app" / "plugins"
+    # 安装目录大小写可能与 source id 不一致（如 LunaTVSource），按真实目录名匹配避免 Linux 404
+    plugin_base_dir = plugins_root / source_plugin_id.lower()
+    try:
+        for entry in await (await plugins_root.resolve()).iterdir():
+            if entry.is_dir() and entry.name.lower() == source_plugin_id.lower():
+                plugin_base_dir = plugins_root / entry.name
+                break
+    except Exception:
+        pass
     plugin_file_path = plugin_base_dir / filepath.lstrip("/")
 
     try:

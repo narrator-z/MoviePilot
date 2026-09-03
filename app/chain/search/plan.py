@@ -70,15 +70,17 @@ class SearchPlanOwner(_SearchOwnerBase):
             keywords = [keyword]
         else:
             # 去重去空，但要保持顺序
+            # [fork/narrator-z] 英文/原片名优先：内置公开索引器（JackettExtend）多索引英文名，
+            # 单关键词场景（max_search_name_limit=1）下若中文名排第一会 0 匹配，故将原片名/en_title 置顶。
             keywords = list(
                 dict.fromkeys(
                     [
                         k
                         for k in [
+                            mediainfo.en_title,
+                            mediainfo.original_title,
                             mediainfo.title,
                             *(mediainfo.names or []),
-                            mediainfo.original_title,
-                            mediainfo.en_title,
                             mediainfo.hk_title,
                             mediainfo.tw_title,
                             mediainfo.sg_title,

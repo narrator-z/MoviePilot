@@ -454,7 +454,7 @@ class SystemChain(ChainBase):
             # 获取所有发布的版本列表
             http, _ = _system_ports_snapshot()
             response = http.get(
-                "https://api.github.com/repos/jxxghp/MoviePilot/releases",
+                "https://api.github.com/repos/narrator-z/MoviePilot/releases",
                 proxies=get_chain_runtime_config_snapshot().proxy,
                 headers=get_chain_runtime_config_snapshot().github_headers,
             )

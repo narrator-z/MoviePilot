@@ -568,7 +568,7 @@ class ConfigModel(BaseModel):
     # ==================== 插件配置 ====================
     # 插件市场仓库地址，多个地址使用,分隔，地址以/结尾
     PLUGIN_MARKET: str = (
-        "https://github.com/jxxghp/MoviePilot-Plugins"
+        "https://github.com/narrator-z/MoviePilot-Plugins"
     )
     # 插件安装数据共享
     PLUGIN_STATISTIC_SHARE: bool = True
@@ -943,6 +943,15 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
                 cls.update_env_config("API_TOKEN", data["API_TOKEN"], converted_value)
                 data["API_TOKEN"] = converted_value
 
+        # 处理签名密钥持久化：未在 app.env/环境变量中显式配置时，随机生成并写回 app.env。
+        # 否则每次进程启动都会用新的随机密钥，导致已签发的 JWT 全部验签失败（403），前端被强制登出。
+        for _secret_field in ("SECRET_KEY", "RESOURCE_SECRET_KEY"):
+            if _secret_field not in data:
+                _new_key = secrets.token_urlsafe(32)
+                cls.update_env_config(_secret_field, None, _new_key)
+                logger.info(f"'{_secret_field}' 未持久化，已随机生成并写入 'app.env'")
+                data[_secret_field] = _new_key
+
         # 对其他字段进行类型转换
         for field_name, field_info in cls.model_fields.items():
             if field_name not in data:
@@ -985,10 +994,14 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
             logger.warning(message)
             return False, message
         else:
+            # 写盘前确保 app.env 所在目录存在：Settings 构造期（pydantic 校验）可能先于
+            # __init__ 建目录触发持久化写入，且测试/子进程可能指向未创建的 CONFIG_DIR。
+            env_path = get_env_path()
+            env_path.parent.mkdir(parents=True, exist_ok=True)
             # 当值为 None 时，从 env 文件中删除该键，恢复为默认值
             if converted_value is None:
                 unset_key(
-                    dotenv_path=get_env_path(),
+                    dotenv_path=env_path,
                     key_to_unset=field_name,
                 )
                 logger.info(f"配置项 '{field_name}' 已清空，从 'app.env' 中移除")
@@ -1000,7 +1013,7 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
                 value_to_write = str(converted_value)
 
             set_key(
-                dotenv_path=get_env_path(),
+                dotenv_path=env_path,
                 key_to_set=field_name,
                 value_to_set=value_to_write,
                 quote_mode="always",

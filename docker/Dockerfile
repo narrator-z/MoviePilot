@@ -237,7 +237,6 @@ RUN set -eu; \
         fi; \
     done
 
-
 # 准备站点资源
 FROM prepare_payload AS prepare_resources
 

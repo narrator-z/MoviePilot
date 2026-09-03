@@ -22,6 +22,7 @@ from app.application.plugin.identity import (
 from app.db.models.pluginidentity import PluginIdentity as IdentityModel
 from app.db.oper.pluginidentity import PluginIdentityOper
 from app.db.uow import SqlAlchemyUnitOfWork
+from app.runtime.log import logger
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -40,29 +41,113 @@ def _normalize_plugin_id_for_read(plugin_id: str) -> str | None:
 
 
 def _to_record(model: IdentityModel) -> PluginIdentity:
-    """把持久化模型映射为已校验的应用身份。"""
-    return PluginIdentity(
-        plugin_id=model.plugin_id,
-        normalized_plugin_id=model.normalized_plugin_id,
-        trusted_source_type=TrustedPluginSourceType(model.trusted_source_type),
-        trusted_source_key=model.trusted_source_key,
-        binding_basis=PluginBindingBasis(model.binding_basis),
-        payload_source_type=PluginPayloadSourceType(model.payload_source_type),
-        payload_source_key=model.payload_source_key,
-        declared_version=model.declared_version,
-        package_generation=model.package_generation,
-        declared_metadata=(
-            PluginDeclaredMetadata.from_storage(model.declared_metadata)
-            if model.declared_metadata is not None
-            else None
-        ),
-        payload_receipt=model.payload_receipt,
-        revision=model.revision,
-        created_at=datetime.fromisoformat(model.created_at),
-        updated_at=datetime.fromisoformat(model.updated_at),
-        bound_at=_parse_datetime(model.bound_at),
-        payload_applied_at=_parse_datetime(model.payload_applied_at),
+    """把持久化模型映射为已校验的应用身份。
+
+    对 v3.0.3 迁移写出的矛盾存量身份做归一化（不变量见
+    PluginIdentity.__post_init__）：未绑定身份不得携带可信来源或绑定时间，
+    已绑定身份必须携带规范来源和绑定时间。归一化后的身份可由后续迁移或
+    用户操作自然自愈写回，避免插件页与启动迁移因脏数据而 500 崩溃。
+    """
+    trusted_source_type = TrustedPluginSourceType(model.trusted_source_type)
+    trusted_source_key = model.trusted_source_key
+    binding_basis = PluginBindingBasis(model.binding_basis)
+    bound_at = _parse_datetime(model.bound_at)
+
+    # 归一化可信来源一侧的矛盾：未绑定身份不得携带可信来源或绑定时间，
+    # 已绑定身份必须携带规范来源和绑定时间。
+    if trusted_source_type is TrustedPluginSourceType.UNKNOWN:
+        if trusted_source_key is not None or bound_at is not None:
+            trusted_source_key = None
+            bound_at = None
+        if binding_basis not in {
+            PluginBindingBasis.LEGACY_UNBOUND,
+            PluginBindingBasis.LOCAL_ONLY,
+        }:
+            binding_basis = PluginBindingBasis.LEGACY_UNBOUND
+    elif trusted_source_key is None or bound_at is None:
+        # 已绑定却缺来源或绑定时间 → 降级为未绑定，交给后续迁移或用户操作自愈
+        trusted_source_type = TrustedPluginSourceType.UNKNOWN
+        trusted_source_key = None
+        bound_at = None
+        binding_basis = PluginBindingBasis.LEGACY_UNBOUND
+
+    # 载荷一侧保持原值，仅在其自身矛盾时归一化；未绑定身份(local)可合法携带本地载荷。
+    payload_source_type = PluginPayloadSourceType(model.payload_source_type)
+    payload_source_key = model.payload_source_key
+    declared_version = model.declared_version
+    package_generation = model.package_generation
+    declared_metadata = (
+        PluginDeclaredMetadata.from_storage(model.declared_metadata)
+        if model.declared_metadata is not None
+        else None
     )
+    payload_receipt = model.payload_receipt
+    payload_applied_at = _parse_datetime(model.payload_applied_at)
+
+    if payload_source_type is PluginPayloadSourceType.UNKNOWN:
+        # 未知载荷不得携带任何载荷事实
+        payload_source_key = None
+        declared_version = None
+        package_generation = None
+        declared_metadata = None
+        payload_receipt = None
+        payload_applied_at = None
+    elif payload_source_type in {
+        PluginPayloadSourceType.OFFICIAL,
+        PluginPayloadSourceType.THIRD_PARTY,
+    } and payload_source_key is None:
+        # 在线载荷必须携带规范来源键；缺失则降级为未知载荷
+        payload_source_type = PluginPayloadSourceType.UNKNOWN
+        payload_source_key = None
+        declared_version = None
+        package_generation = None
+        declared_metadata = None
+        payload_receipt = None
+        payload_applied_at = None
+
+    try:
+        return PluginIdentity(
+            plugin_id=model.plugin_id,
+            normalized_plugin_id=model.normalized_plugin_id,
+            trusted_source_type=trusted_source_type,
+            trusted_source_key=trusted_source_key,
+            binding_basis=binding_basis,
+            payload_source_type=payload_source_type,
+            payload_source_key=payload_source_key,
+            declared_version=declared_version,
+            package_generation=package_generation,
+            declared_metadata=declared_metadata,
+            payload_receipt=payload_receipt,
+            revision=model.revision,
+            created_at=datetime.fromisoformat(model.created_at),
+            updated_at=datetime.fromisoformat(model.updated_at),
+            bound_at=bound_at,
+            payload_applied_at=payload_applied_at,
+        )
+    except ValueError:
+        # 兜底：任何未能识别的存量矛盾数据都降级为未绑定身份，保证读取不崩溃
+        logger.warning(
+            "插件 %s 的来源身份存在未识别的矛盾字段，已降级为未绑定身份",
+            model.plugin_id,
+        )
+        return PluginIdentity(
+            plugin_id=model.plugin_id,
+            normalized_plugin_id=model.normalized_plugin_id,
+            trusted_source_type=TrustedPluginSourceType.UNKNOWN,
+            trusted_source_key=None,
+            binding_basis=PluginBindingBasis.LEGACY_UNBOUND,
+            payload_source_type=PluginPayloadSourceType.UNKNOWN,
+            payload_source_key=None,
+            declared_version=None,
+            package_generation=None,
+            declared_metadata=None,
+            payload_receipt=None,
+            revision=model.revision,
+            created_at=datetime.fromisoformat(model.created_at),
+            updated_at=datetime.fromisoformat(model.updated_at),
+            bound_at=None,
+            payload_applied_at=None,
+        )
 
 
 def _to_model(identity: PluginIdentity) -> IdentityModel:

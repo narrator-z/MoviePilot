@@ -96,10 +96,17 @@ def test_service_builds_artifact_store_from_current_policy_root(tmp_path: Path) 
     assert artifact.path.parent == tmp_path
 
 
-def test_create_publishes_one_readable_private_file(tmp_path: Path) -> None:
+def test_create_publishes_one_readable_private_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.adapters.system.backup.files.get_app_version",
+        lambda: "v9.9.9",
+    )
     artifact = _service(tmp_path).create()
 
-    assert artifact.name == "moviepilot_v3.0.0_sqlite_20260819_134526.db"
+    assert artifact.name == "moviepilot_v9.9.9_sqlite_20260819_134526.db"
     assert artifact.path.read_bytes() == b"database snapshot"
     assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
     assert stat.S_IMODE(artifact.path.stat().st_mode) == 0o600
@@ -132,14 +139,21 @@ def test_concurrent_create_is_rejected_without_waiting(tmp_path: Path) -> None:
     assert artifact.path.is_file()
 
 
-def test_same_second_backups_receive_short_sequence_suffix(tmp_path: Path) -> None:
+def test_same_second_backups_receive_short_sequence_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.adapters.system.backup.files.get_app_version",
+        lambda: "v9.9.9",
+    )
     service = _service(tmp_path)
 
     first = service.create()
     second = service.create()
 
-    assert first.name == "moviepilot_v3.0.0_sqlite_20260819_134526.db"
-    assert second.name == "moviepilot_v3.0.0_sqlite_20260819_134526_1.db"
+    assert first.name == "moviepilot_v9.9.9_sqlite_20260819_134526.db"
+    assert second.name == "moviepilot_v9.9.9_sqlite_20260819_134526_1.db"
 
 
 def test_backup_name_uses_application_release_version(

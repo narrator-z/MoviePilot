@@ -52,12 +52,12 @@ _ITEM_FIELDS = {
 class SystemUpdateManager(metaclass=SingletonClass):
     """持久化两类升级状态，并保证同一时刻只有一个后台下载任务。"""
 
-    _BACKEND_RELEASES_API = "https://api.github.com/repos/jxxghp/MoviePilot/releases"
+    _BACKEND_RELEASES_API = "https://api.github.com/repos/narrator-z/MoviePilot/releases"
     _FRONTEND_RELEASE_API = (
         "https://api.github.com/repos/jxxghp/MoviePilot-Frontend/releases/tags/{tag}"
     )
     _BACKEND_ARCHIVE_URL = (
-        "https://github.com/jxxghp/MoviePilot/archive/refs/tags/{tag}.zip"
+        "https://github.com/narrator-z/MoviePilot/archive/refs/tags/{tag}.zip"
     )
     _VERSION_PATTERN = re.compile(r"^v3\.\d+\.\d+(?:[-.](?:alpha|beta|rc)\d*)?$", re.I)
     _STABLE_VERSION_PATTERN = re.compile(r"^v3\.\d+\.\d+$", re.I)

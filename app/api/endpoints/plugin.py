@@ -143,7 +143,7 @@ def _plugin_remote_file_anonymous(plugin_id: str, filepath: str) -> bool:
         return False
     normalized = plugin_id.lower()
     manager = get_plugin_manager()
-    remotes: list = []
+    remotes: list[Any] = []
     for fetcher in (manager.get_plugin_auth_providers, manager.get_plugin_remotes):
         try:
             result = fetcher() or []

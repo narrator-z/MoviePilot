@@ -1089,8 +1089,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 8129,
-  "edge_sha256": "f11897b9b3944cb086ce1b83fff5ab3f5cd5494b3781fad9f7021bdac39435d8",
+  "edge_count": 8130,
+  "edge_sha256": "542f8da779457ab7c035f5415e26f45af7f0e050374b473b7b65965b5d6c4d96",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -6360,6 +6360,7 @@
     "app.modules.filemanager.transhandler -> app.application.classification",
     "app.modules.filemanager.transhandler -> app.application.classification.reference",
     "app.modules.filemanager.transhandler -> app.application.directory",
+    "app.modules.filemanager.transhandler -> app.application.formatting",
     "app.modules.filemanager.transhandler -> app.application.messaging",
     "app.modules.filemanager.transhandler -> app.application.messaging.message",
     "app.modules.filemanager.transhandler -> app.application.transfer",

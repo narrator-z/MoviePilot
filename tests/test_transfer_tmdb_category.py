@@ -2,7 +2,6 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app.application.transfer.execution import TransferExecutionCheckpoint
 from app.application.transfer.workflow import TransferTask
 from app.chain.transfer import TransferChain
 from app.domain.context import MediaInfo
@@ -75,10 +74,19 @@ def test_transfer_resolves_complete_identity_before_building_tasks(monkeypatch) 
     }]
 
 
-def test_transfer_stops_when_automatic_category_has_no_tmdb_result(monkeypatch) -> None:
-    """启用自动类别目录时，缺少 TMDB 分类必须在文件操作前明确失败。"""
+def test_transfer_degrades_to_library_root_when_automatic_category_missing_tmdb(
+    monkeypatch,
+) -> None:
+    """启用自动类别目录且缺少 TMDB 分类时，不再硬拒收，而是降级到媒体库根目录继续整理。
+
+    这是 fork 的定制行为：douban 独占等拿不到 TMDB 辅助信息的影片，
+    不应整条丢失，而是落到媒体库根目录（无分类子目录）。
+    """
     chain = object.__new__(TransferChain)
-    chain.jobview = SimpleNamespace(try_remove_job=lambda _task: None)
+    chain.jobview = SimpleNamespace(
+        try_remove_job=lambda _task: None,
+        running_task=Mock(),
+    )
     chain._transfer_admissions = Mock()
     chain._worker_owner_id = "category-owner"
     chain._owned_leases = {
@@ -103,19 +111,13 @@ def test_transfer_stops_when_automatic_category_has_no_tmdb_result(monkeypatch) 
     chain._transfer_admissions.checkpoint_plan.side_effect = (
         lambda **kwargs: SimpleNamespace(checkpoint=kwargs["checkpoint"])
     )
-    step_runner = Mock()
-    step_runner.checkpoint.side_effect = lambda transferinfo: (
-        TransferExecutionCheckpoint.create(
-            payload={
-                "outcome": "failed",
-                "transferinfo": transferinfo.model_dump(mode="json"),
-            },
-            operation_ids=("planning-reject",),
-        )
+    # 续传路径所需的最小桩：storage oper 选择与计划执行
+    chain._TransferChain__select_storage_oper = Mock(return_value=Mock())
+    chain._plan_checkpoint_and_execute = Mock(
+        return_value=SimpleNamespace(success=True, message="")
     )
-    chain._TransferChain__build_durable_step_runner = Mock(
-        return_value=step_runner
-    )
+    chain._finish_scrape_batch_task = Mock()
+    chain._TransferChain__build_durable_step_runner = Mock(return_value=Mock())
     chain.transfer_history_repository = SimpleNamespace()
     monkeypatch.setattr(
         "app.chain.transfer.execution.MediaChain",
@@ -160,13 +162,20 @@ def test_transfer_stops_when_automatic_category_has_no_tmdb_result(monkeypatch) 
 
     state, message = chain._TransferChain__handle_transfer(task)
 
-    assert not state
-    assert message == "未识别到 TMDB 辅助信息，无法按媒体类别整理"
+    # 不再硬拒收：整理继续并以成功返回
+    assert state is True
+    assert message == ""
+    # 降级为媒体库根目录（关闭分类子目录）
+    assert task.library_category_folder is False
+    assert task.target_directory.library_category_folder is False
+    # 媒体身份保持不变
     assert task.mediainfo.media_source == MediaSource.AniList
     assert task.mediainfo.media_id == "1234"
-    assert task.plan_checkpoint is not None
-    assert task.plan_checkpoint.rejection_error == message
-    assert task.execution_checkpoint is not None
+    # 不应记录为失败 / 通知
+    assert (
+        task.plan_checkpoint is None
+        or task.plan_checkpoint.rejection_error is None
+    )
     chain._transfer_admissions.record_planning_failure.assert_not_called()
     record_transfer_failure.assert_not_called()
     add_transfer_fail.assert_not_called()

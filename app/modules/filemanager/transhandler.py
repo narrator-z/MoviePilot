@@ -15,6 +15,7 @@ from app.application.classification.reference import (
     ensure_path_within_root,
 )
 from app.application.directory import DirectoryHelper
+from app.application.formatting import EpisodeFormatRuleHelper
 from app.application.messaging.message import TemplateHelper
 from app.application.transfer.execution import (
     TransferOperationObservation,
@@ -224,6 +225,41 @@ class TransHandler:
         )
 
     @staticmethod
+    def __recover_episode_from_folder(fileitem: FileItem) -> Optional[int]:
+        """文件名无集数时，尝试从父目录（及祖父目录）名恢复集数。
+
+        适用场景：文件名为「剧集名.1080p.mkv」但所在文件夹为
+        「Show S01E02」「Show/第3话」等带集数标识的结构。
+        仅在 gen_meta 完全未能解析出 begin_episode 时作为兜底，避免
+        「未识别到文件集数」硬性拒收整条整理。
+
+        仅使用高置信度模式（SxxExx、#集、第N话、第N集），不使用方括号/
+        句号等易误判模式，避免把「[12] 组」「。12」之类误识别为集数。
+        """
+        raw_path = fileitem.path
+        if not raw_path:
+            return None
+        candidate = Path(raw_path)
+        # 依次尝试 父目录 -> 祖父目录 的名称，仅取高置信度集数模式
+        for ancestor in (candidate.parent, candidate.parent.parent):
+            folder_name = ancestor.name if ancestor and ancestor.name else ""
+            if not folder_name:
+                continue
+            for pattern in (
+                EpisodeFormatRuleHelper._SEASON_EP_RE,
+                EpisodeFormatRuleHelper._HASH_EP_RE,
+                EpisodeFormatRuleHelper._FALLBACK_EPISODE_RE,
+                EpisodeFormatRuleHelper._FALLBACK_EPISODE_JI_RE,
+            ):
+                match = pattern.search(folder_name)
+                if match:
+                    try:
+                        return int(match.group(1))
+                    except (TypeError, ValueError):
+                        break
+        return None
+
+    @staticmethod
     def __is_special_extra_file(fileitem: FileItem) -> bool:
         """识别没有季集号但允许合法跳过的特典视频。"""
         return bool(
@@ -361,7 +397,16 @@ class TransHandler:
 
         if mediainfo.type == MediaType.TV:
             if planning_meta.begin_episode is None:
-                if self.__is_special_extra_file(fileitem):
+                # 文件名无集数时，先尝试从父目录名恢复（如「Show S01E02」），
+                # 恢复成功则继续整理，避免硬性拒收整条任务。
+                recovered_episode = self.__recover_episode_from_folder(fileitem)
+                if recovered_episode is not None:
+                    logger.info(
+                        f"{fileitem.name} 文件名无集数，已从父目录恢复集数："
+                        f"{recovered_episode}"
+                    )
+                    planning_meta.begin_episode = recovered_episode
+                elif self.__is_special_extra_file(fileitem):
                     return TransferPlanCheckpoint(
                         planning_input=planning_input,
                         target_storage=target_storage,
@@ -387,7 +432,8 @@ class TransHandler:
                         preview=preview,
                         skip_reason="未识别到文件集数，识别为特典/附加视频文件",
                     )
-                raise TransferPlanningRejectedError("未识别到文件集数")
+                else:
+                    raise TransferPlanningRejectedError("未识别到文件集数")
             planning_meta.end_season = None
             if planning_meta.total_season:
                 planning_meta.total_season = 1

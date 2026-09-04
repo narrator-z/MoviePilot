@@ -560,21 +560,26 @@ class TransferExecutionOwner(_TransferOwnerBase):
                 task.target_storage = task.target_directory.library_storage
 
             if self._requires_automatic_category(task) and not task.mediainfo.category:
-                # MusicInfo 无 tmdb_id 字段，但模型 __getattr__ 已兜底返回 None
-                if task.mediainfo.tmdb_id:
-                    error_message = "TMDB 信息未匹配到媒体分类，无法按媒体类别整理"
-                else:
-                    error_message = "未识别到 TMDB 辅助信息，无法按媒体类别整理"
-                logger.error(f"{task.fileitem.name} {error_message}")
+                # 自动分类目录需要媒体类别，但识别结果缺少 TMDB 辅助信息
+                # （如仅 douban 匹配、或 TMDB 因网络不可达未返回）。
+                # 不再硬性拒绝整条整理，而是降级为「不创建分类子目录、
+                # 直接整理到媒体库根目录」，避免影片整体丢失。
                 if task.preview:
-                    return False, error_message
-                transferinfo = self._TransferChain__checkpoint_planning_rejection(
-                    task,
-                    error_message,
+                    message = (
+                        "未识别到媒体类别（缺少 TMDB 辅助信息），"
+                        "将整理到媒体库根目录（无分类子目录）"
+                    )
+                    logger.warning(f"{task.fileitem.name} {message}")
+                    return False, message
+                logger.warning(
+                    f"{task.fileitem.name} 未识别到媒体类别（缺少 TMDB 辅助信息），"
+                    f"降级为不创建分类子目录、直接整理到媒体库根目录"
                 )
-                if callback:
-                    return cast(Tuple[bool, str], callback(task, transferinfo))
-                return transferinfo.success, transferinfo.message or ""
+                # 关闭分类子目录，交由 get_dest_dir 优雅降级落到媒体库根目录
+                task.library_category_folder = False
+                if task.target_directory is not None:
+                    task.target_directory.library_category_folder = False
+                # 继续后续整理流程
 
             # 正在处理
             self.jobview.running_task(task)

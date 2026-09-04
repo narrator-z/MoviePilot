@@ -396,6 +396,37 @@ class TransferExecutionOwner(_TransferOwnerBase):
             self._TransferChain__record_uncheckpointed_failure(task, result[1])
         return result
 
+    def _degrade_missing_category_to_root(
+        self, task: TransferTask
+    ) -> Optional[Tuple[bool, str]]:
+        """自动分类目录缺媒体类别时的软降级（fork 定制）。
+
+        识别结果缺少 TMDB 辅助信息（如仅 douban 匹配、或 TMDB 因网络
+        不可达未返回）时，不再硬性拒绝整条整理，而是降级为「不创建
+        分类子目录、直接整理到媒体库根目录」，避免影片整体丢失。
+
+        返回 (False, message) 表示预览态需提前返回该提示；返回 None
+        表示无需降级、或已降级应继续整理。
+        """
+        if not self._requires_automatic_category(task) or task.mediainfo.category:
+            return None
+        if task.preview:
+            message = (
+                "未识别到媒体类别（缺少 TMDB 辅助信息），"
+                "将整理到媒体库根目录（无分类子目录）"
+            )
+            logger.warning(f"{task.fileitem.name} {message}")
+            return False, message
+        logger.warning(
+            f"{task.fileitem.name} 未识别到媒体类别（缺少 TMDB 辅助信息），"
+            f"降级为不创建分类子目录、直接整理到媒体库根目录"
+        )
+        # 关闭分类子目录，交由 get_dest_dir 优雅降级落到媒体库根目录
+        task.library_category_folder = False
+        if task.target_directory is not None:
+            task.target_directory.library_category_folder = False
+        return None
+
     def _TransferChain__perform_transfer(
             self, task: TransferTask, callback: Optional[Callable] = None
     ) -> Optional[Tuple[bool, str]]:
@@ -559,27 +590,9 @@ class TransferExecutionOwner(_TransferOwnerBase):
             if not task.target_storage and task.target_directory:
                 task.target_storage = task.target_directory.library_storage
 
-            if self._requires_automatic_category(task) and not task.mediainfo.category:
-                # 自动分类目录需要媒体类别，但识别结果缺少 TMDB 辅助信息
-                # （如仅 douban 匹配、或 TMDB 因网络不可达未返回）。
-                # 不再硬性拒绝整条整理，而是降级为「不创建分类子目录、
-                # 直接整理到媒体库根目录」，避免影片整体丢失。
-                if task.preview:
-                    message = (
-                        "未识别到媒体类别（缺少 TMDB 辅助信息），"
-                        "将整理到媒体库根目录（无分类子目录）"
-                    )
-                    logger.warning(f"{task.fileitem.name} {message}")
-                    return False, message
-                logger.warning(
-                    f"{task.fileitem.name} 未识别到媒体类别（缺少 TMDB 辅助信息），"
-                    f"降级为不创建分类子目录、直接整理到媒体库根目录"
-                )
-                # 关闭分类子目录，交由 get_dest_dir 优雅降级落到媒体库根目录
-                task.library_category_folder = False
-                if task.target_directory is not None:
-                    task.target_directory.library_category_folder = False
-                # 继续后续整理流程
+            preview_reject = self._degrade_missing_category_to_root(task)
+            if preview_reject is not None:
+                return preview_reject
 
             # 正在处理
             self.jobview.running_task(task)

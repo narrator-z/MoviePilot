@@ -1074,8 +1074,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 8490,
-  "edge_sha256": "14a35db36cee8f0f6266a112086efb547f7f3cf5abb67e0f632612654ed3a05c",
+  "edge_count": 8493,
+  "edge_sha256": "3267ee21f3e1f72cd73b1b2f2a27e52e221aa32c7510e527e4a8e67e7ff62b4e",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -5593,6 +5593,8 @@
     "app.db.adapters.pluginidentity -> app.db.oper",
     "app.db.adapters.pluginidentity -> app.db.oper.pluginidentity",
     "app.db.adapters.pluginidentity -> app.db.uow",
+    "app.db.adapters.pluginidentity -> app.runtime",
+    "app.db.adapters.pluginidentity -> app.runtime.log",
     "app.db.adapters.plugininstallation -> app.application",
     "app.db.adapters.plugininstallation -> app.application.plugin",
     "app.db.adapters.plugininstallation -> app.application.plugin.declaration",
@@ -6668,6 +6670,7 @@
     "app.modules.filemanager.transhandler -> app.application.classification",
     "app.modules.filemanager.transhandler -> app.application.classification.reference",
     "app.modules.filemanager.transhandler -> app.application.directory",
+    "app.modules.filemanager.transhandler -> app.application.formatting",
     "app.modules.filemanager.transhandler -> app.application.messaging",
     "app.modules.filemanager.transhandler -> app.application.messaging.message",
     "app.modules.filemanager.transhandler -> app.application.transfer",

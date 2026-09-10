@@ -9,6 +9,7 @@ from starlette import status
 from starlette.responses import StreamingResponse
 
 from app.adapters.web.security.access import (
+    oauth2_scheme_manual_error,
     resource_token_cookie,
     verify_resource_token,
     verify_token,
@@ -172,16 +173,21 @@ def _verify_plugin_static_file_access(
     plugin_id: str,
     filepath: str,
     resource_token: Annotated[Optional[str], Security(resource_token_cookie)] = None,
+    jwt_token: Annotated[Optional[str], Security(oauth2_scheme_manual_error)] = None,
 ) -> None:
     """
     校验插件静态文件访问权限。
 
     普通插件资源依赖登录后写入的资源 Cookie；登录认证插件的远程组件需要在
     登录前加载，因此仅对插件声明的认证 remote 放行匿名读取。
+
+    资源 Cookie 缺失时回落 Bearer：插件自定义前端、图片代理等子资源请求在
+    首次加载或跨上下文场景下可能只带 Authorization 头，此时若直接 401 会被
+    前端判定为未登录而强制登出。
     """
     if _is_plugin_auth_remote_file(plugin_id, filepath):
         return
-    verify_resource_token(resource_token)
+    verify_resource_token(resource_token, jwt_token)
 
 
 @router.get(

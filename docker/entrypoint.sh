@@ -431,6 +431,30 @@ function correct_site_resource_permissions() {
     chown -R moviepilot:moviepilot "${resource_dir}"
 }
 
+function seed_default_config_files() {
+    # V2 首次启动会自动生成默认二级分类配置；V3 改为版本化分类策略后，
+    # 宿主侧不再创建 category.yaml，镜像里的模板也没有被投放，
+    # 导致全新安装或数据卷重置后「媒体自动分类」只剩未分类兜底。
+    # 这里在策略尚未建立时补一份镜像内置模板，恢复开箱即用的默认分类。
+    local template_dir="${IMAGE_CONFIG_TEMPLATE_DIR:-/app/config}"
+    local name
+    local source
+    local target
+
+    [ -d "${CONFIG_DIR}" ] || return 0
+    for name in category.yaml; do
+        source="${template_dir}/${name}"
+        target="${CONFIG_DIR}/${name}"
+        [ -f "${source}" ] || continue
+        [ -e "${target}" ] && continue
+        if cp "${source}" "${target}" 2>/dev/null; then
+            INFO "→ 已补默认分类配置：${target}"
+        else
+            WARN "→ 默认分类配置写入失败，跳过：${target}"
+        fi
+    done
+}
+
 function correct_file_permissions() {
     local chown_start
     local chown_end
@@ -441,6 +465,7 @@ function correct_file_permissions() {
     correct_site_resource_permissions
     chown_plugin_runtime_path /app/app/plugins
     correct_home_permissions
+    seed_default_config_files
     correct_config_permissions
     if ! correct_package_cache_permissions; then
         return 1

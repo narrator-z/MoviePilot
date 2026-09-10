@@ -199,9 +199,6 @@ class SiteChain(InteractionChainMixin, ChainBase):
             "zhuque.in": self.__zhuque_test,
             "m-team.io": self.__mteam_test,
             "m-team.cc": self.__mteam_test,
-            "ptlsp.com": self.__indexphp_test,
-            "1ptba.com": self.__indexphp_test,
-            "star-space.net": self.__indexphp_test,
             "yemapt.org": self.__yema_test,
             "hddolby.com": self.__hddolby_test,
             "rousi.pro": self.__rousi_test,
@@ -473,12 +470,6 @@ class SiteChain(InteractionChainMixin, ChainBase):
                 return False, "Cookie已过期"
             return False, f"错误：{res.status_code} {res.reason}"
 
-    def __indexphp_test(self, site: SiteSnapshot) -> Tuple[bool, str]:
-        """
-        判断站点是否已经登陆：ptlsp/1ptba
-        """
-        return self.__test(replace(site, url=f"{site.url}index.php"))
-
     def __hddolby_test(self, site: SiteSnapshot) -> Tuple[bool, str]:
         """
         判断站点是否已经登陆：hddolby
@@ -692,7 +683,8 @@ class SiteChain(InteractionChainMixin, ChainBase):
             logger.warning(f"站点 {domain} 已在黑名单中，不添加站点")
             return 0, 0, 0, False
         domain_url = self._cookiecloud_indexer_domain(indexer, domain)
-        proxy, response = self._cookiecloud_connect(domain_url, cookie, indexer)
+        login_url = site_rules.resolve_page_url(domain_url, indexer.get("login_path"))
+        proxy, response = self._cookiecloud_connect(login_url, cookie, indexer)
         if response is None:
             return 0, 0, 1, False
         if response.status_code not in [200, 500, 403]:
@@ -879,11 +871,19 @@ class SiteChain(InteractionChainMixin, ChainBase):
             # 开始记时
             start_time = datetime.now()
             # 特殊站点测试
-            if self.special_site_test.get(domain):
-                state, message = self.special_site_test[domain](site_info)
+            special_test = self.special_site_test.get(domain)
+            if special_test:
+                state, message = special_test(site_info)
             else:
-                # 通用站点测试
-                state, message = self.__test(site_info)
+                indexer = SitesHelper().get_indexer(domain) or {}
+                state, message = self.__test(
+                    replace(
+                        site_info,
+                        url=site_rules.resolve_page_url(
+                            site_info.url, indexer.get("login_path")
+                        ),
+                    )
+                )
             # 统计
             seconds = (datetime.now() - start_time).seconds
             if state:

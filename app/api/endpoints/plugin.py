@@ -9,7 +9,6 @@ from starlette import status
 from starlette.responses import StreamingResponse
 
 from app.adapters.web.security.access import (
-    oauth2_scheme_manual_error,
     resource_token_cookie,
     verify_resource_token,
     verify_token,
@@ -24,6 +23,7 @@ from app.api.dependencies.auth import (
     get_current_active_superuser_async,
 )
 from app.api.dependencies.plugin import get_plugin_config_command
+from app.api.endpoints.pluginfolder import router as plugin_folders_router
 from app.api.principal import ApiPrincipal
 from app.api.response import (
     COLLECTION_TOTAL_HEADER,
@@ -37,14 +37,14 @@ from app.application.commands import init_commands
 from app.application.configuration import get_api_runtime_config_snapshot, get_configured_system_config
 from app.application.plugin.catalog import get_plugin_catalog_query
 from app.application.plugin.config import PluginConfigCommand
-from app.application.plugin.data import PluginDataQueryService
-from app.application.plugin.folders import (
-    add_clone_to_plugin_folder,
-    get_plugin_folder_service,
-    remove_plugin_from_folders,
-)
+from app.application.plugin.data import PluginDataQueryService, PluginDataSummaryService
+from app.application.plugin.folders import add_clone_to_plugin_folder, remove_plugin_from_folders
 from app.application.plugin.gateway import get_plugin_install_service
-from app.application.plugin.management import get_plugin_snapshot, search_plugin_candidates
+from app.application.plugin.management import (
+    get_plugin_snapshot,
+    reload_plugin_runtime,
+    search_plugin_candidates,
+)
 from app.application.plugin.rating import PluginNotInstalledError, get_plugin_rating_service
 from app.application.plugin.release import get_plugin_release_service
 from app.application.plugin.routes import register_plugin_api, remove_plugin_api
@@ -60,13 +60,18 @@ from app.schemas.plugin import Plugin as _SchemaPlugin
 from app.schemas.plugin import PluginCloneRequest as _SchemaPluginCloneRequest
 from app.schemas.plugin import PluginDashboard as _SchemaPluginDashboard
 from app.schemas.plugin import PluginDashboardMetaItem as _SchemaPluginDashboardMetaItem
-from app.schemas.plugin import PluginFoldersData as _SchemaPluginFoldersData
+from app.schemas.plugin import PluginDataSummary as _SchemaPluginDataSummary
 from app.schemas.plugin import PluginInstallOutcome as _SchemaPluginInstallOutcome
 from app.schemas.plugin import PluginRating as _SchemaPluginRating
 from app.schemas.plugin import PluginRatingMap as _SchemaPluginRatingMap
 from app.schemas.plugin import PluginRatingRequest as _SchemaPluginRatingRequest
 from app.schemas.plugin import PluginReleaseData as _SchemaPluginReleaseData
 from app.schemas.plugin import PluginRemoteInfo as _SchemaPluginRemoteInfo
+from app.schemas.plugin import PluginRuntimeActionCapability as _SchemaPluginRuntimeActionCapability
+from app.schemas.plugin import PluginRuntimeActionGroup as _SchemaPluginRuntimeActionGroup
+from app.schemas.plugin import PluginRuntimeCapabilities as _SchemaPluginRuntimeCapabilities
+from app.schemas.plugin import PluginRuntimeCommandCapability as _SchemaPluginRuntimeCommandCapability
+from app.schemas.plugin import PluginRuntimeServiceCapability as _SchemaPluginRuntimeServiceCapability
 from app.schemas.plugin import PluginRuntimeStatus as _SchemaPluginRuntimeStatus
 from app.schemas.plugin import PluginRuntimeSummary as _SchemaPluginRuntimeSummary
 from app.schemas.plugin import PluginSidebarNavItem as _SchemaPluginSidebarNavItem
@@ -81,6 +86,7 @@ from app.schemas.types import SystemConfigKey
 from app.startup.composition.context import HostRuntime
 
 router = ResponseAPIRouter()
+router.routes.extend(plugin_folders_router.routes)
 _plugin_release_refresh_tasks: set[asyncio.Task] = set()
 
 
@@ -136,57 +142,62 @@ def register_plugin(plugin_id: str):
     register_plugin_api(plugin_id)
 
 
-def _plugin_remote_file_anonymous(plugin_id: str, filepath: str) -> bool:
-    # 放行确实声明登录认证/前端 remote 的插件 dist/ 资源匿名读取，避免令牌门禁 401 被边缘代理转 403。
-    if not filepath.lstrip("/").startswith("dist"):
-        return False
-    normalized = plugin_id.lower()
-    manager = get_plugin_manager()
-    remotes: list[Any] = []
-    frontend = getattr(manager, "get_plugin_remotes", None)
-    fetchers: list[Any] = [manager.get_plugin_auth_providers]
-    if frontend:
-        fetchers.append(frontend)
-    for fetcher in fetchers:
-        try:
-            result = fetcher() or []
-        except Exception:
-            result = []
-        if isinstance(result, list):
-            remotes += result
-    return any(str((r.get("remote", r) if isinstance(r, dict) else {}).get("id")
-                   or (r.get("remote", r) if isinstance(r, dict) else {}).get("source_plugin_id")
-                   or "").lower() == normalized for r in remotes)
+def _is_plugin_auth_remote_file(plugin_id: str, filepath: str) -> bool:
+    """
+    判断静态文件是否属于插件声明的匿名登录认证远程组件。
+
+    登录页加载插件认证组件时尚未产生登录态和资源 Cookie，因此仅对插件主动
+    声明的认证 remote 保留匿名读取能力，其余插件静态资源仍需资源令牌。
+    """
+    path = filepath.lstrip("/")
+    normalized_plugin_id = plugin_id.lower()
+    plugin_manager = get_plugin_manager()
+    for provider in plugin_manager.get_plugin_auth_providers():
+        remote = provider.get("remote") or {}
+        if str(remote.get("id") or "").lower() != normalized_plugin_id:
+            continue
+        remote_path = str(remote.get("url") or "").lstrip("/")
+        remote_path_lower = remote_path.lower()
+        expected_prefix = f"plugin/file/{normalized_plugin_id}/"
+        if not remote_path_lower.startswith(expected_prefix):
+            continue
+        remote_file = remote_path[len(expected_prefix) :]
+        remote_dir = remote_file.rsplit("/", 1)[0] if "/" in remote_file else ""
+        if path == remote_file or (remote_dir and path.startswith(f"{remote_dir}/")):
+            return True
+    return False
 
 
 def _verify_plugin_static_file_access(
     plugin_id: str,
     filepath: str,
     resource_token: Annotated[Optional[str], Security(resource_token_cookie)] = None,
-    jwt_token: Annotated[Optional[str], Security(oauth2_scheme_manual_error)] = None,
 ) -> None:
-    """校验插件静态文件访问权限：认证/前端 remote 的 dist/ 资源匿名读取，其余须资源令牌或 Bearer。"""
-    if _plugin_remote_file_anonymous(plugin_id, filepath):
+    """
+    校验插件静态文件访问权限。
+
+    普通插件资源依赖登录后写入的资源 Cookie；登录认证插件的远程组件需要在
+    登录前加载，因此仅对插件声明的认证 remote 放行匿名读取。
+    """
+    if _is_plugin_auth_remote_file(plugin_id, filepath):
         return
-    # 资源 Cookie 缺失时回落 Bearer：仅当请求带 Bearer 才双参调用；
-    # 无 Bearer 时保持单参调用，以兼容上游 mock 与既有测试契约
-    if jwt_token is not None:
-        verify_resource_token(resource_token, jwt_token)
-    else:
-        verify_resource_token(resource_token)
+    verify_resource_token(resource_token)
 
 
-@router.get("/", summary="所有插件", response_model=List[_SchemaPlugin], openapi_extra={COLLECTION_TOTAL_OPENAPI_KEY: True})
+@router.get(
+    "/", summary="所有插件", response_model=List[_SchemaPlugin], openapi_extra={COLLECTION_TOTAL_OPENAPI_KEY: True}
+)
 async def all_plugins(
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
     state: Optional[str] = "all",
     force: bool = False,
     query: Optional[str] = None,
-    max_results: Annotated[int, Query(ge=1, le=1000)] = 500,
-    page: CompatiblePageParam = None, count: CompatibleCountParam = None,
+    max_results: Annotated[Optional[int], Query(ge=1, le=200)] = None,
+    page: CompatiblePageParam = None,
+    count: CompatibleCountParam = None,
     response: Response = None,
 ) -> List[_SchemaPlugin]:
-    """查询插件清单，显式分页优先于兼容的 ``max_results`` 限量。"""
+    """查询插件清单；未指定分页或限量时返回完整清单。"""
     plugins = await get_plugin_catalog_query().query(state=state or "all", force=force)
     if query:
         plugins = [item["plugin"] for item in search_plugin_candidates(query, plugins)]
@@ -196,11 +207,15 @@ async def all_plugins(
         page, count = resolve_compatible_pagination(page, count)
         assert page is not None and count is not None
         return plugins[(page - 1) * count : page * count]
-    return plugins[:max_results]
+    return plugins if max_results is None else plugins[:max_results]
 
 
 @router.get("/installed", summary="已安装插件", response_model=List[str])
-async def installed(_: ApiPrincipal = Depends(get_current_active_superuser_async), page: CompatiblePageParam = None, count: CompatibleCountParam = None) -> Any:
+async def installed(
+    _: ApiPrincipal = Depends(get_current_active_superuser_async),
+    page: CompatiblePageParam = None,
+    count: CompatibleCountParam = None,
+) -> Any:
     """
     查询用户已安装插件清单
     """
@@ -369,18 +384,11 @@ async def rate_plugin(
     return _SchemaResponse(success=True, data=rating)
 
 
-@router.get("/reload/{plugin_id}", summary="重新加载插件", response_model=_SchemaResponse[None])
+@router.post("/reload/{plugin_id}", summary="重新加载插件", response_model=_SchemaResponse[None])
 def reload_plugin(plugin_id: str, _: ApiPrincipal = Depends(get_current_active_superuser)) -> Any:
-    """
-    重新加载插件
-    """
-    plugin_manager = get_plugin_manager()
+    """重新加载插件并刷新其命令、定时任务和动态 API 注册。"""
     try:
-        with plugin_manager.mutation(f"重载插件 {plugin_id}"):
-            # 重新加载插件
-            runtime_status = plugin_manager.reload_plugin(plugin_id)
-            # 注册插件服务
-            register_plugin(plugin_id)
+        runtime_status = reload_plugin_runtime(plugin_id)
     except PluginMutationRejectedError as error:
         return _SchemaResponse(success=False, message=str(error))
     if runtime_status is _SchemaPluginRuntimeStatus.ACTIVE:
@@ -552,7 +560,9 @@ async def remotes(token: str, page: CompatiblePageParam = None, count: Compatibl
 
 
 @router.get("/sidebar_nav", summary="获取插件侧栏导航项", response_model=List[_SchemaPluginSidebarNavItem])
-def plugin_sidebar_nav(_: _SchemaTokenPayload = Depends(verify_token), page: CompatiblePageParam = None, count: CompatibleCountParam = None) -> Any:
+def plugin_sidebar_nav(
+    _: _SchemaTokenPayload = Depends(verify_token), page: CompatiblePageParam = None, count: CompatibleCountParam = None
+) -> Any:
     """
     聚合已启用 Vue 插件声明的侧栏入口（get_sidebar_nav），供前端主界面侧栏展示。
     """
@@ -704,16 +714,9 @@ async def plugin_static_file(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
     source_plugin_id = get_plugin_manager().get_plugin_source_id(plugin_id)
-    plugins_root = AsyncPath(get_api_runtime_config_snapshot().root_path) / "app" / "plugins"
-    # 安装目录大小写可能与 source id 不一致（如 LunaTVSource），按真实目录名匹配避免 Linux 404
-    plugin_base_dir = plugins_root / source_plugin_id.lower()
-    try:
-        for entry in await (await plugins_root.resolve()).iterdir():
-            if entry.is_dir() and entry.name.lower() == source_plugin_id.lower():
-                plugin_base_dir = plugins_root / entry.name
-                break
-    except Exception:
-        pass
+    plugin_base_dir = (
+        AsyncPath(get_api_runtime_config_snapshot().root_path) / "app" / "plugins" / source_plugin_id.lower()
+    )
     plugin_file_path = plugin_base_dir / filepath.lstrip("/")
 
     try:
@@ -763,67 +766,6 @@ async def plugin_static_file(
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
-@router.get(
-    "/folders",
-    summary="获取插件文件夹配置",
-    response_model=_SchemaPluginFoldersData,
-)
-async def get_plugin_folders(
-    _: ApiPrincipal = Depends(get_current_active_superuser_async),
-) -> dict:
-    """
-    获取插件文件夹分组配置
-    """
-    return get_plugin_folder_service().get_or_empty()
-
-
-@router.post("/folders", summary="保存插件文件夹配置", response_model=_SchemaResponse[None])
-async def save_plugin_folders(
-    folders: _SchemaPluginFoldersData,
-    _: ApiPrincipal = Depends(get_current_active_superuser_async),
-) -> Any:
-    """
-    保存插件文件夹分组配置
-    """
-    result = await get_plugin_folder_service().save(folders.root)
-    return _SchemaResponse(success=result.success, message=result.message)
-
-
-@router.post("/folders/{folder_name}", summary="创建插件文件夹", response_model=_SchemaResponse[None])
-async def create_plugin_folder(folder_name: str, _: ApiPrincipal = Depends(get_current_active_superuser_async)) -> Any:
-    """
-    创建新的插件文件夹
-    """
-    result = await get_plugin_folder_service().create(folder_name)
-    return _SchemaResponse(success=result.success, message=result.message)
-
-
-@router.delete("/folders/{folder_name}", summary="删除插件文件夹", response_model=_SchemaResponse[None])
-async def delete_plugin_folder(folder_name: str, _: ApiPrincipal = Depends(get_current_active_superuser_async)) -> Any:
-    """
-    删除插件文件夹
-    """
-    result = await get_plugin_folder_service().delete(folder_name)
-    return _SchemaResponse(success=result.success, message=result.message)
-
-
-@router.put(
-    "/folders/{folder_name}/plugins",
-    summary="更新文件夹中的插件",
-    response_model=_SchemaResponse[None],
-)
-async def update_folder_plugins(
-    folder_name: str,
-    plugin_ids: List[str],
-    _: ApiPrincipal = Depends(get_current_active_superuser_async),
-) -> Any:
-    """
-    更新指定文件夹中的插件列表
-    """
-    result = await get_plugin_folder_service().update_plugins(folder_name, plugin_ids)
-    return _SchemaResponse(success=result.success, message=result.message)
-
-
 @router.post("/clone/{plugin_id}", summary="创建插件分身", response_model=_SchemaResponse[None])
 def clone_plugin(
     plugin_id: str,
@@ -860,52 +802,60 @@ def clone_plugin(
 @router.get(  # type: ignore[misc]
     "/runtime/capabilities",
     summary="查询插件运行能力",
-    response_model=_SchemaResponse[_SchemaJsonObject],
+    response_model=_SchemaResponse[_SchemaPluginRuntimeCapabilities],
 )
 async def plugin_capabilities(
     plugin_id: Optional[str] = None,
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
 ) -> _SchemaResponse[Any]:
-    """查询运行中插件注册的命令、动作和定时服务。"""
+    """查询运行中插件注册的安全命令、动作和定时服务元数据。"""
     manager = get_plugin_manager()
-    data: dict[str, Any] = {}
-    commands = manager.get_plugin_commands(pid=plugin_id) or []
-    if commands:
-        data["commands"] = [
-            {
-                "cmd": command.get("cmd"),
-                "desc": command.get("desc"),
-                "plugin_id": command.get("pid"),
-                **({"data": command.get("data")} if command.get("data") else {}),
-            }
-            for command in commands
+    commands = [
+        _SchemaPluginRuntimeCommandCapability(
+            cmd=str(command["cmd"]),
+            desc=str(command["desc"]) if command.get("desc") else None,
+            plugin_id=str(command["pid"]) if command.get("pid") else None,
+        )
+        for command in (manager.get_plugin_commands(pid=plugin_id) or [])
+        if isinstance(command, dict) and command.get("cmd")
+    ]
+    action_groups = []
+    for group in manager.get_plugin_actions(pid=plugin_id) or []:
+        if not isinstance(group, dict):
+            continue
+        actions = [
+            _SchemaPluginRuntimeActionCapability(
+                id=str(item["id"]),
+                name=str(item["name"]) if item.get("name") else None,
+            )
+            for item in (group.get("actions") or [])
+            if isinstance(item, dict) and item.get("id")
         ]
-    actions = manager.get_plugin_actions(pid=plugin_id) or []
-    if actions:
-        data["actions"] = [
-            {
-                "plugin_id": group.get("plugin_id"),
-                "plugin_name": group.get("plugin_name"),
-                "actions": [{"id": item.get("id"), "name": item.get("name")} for item in group.get("actions", [])],
-            }
-            for group in actions
-        ]
-    services = manager.get_plugin_services(pid=plugin_id) or []
-    if services:
-        data["services"] = [
-            {
-                "id": service.get("id"),
-                "name": service.get("name"),
-                **({"trigger": str(service.get("trigger"))} if service.get("trigger") else {}),
-                **(
-                    {"trigger_kwargs": {key: str(value) for key, value in service.get("kwargs", {}).items()}}
-                    if service.get("kwargs")
-                    else {}
-                ),
-            }
-            for service in services
-        ]
-    return _SchemaResponse(success=True, data=data)
+        if actions:
+            action_groups.append(
+                _SchemaPluginRuntimeActionGroup(
+                    plugin_id=str(group["plugin_id"]) if group.get("plugin_id") else None,
+                    plugin_name=str(group["plugin_name"]) if group.get("plugin_name") else None,
+                    actions=actions,
+                )
+            )
+    services = [
+        _SchemaPluginRuntimeServiceCapability(
+            id=str(service["id"]),
+            name=str(service["name"]) if service.get("name") else None,
+            trigger=str(service["trigger"]) if service.get("trigger") else None,
+        )
+        for service in (manager.get_plugin_services(pid=plugin_id) or [])
+        if isinstance(service, dict) and service.get("id")
+    ]
+    return _SchemaResponse(
+        success=True,
+        data=_SchemaPluginRuntimeCapabilities(
+            commands=commands,
+            actions=action_groups,
+            services=services,
+        ),
+    )
 
 
 @router.get(  # type: ignore[misc]
@@ -932,6 +882,27 @@ async def plugin_data(
 
 
 @router.get(
+    "/runtime/{plugin_id}/data/summary",
+    summary="查询插件持久化数据摘要",
+    response_model=_SchemaResponse[_SchemaPluginDataSummary],
+)
+async def plugin_data_summary(
+    plugin_id: str,
+    _: ApiPrincipal = Depends(get_current_active_superuser_async),
+    runtime: HostRuntime = Depends(get_host_runtime),
+) -> _SchemaResponse[Any]:
+    """读取不包含插件持久化原值的键、类型和大小摘要。"""
+    try:
+        data = await PluginDataSummaryService(
+            runtime.agent.plugin_data,
+            get_plugin_snapshot,
+        ).summarize(plugin_id)
+    except ValueError as error:
+        return _SchemaResponse(success=False, message=str(error))
+    return _SchemaResponse(success=True, data=_SchemaPluginDataSummary.model_validate(data))
+
+
+@router.get(
     "/{plugin_id}",
     summary="获取插件配置",
     response_model=_SchemaJsonObject,
@@ -955,6 +926,8 @@ def set_plugin_config(
     """
     result = command.update(plugin_id, conf)
     return _SchemaResponse(success=result.success, message=result.message)
+
+
 @router.delete("/{plugin_id}", summary="卸载插件", response_model=_SchemaResponse[None])
 def uninstall_plugin(plugin_id: str, _: ApiPrincipal = Depends(get_current_active_superuser)) -> Any:
     """

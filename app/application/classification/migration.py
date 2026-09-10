@@ -8,6 +8,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal, Optional, TypeAlias, Union, cast
 
+from app.domain.classification.vocabulary import (
+    TMDB_GENRE_KEYS as _TMDB_GENRE_KEYS,
+)
+from app.domain.classification.vocabulary import (
+    classification_field_options,
+)
 from app.schemas.category import (
     CategoryConfig,
     CategoryRule,
@@ -49,30 +55,6 @@ _COMMON_FALLBACKS: Final[dict[ClassificationMediaType, str]] = {
     "电影": "movie.uncategorized",
     "电视剧": "tv.uncategorized",
     "音乐": "music.uncategorized",
-}
-_TMDB_GENRE_KEYS: Final[dict[str, str]] = {
-    "12": "adventure",
-    "14": "fantasy",
-    "16": "animation",
-    "18": "drama",
-    "27": "horror",
-    "28": "action",
-    "35": "comedy",
-    "36": "history",
-    "37": "western",
-    "53": "thriller",
-    "80": "crime",
-    "99": "documentary",
-    "878": "science_fiction",
-    "9648": "mystery",
-    "10402": "music",
-    "10749": "romance",
-    "10751": "family",
-    "10752": "war",
-    "10762": "kids",
-    "10764": "reality",
-    "10767": "talk",
-    "10770": "tv_movie",
 }
 _LEGACY_FIELD_PRESENTATION: Final[dict[str, tuple[str, str]]] = {
     "genre_ids": ("风格（旧规则）", "media.genre_keys"),
@@ -121,7 +103,7 @@ class LegacyClassificationMigrationResult:
 
 @dataclass(frozen=True, slots=True)
 class _LegacyToken:
-    """保留一个旧逗号项展开后的值集合及其排除语义。"""
+    """保留旧字段展开后的同向值集合及其排除语义。"""
 
     negative: bool
     values: tuple[str, ...]
@@ -183,7 +165,7 @@ def migrate_legacy_category_config(
     config: Union[CategoryConfig, Mapping[str, object]],
 ) -> LegacyClassificationMigrationResult:
     """
-    把内存中的旧分类配置转换为来源受限的新版策略草稿
+    把内存中的旧分类配置转换为按媒体类型匹配的新版策略草稿
 
     :param config: 已校验的 CategoryConfig 或保持 YAML 顺序的映射
     :return: 包含策略、动态字段声明和结构化诊断的纯迁移结果
@@ -193,7 +175,7 @@ def migrate_legacy_category_config(
     _diagnose_unknown_top_level_keys(root, context)
     categories: list[ClassificationCategory] = []
     rules: list[ClassificationRule] = []
-    source_fallbacks: dict[str, dict[ClassificationMediaType, str]] = {}
+    fallbacks = dict(_COMMON_FALLBACKS)
 
     for media_key, media_type in _MEDIA_TYPES.items():
         _migrate_media_categories(
@@ -202,19 +184,18 @@ def migrate_legacy_category_config(
             raw_categories=root.get(media_key),
             categories=categories,
             rules=rules,
-            source_fallbacks=source_fallbacks,
+            fallbacks=fallbacks,
             context=context,
         )
 
-    categories.extend(_common_fallback_categories(categories))
+    categories.extend(_common_fallback_categories(categories, fallbacks))
     policy_payload: dict[str, object] = {
         "schema_version": 2,
         "revision": 1,
         "mode": "first_match",
         "categories": categories,
         "rules": rules,
-        "fallbacks": dict(_COMMON_FALLBACKS),
-        "source_fallbacks": source_fallbacks,
+        "fallbacks": fallbacks,
         "field_aliases": {field_id: aliases for field_id, aliases in context.field_aliases.items() if aliases},
     }
     policy = ClassificationPolicy.model_validate(policy_payload)
@@ -277,10 +258,10 @@ def _migrate_media_categories(
     raw_categories: object,
     categories: list[ClassificationCategory],
     rules: list[ClassificationRule],
-    source_fallbacks: dict[str, dict[ClassificationMediaType, str]],
+    fallbacks: dict[ClassificationMediaType, str],
     context: _MigrationContext,
 ) -> None:
-    """按单个旧媒体类型的原始顺序迁移分类、规则和来源兜底。"""
+    """按单个旧媒体类型的原始顺序迁移分类、规则和全局兜底。"""
     if raw_categories is None:
         return
     if not isinstance(raw_categories, Mapping):
@@ -304,7 +285,7 @@ def _migrate_media_categories(
                 id=category_id,
                 media_type=media_type,
                 name=name,
-                path=[name],
+                path=_legacy_category_path(name),
                 enabled=not unreachable,
             )
         )
@@ -320,7 +301,7 @@ def _migrate_media_categories(
         rule_mapping = _legacy_rule_mapping(raw_rule)
         if _is_legacy_fallback(raw_rule, rule_mapping):
             if not fallback_seen:
-                source_fallbacks.setdefault(_TMDB_SOURCE, {})[media_type] = category_id
+                fallbacks[media_type] = category_id
                 fallback_seen = True
             if rule_mapping is not None:
                 rules.append(
@@ -430,14 +411,12 @@ def _diagnose_category_name(
     path: Sequence[LegacyDiagnosticPathPart],
     context: _MigrationContext,
 ) -> None:
-    """在仍保留分类的同时标记无法安全作为目录段的名称。"""
+    """在仍保留分类的同时标记无法安全投影为目录路径的名称。"""
     invalid = (
         not isinstance(raw_name, str)
         or not name
         or name != name.strip()
-        or name in {".", ".."}
-        or name.endswith((".", " "))
-        or any(character in _ILLEGAL_PATH_CHARACTERS or ord(character) < 32 for character in name)
+        or any(_legacy_path_segment_is_invalid(segment) for segment in _legacy_category_path(name))
     )
     if invalid:
         context.add_diagnostic(
@@ -446,6 +425,23 @@ def _diagnose_category_name(
             f"分类名称 {name!r} 不能安全投影为目录路径",
             path,
         )
+
+
+def _legacy_category_path(name: str) -> list[str]:
+    """把旧分类名中的斜杠还原为目录层级，同时保留原始显示名称。"""
+    return name.split("/")
+
+
+def _legacy_path_segment_is_invalid(segment: str) -> bool:
+    """判断旧分类名拆出的目录段是否违反跨平台路径安全约束。"""
+    illegal_characters = _ILLEGAL_PATH_CHARACTERS - frozenset({"/"})
+    return (
+        not segment
+        or segment in {".", ".."}
+        or segment != segment.strip()
+        or segment.endswith((".", " "))
+        or any(character in illegal_characters or ord(character) < 32 for character in segment)
+    )
 
 
 def _migrate_legacy_field(
@@ -500,42 +496,37 @@ def _legacy_field_definition(
     presentation = _LEGACY_FIELD_PRESENTATION.get(field_name)
     label = presentation[0] if presentation else f"TMDB {field_name}"
     replacement_field = presentation[1] if presentation else None
-    replacement_hint = f"；新规则请使用 {replacement_field}" if replacement_field else ""
+    replacement_hint = f"；新增条件请使用{presentation[0].replace('（旧规则）', '')}" if presentation else ""
     return ClassificationFieldDefinition(
         id=field_id,
         label=label,
         group="旧规则",
-        description=(f"仅用于保持已迁移 category.yaml 的原始比较语义{replacement_hint}"),
+        description=(f"从旧分类配置迁移，保留原有匹配方式{replacement_hint}"),
         value_type="string_list",
         operators=["contains_any", "contains_none", "exists", "not_exists"],
         media_types=media_types,
         source_support={_TMDB_SOURCE: "extension"},
+        options=classification_field_options("media.countries") if field_name == "origin_country" else [],
         selectable=False,
         replacement_field=replacement_field,
     )
 
 
 def _parse_legacy_tokens(value: str) -> tuple[tuple[_LegacyToken, ...], bool]:
-    """逐项复现旧逗号、排除前缀和连字符范围展开算法。"""
+    """沿用旧范围展开语义，并合并同向枚举，避免值数量膨胀为叶子数量。"""
     raw_tokens = [item for item in value.split(",") if item]
-    parsed: list[_LegacyToken] = []
+    values_by_sign: dict[bool, list[str]] = {}
     requires_exists = not raw_tokens
     for raw_token in raw_tokens:
         expanded = _expand_legacy_token(raw_token)
         if not expanded:
             requires_exists = True
             continue
-        grouped: list[_LegacyToken] = []
         for expanded_value in expanded:
             negative = expanded_value.startswith("!")
             plain_value = expanded_value[1:] if negative else expanded_value
-            if grouped and grouped[-1].negative == negative:
-                previous = grouped[-1]
-                grouped[-1] = _LegacyToken(negative, (*previous.values, plain_value))
-            else:
-                grouped.append(_LegacyToken(negative, (plain_value,)))
-        parsed.extend(grouped)
-    return tuple(parsed), requires_exists
+            values_by_sign.setdefault(negative, []).append(plain_value)
+    return tuple(_LegacyToken(negative, tuple(values)) for negative, values in values_by_sign.items()), requires_exists
 
 
 def _expand_legacy_token(value: str) -> tuple[str, ...]:
@@ -722,7 +713,7 @@ def _fallback_metadata_rule(
     archived: bool,
     context: _MigrationContext,
 ) -> ClassificationRule:
-    """用禁用规则保留全空字段映射，运行时仍只通过来源兜底命中。"""
+    """用禁用规则保留全空字段映射，运行时由全局兜底处理。"""
     nodes: list[ClassificationConditionNode] = []
     for raw_field in rule_mapping:
         field_path = [*path, str(raw_field)]
@@ -771,11 +762,14 @@ def _stable_category_id(media_key: LegacyMediaKey, name: str) -> str:
 
 def _common_fallback_categories(
     legacy_categories: Sequence[ClassificationCategory],
+    fallbacks: Mapping[ClassificationMediaType, str],
 ) -> list[ClassificationCategory]:
     """构造不受来源限制且不与同类型旧目录冲突的稳定未分类目录。"""
     occupied = {(category.media_type, tuple(category.path)) for category in legacy_categories}
     categories: list[ClassificationCategory] = []
     for media_type, category_id in _COMMON_FALLBACKS.items():
+        if fallbacks.get(media_type) != category_id:
+            continue
         path = ["未分类"]
         if (media_type, tuple(path)) in occupied:
             path.append("通用")

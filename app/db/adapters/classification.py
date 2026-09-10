@@ -32,6 +32,42 @@ DirectoryConfigurationNormalizer = Callable[
 ]
 """使用事务内活动策略规范化目录配置的纯函数。"""
 
+
+def discard_removed_source_fallbacks(value: Any) -> Any:
+    """读取旧持久化策略时把 TMDB 兜底平移为媒体类型全局兜底。"""
+    if not isinstance(value, Mapping):
+        return value
+
+    state = copy.deepcopy(dict(value))
+    policies: list[dict[str, Any]] = []
+    active = state.get("active")
+    if isinstance(active, dict):
+        policies.append(active)
+    history = state.get("history")
+    if isinstance(history, list):
+        policies.extend(item for item in history if isinstance(item, dict))
+    for policy in policies:
+        source_fallbacks = policy.pop("source_fallbacks", None)
+        if not isinstance(source_fallbacks, Mapping):
+            continue
+        fallbacks = policy.get("fallbacks")
+        tmdb_fallbacks = source_fallbacks.get("themoviedb")
+        if not isinstance(fallbacks, dict) or not isinstance(tmdb_fallbacks, Mapping):
+            continue
+        for media_type, category_id in tmdb_fallbacks.items():
+            if fallbacks.get(media_type) != _COMMON_FALLBACK_IDS.get(media_type):
+                continue
+            if category_id:
+                fallbacks[media_type] = category_id
+    return state
+
+
+_COMMON_FALLBACK_IDS = {
+    "电影": "movie.uncategorized",
+    "电视剧": "tv.uncategorized",
+    "音乐": "music.uncategorized",
+}
+
 _CONFIGURATION_LOCK_KEYS = (
     SystemConfigKey.MediaClassificationPolicy.value,
     SystemConfigKey.Directories.value,
@@ -142,7 +178,9 @@ class SystemConfigClassificationPolicyStore:
         try:
             return cast(
                 ClassificationPolicyState,
-                ClassificationPolicyState.model_validate(value),
+                ClassificationPolicyState.model_validate(
+                    discard_removed_source_fallbacks(value)
+                ),
             )
         except ValidationError as error:
             raise ClassificationPolicyStateCorruptError(

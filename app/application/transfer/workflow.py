@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 from app.application.history import DownloadHistorySnapshot
 from app.application.transfer import checkpoint as checkpoint_codec
 from app.application.transfer.execution import TransferExecutionCheckpoint
+from app.application.transfer.feedback import TransferFailureNotification
 from app.domain.context import MediaInfo, MusicInfo
 from app.domain.media import normalize_music_type
 from app.domain.meta.metabase import MetaBase
@@ -892,8 +893,9 @@ class TransferAdmissionRepository(Protocol):
             storage: str,
             src_path: str,
             planning_input: TransferPlanningInput,
+            replace_inactive: bool = False,
     ) -> TransferAdmission:
-        """按规划输入幂等登记源文件并返回稳定任务身份。"""
+        """幂等登记源文件；显式重做可原子替换无有效租约且无历史绑定的旧任务。"""
         ...
 
     def record_enqueue_failure(self, *, task_id: str, error: str) -> None:
@@ -1017,19 +1019,6 @@ class TransferQueueService:
         """先处理失活任务，再返回当前整理作业视图。"""
         self._expire_tasks()
         return self._list_tasks()
-
-
-@dataclass(frozen=True, slots=True)
-class TransferFailureNotification:
-    """整理失败聚合器保存的单条通知快照。"""
-
-    media_title: str
-    season_episode: str
-    reason: str
-    history_id: Optional[int]
-    image: Optional[str]
-    username: Optional[str]
-    manual_identity: bool = False
 
 
 def build_transfer_failure_group_key(task: TransferTask) -> str:
@@ -1386,15 +1375,7 @@ class JobManager:
                     ],
                 )
             else:
-                # 不重复添加任务
-                if any(
-                        [
-                            self.__get_file_key(_job_task_fileitem(t)) == file_key
-                            for t in _job_tasks(self._job_view[__mediaid__])
-                        ]
-                ):
-                    logger.debug(f"任务 {task.fileitem.name} 已存在，跳过重复添加")
-                    return False
+                # 同锁内的跨作业检查已覆盖当前作业，直接追加通过去重的任务。
                 _job_tasks(self._job_view[__mediaid__]).append(
                     TransferJobTask(
                         fileitem=task.fileitem,
@@ -1639,17 +1620,20 @@ class JobManager:
                             )
                     return
 
-    def remove_task(self, fileitem: FileItem) -> Optional[TransferJobTask]:
+    def remove_task(
+            self, fileitem: FileItem, *, finished_only: bool = False,
+    ) -> Optional[TransferJobTask]:
         """
-        根据文件项移除任务
+        按源文件移除任务；手动重做只清除已退出执行的终态视图。
         """
-        task, _ = self.__remove_task_with_job_id(fileitem)
+        task, _ = self.__remove_task_with_job_id(fileitem, finished_only=finished_only)
         return task
 
     def __remove_task_with_job_id(
             self,
             fileitem: FileItem,
             preserve_execution: bool = False,
+            finished_only: bool = False,
     ) -> tuple[Optional[TransferJobTask], Optional[JobId]]:
         """
         根据文件项移除任务，并返回任务所在的作业ID
@@ -1662,6 +1646,11 @@ class JobManager:
                 job = self._job_view[mediaid]
                 for task in _job_tasks(job):
                     if self.__get_file_key(_job_task_fileitem(task)) == file_key:
+                        if finished_only and (
+                                task.state not in {"completed", "failed"}
+                                or file_key in self._active_executions
+                        ):
+                            return None, None
                         _job_tasks(job).remove(task)
                         self._task_state_changed_at.pop(file_key, None)
                         if not preserve_execution:

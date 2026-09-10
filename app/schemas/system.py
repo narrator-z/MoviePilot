@@ -195,7 +195,16 @@ class SystemSettingsUpdateRequest(BaseModel):  # type: ignore[misc]
 class CustomIdentifiersUpdateRequest(BaseModel):  # type: ignore[misc]
     """完整替换自定义识别词的请求。"""
 
-    identifiers: list[str] = Field(default_factory=list)
+    identifiers: list[str] = Field(
+        default_factory=list,
+        description="Complete ordered list of custom recognition identifier rules.",
+    )
+    expected_identifiers: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Previously read complete ordered list. When supplied, reject the replacement if the stored list has changed."
+        ),
+    )
 
 
 SystemUpdateType = Literal["application", "resources"]
@@ -243,6 +252,9 @@ class SystemUpdateRequest(BaseModel):  # type: ignore[misc]
 
 class SystemUpdateStatus(BaseModel):
     """主程序与站点资源后台更新的聚合状态快照。"""
+
+    auto_update: bool = Field(default=False, description="是否启用主程序自动检查及升级提醒")
+    auto_update_resource: bool = Field(default=True, description="是否启用站点资源自动检查及升级提醒")
 
     state: Literal[
         "idle",

@@ -327,7 +327,11 @@ async def _stream_search_events(request: Request, event_source: AsyncIterator[di
         termination_reason = "error"
         logger.error(f"渐进式搜索出错：{err}", exc_info=True)
         payload = _sse_event(
-            {"type": "error", "success": False, "message": str(err)},
+            {
+                "type": "error",
+                "success": False,
+                "message": "搜索失败，请稍后重试",
+            },
             locale=locale,
         )
         event_count += 1
@@ -401,6 +405,7 @@ async def search_by_id_stream(
     season: Optional[str] = None,
     sites: Optional[str] = None,
     music_type: Optional[str] = None,
+    include_candidates: bool = False,
     _: _SchemaTokenPayload = Depends(verify_resource_token),
 ) -> Any:
     """
@@ -422,6 +427,8 @@ async def search_by_id_stream(
         if not search_params:
             yield {"type": "error", "success": False, "message": message}
             return
+        if include_candidates:
+            search_params["include_candidates"] = True
         torrents = SearchChain().async_search_by_id_stream(
             **search_params,
             mtype=media_type,
@@ -453,6 +460,7 @@ async def search_by_id(
     season: Optional[str] = None,
     sites: Optional[str] = None,
     music_type: Optional[str] = None,
+    include_candidates: bool = False,
     _: _SchemaTokenPayload = Depends(verify_token),
     page: CompatiblePageParam = None,
     count: CompatibleCountParam = None,
@@ -470,6 +478,8 @@ async def search_by_id(
     )
     if not search_params:
         return _SchemaResponse(success=False, message=message)
+    if include_candidates:
+        search_params["include_candidates"] = True
     torrents = await SearchChain().async_search_by_id(
         **search_params,
         mtype=media_type,

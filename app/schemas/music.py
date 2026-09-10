@@ -13,6 +13,7 @@ class MusicMeta(OptionalMediaIdentityMixin, BaseModel):
 
     type: Literal["音乐"] = "音乐"
     org_string: Optional[str] = None
+    apply_words: list[str] = Field(default_factory=list, description="资源解析时实际应用的自定义识别词")
     title: Optional[str] = None
     artists: list[str] = Field(default_factory=list)
     artist: Optional[str] = None
@@ -83,6 +84,9 @@ class MusicInfo(OptionalMediaIdentityMixin, BaseModel):
     artist_country: Optional[str] = None
     release_status: Optional[str] = None
     names: list[str] = Field(default_factory=list)
+    title_aliases: list[str] = Field(default_factory=list)
+    album_aliases: list[str] = Field(default_factory=list)
+    artist_aliases: list[str] = Field(default_factory=list)
     detail_link: Optional[str] = None
     listen_count: Optional[int] = None
     raw_data: dict[str, JsonData] = Field(default_factory=dict)
@@ -128,6 +132,38 @@ class MusicInfo(OptionalMediaIdentityMixin, BaseModel):
         return None
 
 
+class MusicLibraryStatusRequest(BaseModel):  # type: ignore[misc]
+    """批量查询音乐媒体库状态的请求。"""
+
+    items: list[MusicInfo] = Field(min_length=1, max_length=500)
+
+    @field_validator("items")  # type: ignore[misc]
+    @classmethod
+    def _validate_album_identities(cls, items: list[MusicInfo]) -> list[MusicInfo]:
+        """只接受带稳定来源身份的专辑，避免按模糊标题误报已入库。"""
+        supported_sources = {
+            MediaSource.MusicBrainz,
+            MediaSource.TheAudioDB,
+            MediaSource.DoubanMusic,
+        }
+        if any(
+            item.music_type != "album"
+            or item.media_source not in supported_sources
+            or not item.media_id
+            for item in items
+        ):
+            raise ValueError("仅支持带稳定音乐来源和媒体 ID 的专辑")
+        return items
+
+
+class MusicLibraryStatus(BaseModel):  # type: ignore[misc]
+    """音乐专辑在媒体库中的存在状态。"""
+
+    media_source: MediaSource
+    media_id: str
+    exists: bool
+
+
 class MusicRelease(BaseModel):
     """音乐专辑下的单个发行版本。"""
 
@@ -154,6 +190,8 @@ class MusicAlbumInfo(OptionalMediaIdentityMixin, BaseModel):
     artists: list[str] = Field(default_factory=list)
     artist: Optional[str] = None
     artist_ids: list[str] = Field(default_factory=list)
+    title_aliases: list[str] = Field(default_factory=list)
+    artist_aliases: list[str] = Field(default_factory=list)
     album: Optional[str] = None
     album_type: Optional[str] = None
     secondary_types: list[str] = Field(default_factory=list)

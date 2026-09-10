@@ -208,8 +208,8 @@ def test_default_style_config_preserves_order_and_uses_safe_standard_fields() ->
     assert origin_country.replacement_field == "media.countries"
 
 
-def test_first_empty_rule_becomes_source_fallback_and_later_entries_are_disabled() -> None:
-    """首个全空项应成为 TMDB 兜底，后续分类和规则保留但永远禁用。"""
+def test_first_empty_rule_becomes_global_fallback_and_later_entries_are_disabled() -> None:
+    """首个全空项应成为媒体类型全局兜底，后续分类和规则保留但永远禁用。"""
     result = migrate_legacy_category_config(
         {
             "movie": {
@@ -222,7 +222,7 @@ def test_first_empty_rule_becomes_source_fallback_and_later_entries_are_disabled
     )
     legacy_categories = [category for category in result.policy.categories if category.id.startswith("legacy.movie.")]
 
-    assert result.policy.source_fallbacks["themoviedb"]["电影"] == legacy_categories[0].id
+    assert result.policy.fallbacks["电影"] == legacy_categories[0].id
     assert [category.enabled for category in legacy_categories] == [True, False, False]
     assert [rule.enabled for rule in result.policy.rules] == [False, False, False]
     assert [issue.code for issue in result.issues].count("unreachable_legacy_category") == 2
@@ -271,6 +271,37 @@ def test_mixed_genre_ids_keep_positive_or_and_negative_and_semantics() -> None:
     assert _category_name(result, _tmdb_facts(result, {"genre_ids": [16, 99]}, "电影")) == "兜底"
     assert _category_name(result, _tmdb_facts(result, {"genre_ids": [999, 777]}, "电影")) == "兜底"
     assert _category_name(result, _tmdb_facts(result, {}, "电影")) == "兜底"
+
+
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("field_name", ["origin_country", "genre_ids"])
+def test_large_value_sets_remain_compact_and_preserve_legacy_semantics(
+    field_name: str,
+    negative: bool,
+) -> None:
+    """大枚举只产生集合条件，旧 API 投影后每个正向或排除值仍保持原语义。"""
+    values = [str(index) for index in range(1, 61)]
+    prefix = "!" if negative else ""
+    config = {
+        "movie": {
+            "目标": {field_name: ",".join(f"{prefix}{value}" for value in values)},
+            "兜底": None,
+        },
+        "tv": {},
+    }
+    result = migrate_legacy_category_config(config)
+    projection = project_policy_to_legacy_category_projection(result.policy)
+    remigrated = migrate_legacy_category_config(projection.config)
+
+    assert result.valid
+    assert ClassificationPolicyValidator.validate(result.policy, result.extra_fields).valid
+    assert len(_leaf_fields(result.policy.rules[0].when)) <= 2
+    assert projection.exact
+    for actual in [*([value] for value in values), ["999"], ["1", "999"], [], None]:
+        tmdb_info = {field_name: actual, "id": 1}
+        expected = _legacy_tmdb_category(config["movie"], tmdb_info)
+        assert _category_name(result, _tmdb_facts(result, tmdb_info, "电影")) == expected
+        assert _category_name(remigrated, _tmdb_facts(remigrated, tmdb_info, "电影")) == expected
 
 
 def test_safe_unknown_field_is_declared_but_unsafe_field_blocks_publish() -> None:
@@ -387,7 +418,15 @@ def test_release_year_supports_values_ranges_and_non_numeric_hyphen_endpoints() 
     assert _category_name(result, _tmdb_facts(result, {"release_date": "2023-01-01"}, "电影")) == "兜底"
     projection = project_policy_to_legacy_category_projection(result.policy)
     assert projection.exact
-    assert projection.config.movie == CategoryConfig.model_validate(config).movie
+    assert projection.config.movie == CategoryConfig.model_validate(
+        {
+            "movie": {
+                "近年": {"release_year": "2020,2021,2022,2024"},
+                "字母年": {"release_year": "ABCD,EFGH"},
+                "兜底": None,
+            }
+        }
+    ).movie
 
 
 def test_stable_ids_are_repeatable_ascii_and_media_type_scoped() -> None:
@@ -433,8 +472,8 @@ def test_tmdb_fixtures_match_category_helper_directory_classification(
     assert current_category == legacy_category
 
 
-def test_non_tmdb_source_uses_common_fallback_instead_of_legacy_source_fallback() -> None:
-    """非 TMDB 身份不得进入只为旧 category.yaml 保留的来源级兜底。"""
+def test_non_tmdb_source_uses_the_same_media_type_fallback() -> None:
+    """媒体类型全局兜底对不同数据源保持一致。"""
     result = migrate_legacy_category_config(_legacy_config())
     facts = ClassificationFacts.model_validate(
         {
@@ -447,7 +486,6 @@ def test_non_tmdb_source_uses_common_fallback_instead_of_legacy_source_fallback(
     evaluation = ClassificationEvaluator.evaluate(result.policy, facts)
 
     assert evaluation.result.recommended.category_id == result.policy.fallbacks["电影"]
-    assert evaluation.result.recommended.category_id != result.policy.source_fallbacks["themoviedb"]["电影"]
     assert evaluation.result.recommended.source == "fallback"
 
 
@@ -463,7 +501,6 @@ def test_config_without_empty_entry_remains_valid_and_uses_common_fallback() -> 
     evaluation = ClassificationEvaluator.evaluate(result.policy, facts)
 
     assert result.valid
-    assert result.policy.source_fallbacks == {}
     assert ClassificationPolicyValidator.validate(result.policy, result.extra_fields).valid
     assert evaluation.result.recommended.category_id == result.policy.fallbacks["电影"]
     assert evaluation.result.recommended.source == "fallback"
@@ -487,5 +524,28 @@ def test_migrated_policy_round_trips_to_category_config() -> None:
     projected = project_policy_to_legacy_category_projection(migrated.policy)
 
     assert projected.exact
-    assert projected.config == CategoryConfig.model_validate(config)
+    expected = CategoryConfig.model_validate(config)
+    assert expected.movie is not None
+    assert expected.movie["组合"] is not None
+    expected.movie["组合"].release_year = "2020,2021,2022,2024"
+    assert projected.config == expected
     assert project_policy_to_legacy_category_config(migrated.policy) == projected.config
+
+
+def test_migration_does_not_create_unused_duplicate_fallback_categories() -> None:
+    """已有旧默认分类时直接复用，不能再创建未分类/通用的无用目录。"""
+    result = migrate_legacy_category_config({"movie": {"未分类": None}, "tv": {"未分类": None}})
+    assert result.valid
+    assert [item.path for item in result.policy.categories if item.media_type == "电影"] == [["未分类"]]
+    assert [item.path for item in result.policy.categories if item.media_type == "电视剧"] == [["未分类"]]
+    assert result.policy.fallbacks["音乐"] == "music.uncategorized"
+    assert ClassificationPolicyValidator.validate(result.policy, result.extra_fields).valid
+
+
+def test_legacy_country_dictionary_keeps_country_codes_and_genre_ids_distinct() -> None:
+    """旧地区条件能直接选择代码，未知旧风格编号不能误填为标准风格键。"""
+    result = migrate_legacy_category_config({"tv": {"日韩剧": {"origin_country": "JP,KR", "genre_ids": "999"}}})
+    fields = {item.id: item for item in result.extra_fields}
+    countries = fields["extensions.themoviedb.origin_country"]
+    assert any(item.value == "JP" and item.label == "日本" for item in countries.options)
+    assert not fields["extensions.themoviedb.genre_ids"].options

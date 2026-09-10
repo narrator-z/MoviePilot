@@ -53,7 +53,7 @@ def _request_durable_transfer_retry(
             task_id,
             error,
         )
-        return False, str(error)
+        return False, "整理任务暂时无法重试，请稍后重试"
     return result.accepted, result.message
 
 
@@ -79,6 +79,10 @@ class FailedRetryMixin(_TransferOwnerBase):
             [
                 {"text": "重试", "callback_data": f"transfer_retry_{history_id}"},
                 {
+                    "text": "重新生成计划",
+                    "callback_data": f"transfer_regenerate_{history_id}",
+                },
+                {
                     "text": "智能助手接管",
                     "callback_data": f"transfer_ai_retry_{history_id}",
                 },
@@ -100,6 +104,7 @@ class FailedRetryMixin(_TransferOwnerBase):
         """
         for prefix, action in (
                 ("transfer_retry_", "retry"),
+                ("transfer_regenerate_", "regenerate"),
                 ("transfer_ai_retry_", "ai_retry"),
         ):
             if callback_data.startswith(prefix):
@@ -125,7 +130,7 @@ class FailedRetryMixin(_TransferOwnerBase):
             return False
 
         action, history_id = callback
-        if action == "retry":
+        if action in {"retry", "regenerate"}:
             self._retry_transfer_history(
                 history_id=history_id,
                 channel=channel,
@@ -154,6 +159,8 @@ class FailedRetryMixin(_TransferOwnerBase):
         """
         立即重新整理一条失败的整理记录。
         """
+        from app.runtime.errors import public_error_message
+
         self.post_message(
             Message(
                 channel=channel,
@@ -167,13 +174,14 @@ class FailedRetryMixin(_TransferOwnerBase):
 
         state, errmsg = self.redo_transfer_history(history_id)
         if state:
+            public_message = public_error_message(errmsg, context="transfer") if errmsg else ""
             self.post_message(
                 Message(
                     channel=channel,
                     source=source,
                     userid=userid,
                     username=username,
-                    title=errmsg or f"整理记录 #{history_id} 已重新整理",
+                    title=public_message or f"整理记录 #{history_id} 已重新整理",
                     link=self.runtime_config.history_url,
                     save_history=False,
                 )
@@ -187,7 +195,7 @@ class FailedRetryMixin(_TransferOwnerBase):
                 userid=userid,
                 username=username,
                 title="重新整理失败",
-                text=errmsg,
+                text=public_error_message(errmsg, context="transfer"),
                 link=self.runtime_config.history_url,
                 save_history=False,
             )
@@ -204,6 +212,7 @@ class FailedRetryMixin(_TransferOwnerBase):
         """
         由智能助手接管一条失败的整理记录。
         """
+        from app.runtime.errors import public_error_message
 
         history = self.transfer_history_repository.get(history_id)
         if not history:
@@ -229,18 +238,15 @@ class FailedRetryMixin(_TransferOwnerBase):
         )
         if durable_retry is not None:
             accepted, message = durable_retry
+            public_message = public_error_message(message, context="transfer")
             self.post_message(
                 Message(
                     channel=channel,
                     source=source,
                     userid=userid,
                     username=username,
-                    title=(
-                        message
-                        if accepted
-                        else "重新整理失败"
-                    ),
-                    text=None if accepted else message,
+                    title=public_message if accepted else "重新整理失败",
+                    text=None if accepted else public_message,
                     link=self.runtime_config.history_url,
                     save_history=False,
                 )
@@ -306,6 +312,7 @@ class FailedRetryMixin(_TransferOwnerBase):
                     )
                 )
             except Exception as e:
+                logger.error(f"智能助手重新整理失败：{e}", exc_info=True)
                 await self.async_post_message(
                     Message(
                         channel=channel,
@@ -313,7 +320,7 @@ class FailedRetryMixin(_TransferOwnerBase):
                         userid=userid,
                         username=username,
                         title="智能助手整理失败",
-                        text=str(e),
+                        text="智能助手整理失败，请稍后重试",
                         link=self.runtime_config.history_url,
                         save_history=False,
                     )
@@ -426,10 +433,7 @@ class FailedRetryMixin(_TransferOwnerBase):
             mediainfo = recognize_context.media_info if recognize_context else None
         # 音乐专辑目录允许无预识别信息，由整理链按音频后缀逐文件解析识别
         if not mediainfo and not (mtype == MediaType.MUSIC and src_path.is_dir()):
-            return False, (
-                f"未识别到媒体信息，类型：{mtype.value if mtype else None}，"
-                f"media_source：{media_source}，media_id：{media_id}"
-            )
+            return False, "未识别到媒体信息，请检查媒体来源和媒体 ID 后重试"
         # 重新执行整理
         if mediainfo:
             logger.info(f"{src_path.name} 识别为：{mediainfo.title_year}")

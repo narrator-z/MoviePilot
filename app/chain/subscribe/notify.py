@@ -143,11 +143,17 @@ class SubscribeNotificationOwner(_SubscribeOwnerBase):
             },
         )
         try:
+            self._SubscribeChain__queue_new_subscription_search(subscribe_id)
+        except Exception:
+            logger.warning("订阅已保存，但自动搜索暂时没有安排成功，系统会在下一次检查时重试")
+            logger.debug("安排订阅自动搜索失败", exc_info=True)
+        try:
             report_delivered = _subscription_share_snapshot().report_added(
                 self._SubscribeChain__subscribe_report_payload(context)
             )
-        except Exception as error:
-            logger.warning(f"订阅新增统计上报失败，将由后台重试：{error}")
+        except Exception:
+            logger.warning("订阅新增统计暂时没有上报成功，系统会在后台重试")
+            logger.debug("订阅新增统计上报失败", exc_info=True)
             return False
         if not report_delivered:
             logger.warning("订阅新增统计上报未确认，将由后台重试")
@@ -178,11 +184,17 @@ class SubscribeNotificationOwner(_SubscribeOwnerBase):
             },
         )
         try:
+            await self._SubscribeChain__async_queue_new_subscription_search(subscribe_id)
+        except Exception:
+            logger.warning("订阅已保存，但自动搜索暂时没有安排成功，系统会在下一次检查时重试")
+            logger.debug("安排订阅自动搜索失败", exc_info=True)
+        try:
             report_delivered = await _subscription_share_snapshot().async_report_added(
                 self._SubscribeChain__subscribe_report_payload(context)
             )
-        except Exception as error:
-            logger.warning(f"订阅新增统计上报失败，将由后台重试：{error}")
+        except Exception:
+            logger.warning("订阅新增统计暂时没有上报成功，系统会在后台重试")
+            logger.debug("订阅新增统计上报失败", exc_info=True)
             return False
         if not report_delivered:
             logger.warning("订阅新增统计上报未确认，将由后台重试")

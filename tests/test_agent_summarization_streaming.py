@@ -26,6 +26,10 @@ from pydantic import Field
 import app.agent.orchestrator as agent_module
 from app.agent.memory import MemoryManager
 from app.agent.middleware.config import RuntimeConfigMiddleware
+from app.agent.middleware.invocation import GET_TOOL_EXECUTION_NAME, InvocationMiddleware
+from app.agent.middleware.output import READ_TOOL_RESULT_NAME, ToolOutputMiddleware
+from app.agent.middleware.plan import PLAN_TOOL_NAME, PlanMiddleware
+from app.agent.middleware.selection import TOOL_DISCOVERY_NAME, ToolSelectorMiddleware
 from app.agent.middleware.summarization import (
     ContextPreservingSummarizationMiddleware,
     ContextSummarizationError,
@@ -229,28 +233,24 @@ def test_streaming_agent_uses_non_streaming_llm_for_summary():
     )
 
 
-def test_streaming_agent_uses_non_streaming_llm_for_model_middlewares():
-    """流式 Agent 的模型型中间件应使用非流式 LLM。"""
-    agent = agent_module.MoviePilotAgent(session_id="session-1", user_id="10001")
+@pytest.mark.parametrize("with_invocations", [False, True])
+def test_streaming_agent_uses_non_streaming_llm_for_model_middlewares(with_invocations):
+    """流式图保持非流式筛选与压缩，并按持久端口正确装配内部常驻工具。"""
+    repository = object() if with_invocations else None
+    data = SimpleNamespace(invocations=repository) if with_invocations else None
+    agent = agent_module.MoviePilotAgent(session_id="session-1", user_id="10001", data=data)
     main_llm = _FakeLLM("main")
     non_streaming_llm = _FakeLLM("non-streaming")
     captured: dict = {}
 
-    class _FakeToolSelectorMiddleware:
-        """记录工具选择中间件初始化参数。"""
+    class _FakeToolSelectorMiddleware(ToolSelectorMiddleware):
+        """保留工具选择和发现目录，仅替换无需调用的测试模型。"""
 
-        def __init__(
-            self,
-            model,
-            max_tools,
-            always_include=None,
-            selection_tools=None,
-        ):
-            """保存测试断言需要的参数。"""
+        def __init__(self, **kwargs):
+            """通过真实构造函数校验启用发现后的工具与状态合同。"""
+            model = kwargs.pop("model")
+            super().__init__(model=None, **kwargs)
             self.model = model
-            self.max_tools = max_tools
-            self.always_include = always_include or []
-            self.selection_tools = selection_tools or []
 
     def _fake_create_agent(**kwargs):
         """捕获 create_agent 参数。"""
@@ -302,11 +302,55 @@ def test_streaming_agent_uses_non_streaming_llm_for_model_middlewares():
         "execute_command",
         "agent_task",
         "read_skill",
+        PLAN_TOOL_NAME,
+        READ_TOOL_RESULT_NAME,
+        *([GET_TOOL_EXECUTION_NAME] if with_invocations else []),
+        TOOL_DISCOVERY_NAME,
     ]
     assert tool_selector_middleware.selection_tools[: len(fake_tools)] == fake_tools
     assert [getattr(tool, "name", None) for tool in tool_selector_middleware.selection_tools[len(fake_tools) :]] == [
-        "read_skill"
+        "read_skill", PLAN_TOOL_NAME, READ_TOOL_RESULT_NAME,
+        *([GET_TOOL_EXECUTION_NAME] if with_invocations else []), TOOL_DISCOVERY_NAME,
     ]
+    middlewares = captured["middleware"]
+    plan_middleware = next(item for item in middlewares if isinstance(item, PlanMiddleware))
+    output_middleware = next(item for item in middlewares if isinstance(item, ToolOutputMiddleware))
+    invocation_middlewares = [item for item in middlewares if isinstance(item, InvocationMiddleware)]
+    compaction_middleware = next(item for item in middlewares if isinstance(item, FinalRequestCompactionMiddleware))
+    assert compaction_middleware.summarizer.model is non_streaming_llm
+    assert [item.name for item in middlewares] == [
+        "AgentPolicyMiddleware",
+        "ToolOutputMiddleware",
+        *(["InvocationMiddleware"] if with_invocations else []),
+        "SkillsMiddleware",
+        "JobsMiddleware",
+        "RuntimeConfigMiddleware",
+        "PlanMiddleware",
+        "MemoryMiddleware",
+        "PatchToolCallsMiddleware",
+        "_FakeToolSelectorMiddleware",
+        "FinalRequestCompactionMiddleware",
+        "VisionMiddleware",
+        "UsageMiddleware",
+    ]
+    policy_middleware = middlewares[0]
+    assert output_middleware.context is policy_middleware.context
+    assert bool(invocation_middlewares) is with_invocations
+    if with_invocations:
+        assert invocation_middlewares[0].repository is repository
+        assert invocation_middlewares[0].context is policy_middleware.context
+        assert invocation_middlewares[0]._guarded_tools == tuple(fake_tools)
+    else:
+        assert policy_middleware.catalog.resolve_unique(GET_TOOL_EXECUTION_NAME) is None
+    internal_tools = [
+        *plan_middleware.tools, *output_middleware.tools, *tool_selector_middleware.tools,
+        *(tool for middleware in invocation_middlewares for tool in middleware.tools),
+    ]
+    for internal_tool in internal_tools:
+        assert policy_middleware.catalog.resolve_unique(internal_tool.name).tool is internal_tool
+        assert internal_tool in tool_selector_middleware.selection_tools
+        assert internal_tool.name in tool_selector_middleware.always_include
+        assert internal_tool not in captured["tools"]
 
 
 def test_non_streaming_agent_reuses_main_llm_for_summary():
@@ -817,42 +861,7 @@ def test_real_agent_does_not_compact_request_below_threshold():
 
 
 def test_real_agent_executes_compacted_tool_call_once():
-    """压缩不得重试主模型或重复执行工具事务。"""
-    calls = []
-
-    @tool
-    def record_value(value: str) -> str:
-        """记录工具调用次数。"""
-        calls.append(value)
-        return value
-
-    summarizer = _CountingSummaryLLM("summary")
-    model = _RecordingChatModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[{"name": "record_value", "args": {"value": "once"}, "id": "call-1"}],
-            ),
-            AIMessage(content="工具完成"),
-        ],
-        profile={"max_input_tokens": 2048},
-    )
-    graph = _real_compaction_graph(
-        model=model,
-        summarizer=summarizer,
-        tools=[record_value],
-    )
-
-    result = asyncio.run(graph.ainvoke({"messages": _oversized_final_request_history()}))
-
-    assert calls == ["once"]
-    assert summarizer.calls == 1
-    assert len(model.seen_messages) == 2
-    assert result["messages"][-1].content == "工具完成"
-
-
-def test_real_agent_does_not_recompact_small_tool_result_during_same_loop():
-    """小工具结果不会让同一轮请求重新压缩。"""
+    """压缩只执行一次工具事务，小工具结果也不得触发同轮二次压缩。"""
     calls = []
 
     @tool
@@ -1141,7 +1150,7 @@ def test_summary_failure_preserves_database_history():
 
     isolated_memory.clear_memory(session_id, user_id)
     recovered_messages = isolated_memory.get_agent_messages(session_id, user_id)
-    assert result == "智能助手执行失败: 会话上下文压缩失败，原有上下文已保留，请稍后重试"
+    assert result == "智能助手执行失败，请稍后重试"
     assert agent._compiled_agent_bundle is None
     assert [message.content for message in recovered_messages] == ["数据库中的旧事实"]
     send_usage_event.assert_called_once()

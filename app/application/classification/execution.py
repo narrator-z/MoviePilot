@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from enum import Enum
-from typing import Protocol, TypeAlias
+from typing import Final, Protocol, TypeAlias, cast
 
 from app.application.classification.legacy import (
     build_legacy_tmdb_extension_facts,
@@ -16,6 +16,7 @@ from app.domain.classification.facts import build_classification_facts
 from app.domain.context import MediaInfo, MusicAlbumInfo, MusicArtistInfo, MusicInfo
 from app.schemas.category import (
     CategoryConfig,
+    ClassificationEvaluation,
     ClassificationFacts,
     ClassificationFactValue,
     ClassificationPolicy,
@@ -34,6 +35,9 @@ ClassificationExtensionFactsProvider: TypeAlias = Callable[
 ]
 """按当前插件注册表校验并提供来源扩展分类事实的端口。"""
 
+_LEGACY_TMDB_SOURCE: Final[str] = "themoviedb"
+_LEGACY_RULE_PREFIX: Final[str] = "legacy."
+
 
 class ClassificationRuntimePort(Protocol):
     """分类执行只需要的活动策略与 legacy 快照端口。"""
@@ -49,6 +53,13 @@ class ClassificationRuntimePort(Protocol):
 
 class ClassificationExecutionPort(Protocol):
     """Chain、订阅和整理应用层共享的纯分类执行端口。"""
+
+    async def async_build_facts(
+        self,
+        media: ClassificationSubject,
+    ) -> ClassificationFacts | None:
+        """异步构造与实际分类一致的完整事实快照，不写入媒体或策略。"""
+        ...
 
     def finalize(
         self,
@@ -117,6 +128,26 @@ class ClassificationExecutionService:
         self._runtime = runtime
         self._extension_facts_provider = extension_facts_provider
         self._enrichment = enrichment
+
+    async def async_build_facts(
+        self,
+        media: ClassificationSubject,
+    ) -> ClassificationFacts | None:
+        """构造影响分析使用的完整事实，并复用插件扩展与跨来源补充规则。"""
+        finalized, policy, facts, _ = self._prepare(
+            media,
+            extensions=None,
+            effective_override=None,
+            refresh=False,
+        )
+        if policy is None or facts is None:
+            return None
+        if self._enrichment is not None:
+            try:
+                facts = await self._enrichment.async_enrich(policy, facts, finalized)
+            except Exception:  # noqa: BLE001  详情补充失败时保留主来源事实
+                pass
+        return facts
 
     def finalize(
         self,
@@ -251,6 +282,9 @@ class ClassificationExecutionService:
     ) -> ClassificationSubject:
         """应用纯求值结果和人工覆盖，并更新兼容目录分类。"""
         evaluation = ClassificationEvaluator.evaluate(policy, facts)
+        legacy_evaluation = _evaluate_legacy_tmdb_compatibility(policy, facts)
+        if legacy_evaluation is not None and _uses_fallback(evaluation.result):
+            evaluation = legacy_evaluation
         result = evaluation.result.model_copy(deep=True)
         if effective_override:
             result.effective = effective_override.model_copy(deep=True)
@@ -317,6 +351,94 @@ class ClassificationExecutionService:
         effective = effective_override or selection
         if effective:
             media.set_library_category(_category_path_snapshot(effective))
+
+
+def _evaluate_legacy_tmdb_compatibility(
+    policy: ClassificationPolicy,
+    facts: ClassificationFacts,
+) -> ClassificationEvaluation | None:
+    """让旧 TMDB 分类规则消费非 TMDB 来源已经拥有的标准事实。"""
+    if facts.identity.media_source == _LEGACY_TMDB_SOURCE:
+        return None
+    legacy_rules = [
+        rule for rule in policy.rules if rule.id.startswith(_LEGACY_RULE_PREFIX)
+    ]
+    if not legacy_rules:
+        return None
+    compatibility_policy = policy.model_copy(
+        deep=True,
+        update={"rules": legacy_rules},
+    )
+    compatibility_facts = _legacy_tmdb_compatibility_facts(policy, facts)
+    return ClassificationEvaluator.evaluate(
+        compatibility_policy,
+        compatibility_facts,
+    )
+
+
+def _legacy_tmdb_compatibility_facts(
+    policy: ClassificationPolicy,
+    facts: ClassificationFacts,
+) -> ClassificationFacts:
+    """把跨来源标准字段投影到旧规则的 TMDB 扩展命名空间。"""
+    extensions = {
+        str(source): {str(key): value for key, value in values.items()}
+        for source, values in facts.extensions.items()
+    }
+    legacy_info = _legacy_tmdb_info_from_standard_facts(facts)
+    for source, values in build_legacy_tmdb_extension_facts(
+        policy,
+        legacy_info,
+    ).items():
+        target = extensions.setdefault(source, {})
+        for field, value in values.items():
+            target.setdefault(field, value)
+    identity = facts.identity.model_copy(
+        update={"media_source": _LEGACY_TMDB_SOURCE}
+    )
+    return cast(
+        ClassificationFacts,
+        facts.model_copy(
+            deep=True,
+            update={"identity": identity, "extensions": extensions},
+        ),
+    )
+
+
+def _legacy_tmdb_info_from_standard_facts(
+    facts: ClassificationFacts,
+) -> dict[str, object]:
+    """构造旧规则投影所需的有限 TMDB 字段，不伪造缺失事实。"""
+    media = facts.media
+    info: dict[str, object] = {}
+    if media.language:
+        info["original_language"] = media.language
+    if media.countries:
+        countries = [str(country) for country in media.countries if country]
+        if countries:
+            info["origin_country"] = countries
+            info["production_countries"] = [
+                {"iso_3166_1": country} for country in countries
+            ]
+    if media.year is not None:
+        info["release_date"] = str(media.year)
+    for field in (
+        "adult",
+        "runtime",
+        "content_rating",
+        "companies",
+        "networks",
+    ):
+        value = getattr(media, field, None)
+        if value not in (None, "", []):
+            info[field] = value
+    return info
+
+
+def _uses_fallback(result: ClassificationResult) -> bool:
+    """判断主来源求值是否没有命中具体分类规则。"""
+    selection = result.effective or result.recommended
+    return selection is None or selection.source in {None, "fallback", "source_fallback"}
 
 
 def _classification_extensions(

@@ -246,6 +246,19 @@ class TransferHistoryOper(DbOper):
             )
         )
 
+    async def async_get_by_transfer_task_id(
+            self,
+            *,
+            task_id: str,
+    ) -> Optional[TransferHistory]:
+        """异步按稳定整理任务标识读取终态历史。"""
+        return await self._execute_async_query(
+            lambda session: TransferHistory.async_get_by_transfer_task_id(
+                session,
+                task_id=task_id,
+            )
+        )
+
     def get_success_by_src(
             self, src: str, storage: Optional[str] = None
     ) -> Optional[TransferHistory]:
@@ -550,6 +563,20 @@ class TransferHistoryOper(DbOper):
             self._db,
             historyid,
             download_hash,
+        )
+
+    def stage_update_cleanup_status(
+            self,
+            historyid: int,
+            values: dict[str, Optional[str]],
+    ) -> None:
+        """在调用方事务内暂存媒体入库后的下载器清理结果。"""
+        if not isinstance(self._db, Session):
+            raise RuntimeError("整理历史同步更新需要调用方提供同步 Session")
+        TransferHistory.update_cleanup_status(
+            self._db,
+            historyid,
+            values,
         )
 
     def list_by_date(self, date: str) -> List[TransferHistory]:

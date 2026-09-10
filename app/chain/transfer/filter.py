@@ -2,7 +2,7 @@
 import threading
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Optional, Protocol, Union
+from typing import Any, Dict, Optional, Protocol, Union
 
 from app.application.configuration import (
     get_chain_runtime_config_snapshot,
@@ -19,13 +19,14 @@ from app.chain._contracts import TransferMixinHost
 from app.chain.media import MediaChain
 from app.chain.storage import StorageChain
 from app.chain.transfer.contract import _TransferOwnerBase
-from app.domain.context import MediaInfo, MusicInfo
+from app.domain.context import MediaInfo, MusicAlbumInfo, MusicInfo
 from app.domain.media import normalize_music_type
 from app.domain.meta.metamusic import MetaMusic
 from app.runtime.log import logger
 from app.schemas.transfer import TransferInfo
 from app.schemas.types import (
     MUSIC_ENTITY_ALBUM,
+    MUSIC_ENTITY_RECORDING,
     MediaType,
 )
 from app.schemas.workflow import FileItem
@@ -165,6 +166,8 @@ class FileFilterMixin(_TransferOwnerBase):
             file_item: FileItem,
             file_path: Path,
             file_meta: MetaMusic,
+            music_release_regions: Optional[list[str]] = None,
+            music_release_scripts: Optional[list[str]] = None,
     ) -> tuple[MetaMusic, Optional[MusicInfo]]:
         """为缺少远端身份的本地音频尝试目录级专辑匹配，命中后回填文件元数据。
 
@@ -175,7 +178,14 @@ class FileFilterMixin(_TransferOwnerBase):
         if file_meta.media_id or getattr(file_item, "storage", "local") != "local":
             return file_meta, None
         try:
-            matched = MediaChain().recognize_music_album_directory(file_path.parent)
+            if music_release_regions is None and music_release_scripts is None:
+                matched = MediaChain().recognize_music_album_directory(file_path.parent)
+            else:
+                matched = MediaChain().recognize_music_album_directory(
+                    file_path.parent,
+                    music_release_regions=music_release_regions,
+                    music_release_scripts=music_release_scripts,
+                )
         except Exception as err:
             logger.debug(f"音乐专辑目录匹配失败：{file_path} - {err}")
             return file_meta, None
@@ -183,6 +193,15 @@ class FileFilterMixin(_TransferOwnerBase):
         if not info or not info.media_id:
             return file_meta, None
         logger.info(f"{file_path.name} 通过专辑目录匹配识别为：{info.artist} - {info.title}")
+        return cls._merge_music_track_context(file_meta, info)
+
+    @classmethod
+    def _merge_music_track_context(
+            cls,
+            file_meta: MetaMusic,
+            info: MusicInfo,
+    ) -> tuple[MetaMusic, MusicInfo]:
+        """以已选发行版的曲目身份更新文件元数据，同时保留本地音频参数。"""
         merged_meta = deepcopy(file_meta)
         # 保留本地音频的实际技术参数，仅回填身份和名称字段
         if info.title:
@@ -216,6 +235,7 @@ class FileFilterMixin(_TransferOwnerBase):
         merged_info.set_library_category(info.library_category)
         merged_info.metadata_category = info.metadata_category
         merged_info.classification = deepcopy(info.classification)
+        merged_info.classification_facts = dict(info.classification_facts)
         merged_info.genres = list(info.genres)
         merged_info.tags = list(info.tags)
         merged_info.artist_country = info.artist_country
@@ -224,6 +244,54 @@ class FileFilterMixin(_TransferOwnerBase):
         merged_info.listen_count = info.listen_count
         merged_info.raw_data = deepcopy(info.raw_data)
         return merged_meta, merged_info
+
+    def _selected_music_track_map(
+            self,
+            file_items: list[tuple[FileItem, bool]],
+            album: Optional[MusicAlbumInfo],
+    ) -> tuple[dict[str, MusicInfo], Optional[str]]:
+        """对齐手选发行版的全部曲目，并拒绝混有重复版本的目录。"""
+        if not album:
+            return {}, None
+        audio_paths = [
+            Path(item.path)
+            for item, _ in file_items
+            if item.storage == "local" and item.path and self._is_audio_file(item)
+        ]
+        if not audio_paths:
+            return {}, None
+        aligned_tracks = MediaChain._align_selected_music_album(audio_paths, album)
+        if len(aligned_tracks) != len(audio_paths):
+            return {}, (
+                f"所选专辑只能对齐 {len(aligned_tracks)} / {len(audio_paths)} "
+                "个音频文件，目录中可能包含重复版本或额外曲目；"
+                "请分别选择单个版本后再整理"
+            )
+        selected_tracks: dict[str, MusicInfo] = {}
+        for resolved_path, track in aligned_tracks.items():
+            selected_track = deepcopy(track)
+            selected_track.set_library_category(album.library_category)
+            selected_track.classification = deepcopy(album.classification)
+            selected_tracks[resolved_path] = selected_track
+        return selected_tracks, None
+
+    def _selected_music_task_context(
+            self,
+            file_item: FileItem,
+            file_path: Path,
+            file_meta: Any,
+            selected_tracks: dict[str, MusicInfo],
+            fallback: Optional[Union[MediaInfo, MusicInfo]],
+    ) -> tuple[Any, Optional[Union[MediaInfo, MusicInfo]]]:
+        """为当前任务应用手选发行版曲目，未命中时返回原上下文。"""
+        selected = (
+            selected_tracks.get(str(file_path.resolve()))
+            if file_item.storage == "local"
+            else None
+        )
+        if selected and isinstance(file_meta, MetaMusic):
+            return self._merge_music_track_context(file_meta, selected)
+        return file_meta, fallback
 
     @staticmethod
     def _download_history_music_type(
@@ -251,8 +319,18 @@ class FileFilterMixin(_TransferOwnerBase):
             cls,
             download_history: Optional[DownloadHistorySnapshot],
             file_path: Path,
+            discard_recording_identity: bool = False,
+            discard_saved_identity: bool = False,
     ) -> tuple[Optional[MetaMusic], Optional[MusicInfo]]:
-        """从下载历史恢复音乐上下文，并用当前音频标签覆盖曲目级字段。"""
+        """从下载历史恢复音乐上下文，并用当前音频标签覆盖曲目级字段。
+
+        种子未提供的语义字段由历史中已选媒体补缺；实体类型和来源身份始终
+        沿用已选媒体，不根据专辑名或文件曲名在单曲与专辑之间转换。
+        多音轨批次误带单曲身份时只保留文件自身标签，避免把同一 recording
+        身份传播到整张专辑；调用方随后可使用目录级证据重新匹配专辑。
+        手动选中多条历史且未要求复用历史身份时，专辑身份也必须丢弃，确保
+        目录级识别能够重新补齐发行版、分类和规范名称。
+        """
         note = getattr(download_history, "note", None)
         music_note = note.get("music") if isinstance(note, dict) else None
         if not isinstance(music_note, dict) or music_note.get("version") != 1:
@@ -264,7 +342,35 @@ class FileFilterMixin(_TransferOwnerBase):
             return None, None
 
         file_tags = MediaChain.read_path_meta(file_path)
+        should_discard_identity = discard_saved_identity or (
+            discard_recording_identity
+            and saved_info.music_type == MUSIC_ENTITY_RECORDING
+        )
+        if should_discard_identity:
+            # 共享 recording 上下文可能包含错误的专辑、年份等字段；整张丢弃，
+            # 只保留当前文件实际标签，目录级匹配失败时也不会回落到错误身份。
+            file_meta = deepcopy(file_tags)
+            file_meta.org_string = file_path.name
+            file_meta.title = file_meta.title or file_path.stem
+            return file_meta, None
+
         file_meta = deepcopy(saved_meta)
+        # 新旧历史都可能仅在 media 中保留已选专辑；先补缺，再沿用文件标签的
+        # 覆盖规则。音质不从目标媒体补写，曲名仍取当前文件，避免混淆资源证据。
+        for field_name in (
+                "artists",
+                "album",
+                "album_artist",
+                "year",
+                "disc_number",
+                "track_number",
+                "total_tracks",
+                "version",
+                "isrc",
+        ):
+            saved_value = getattr(saved_info, field_name, None)
+            if getattr(file_meta, field_name, None) in (None, "", []) and saved_value not in (None, "", []):
+                setattr(file_meta, field_name, deepcopy(saved_value))
         file_meta.org_string = file_path.name
         # 曲目标题始终优先使用当前文件自身的标签（缺失时回退为文件名），
         # 防止整包目录继续沿用订阅/下载标题（单曲名、专辑名等）导致所有文件重名。

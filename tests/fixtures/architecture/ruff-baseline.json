@@ -17,9 +17,6 @@
   "app/agent/llm/tools.py": {
     "I001": 1
   },
-  "app/agent/loader.py": {
-    "I001": 1
-  },
   "app/agent/middleware/memory.py": {
     "I001": 1
   },
@@ -33,9 +30,6 @@
     "I001": 1
   },
   "app/agent/tools/impl/ask_user_choice.py": {
-    "I001": 1
-  },
-  "app/agent/tools/impl/browse_webpage.py": {
     "I001": 1
   },
   "app/agent/tools/impl/recognize_captcha.py": {
@@ -119,9 +113,6 @@
   "app/db/uow.py": {
     "I001": 1
   },
-  "app/db/worker.py": {
-    "I001": 1
-  },
   "app/doctor/__init__.py": {
     "I001": 1
   },
@@ -147,9 +138,6 @@
   "app/domain/meta/metabase.py": {
     "I001": 1
   },
-  "app/domain/meta/metamusic.py": {
-    "I001": 1
-  },
   "app/domain/meta/metavideo.py": {
     "I001": 1
   },
@@ -167,13 +155,7 @@
     "E731": 1,
     "I001": 1
   },
-  "app/domain/metainfo.py": {
-    "I001": 1
-  },
   "app/domain/scraper.py": {
-    "I001": 1
-  },
-  "app/domain/site.py": {
     "I001": 1
   },
   "app/domain/title.py": {
@@ -323,9 +305,6 @@
   "app/modules/lrclib/__init__.py": {
     "I001": 1
   },
-  "app/modules/musicbrainz/cache.py": {
-    "I001": 1
-  },
   "app/modules/navidrome/__init__.py": {
     "F401": 2,
     "I001": 1
@@ -362,9 +341,6 @@
   "app/modules/slack/__init__.py": {
     "F401": 2,
     "F541": 1,
-    "I001": 1
-  },
-  "app/modules/slack/slack.py": {
     "I001": 1
   },
   "app/modules/subtitle/__init__.py": {
@@ -459,9 +435,6 @@
   "app/monitor/__init__.py": {
     "I001": 1
   },
-  "app/monitor/monitor.py": {
-    "I001": 1
-  },
   "app/monitor/poller.py": {
     "I001": 1
   },
@@ -516,9 +489,6 @@
   "app/runtime/reload.py": {
     "I001": 1
   },
-  "app/runtime/state.py": {
-    "I001": 1
-  },
   "app/schemas/common.py": {
     "I001": 1
   },
@@ -529,12 +499,6 @@
     "I001": 1
   },
   "app/schemas/message.py": {
-    "I001": 1
-  },
-  "app/schemas/response.py": {
-    "I001": 1
-  },
-  "app/schemas/types.py": {
     "I001": 1
   },
   "app/sdk/_legacy/user.py": {
@@ -632,13 +596,7 @@
   "tests/test_agent_tokens_events.py": {
     "I001": 1
   },
-  "tests/test_agent_tool_result_policy.py": {
-    "I001": 1
-  },
   "tests/test_agent_tool_timeouts.py": {
-    "I001": 1
-  },
-  "tests/test_api_authorization.py": {
     "I001": 1
   },
   "tests/test_async_db_pooling.py": {
@@ -690,9 +648,6 @@
   "tests/test_db_session_lifecycle.py": {
     "I001": 1
   },
-  "tests/test_docker_entrypoint_permissions.py": {
-    "I001": 1
-  },
   "tests/test_docker_payload_contract.py": {
     "I001": 1
   },
@@ -707,9 +662,6 @@
     "I001": 1
   },
   "tests/test_event_dispatch_snapshot.py": {
-    "I001": 1
-  },
-  "tests/test_execute_command_tool.py": {
     "I001": 1
   },
   "tests/test_extensible_media_source_migration.py": {
@@ -794,9 +746,6 @@
   "tests/test_media_scrape_endpoint.py": {
     "I001": 1
   },
-  "tests/test_media_search_source_selection.py": {
-    "I001": 1
-  },
   "tests/test_media_source_signature_compatibility.py": {
     "I001": 1
   },
@@ -858,9 +807,6 @@
     "I001": 1
   },
   "tests/test_music_torrents.py": {
-    "I001": 1
-  },
-  "tests/test_musicbrainz_module.py": {
     "I001": 1
   },
   "tests/test_navidrome_module.py": {
@@ -952,9 +898,6 @@
     "E402": 5,
     "I001": 2
   },
-  "tests/test_system_utils.py": {
-    "I001": 1
-  },
   "tests/test_systemconfig_oper.py": {
     "I001": 1
   },
@@ -995,9 +938,6 @@
     "I001": 1
   },
   "tests/test_transfer_download_history_oper_sessions.py": {
-    "I001": 1
-  },
-  "tests/test_transfer_history_retransfer.py": {
     "I001": 1
   },
   "tests/test_transfer_rename_build_event.py": {

@@ -393,7 +393,7 @@ moviepilot version
 
 - `start` 会先启动后端，再启动前端
 - `start --safe` 会以安全模式启动后端，本次启动跳过插件、调度器、监控、命令和工作流等后台扩展能力，不修改用户配置
-- `MOVIEPILOT_AUTO_UPDATE` 默认关闭；仅 `dev` 保留启动前跟踪当前 v3 开发分支的行为，更新失败只告警，不阻断当前启动
+- `MOVIEPILOT_AUTO_UPDATE` 为布尔开关，默认 `false`；只有 `true` 启用后台 Release 检查和版本提醒，保存后定时服务热更新。`AUTO_UPDATE_RESOURCE` 独立控制站点资源检查和提醒；任一开关开启即启用检测服务，且只检查对应目标，两者均关闭才移除服务。`MOVIEPILOT_UPDATE_DEV` 为独立布尔开关，默认 `false`；设为 `true` 时在每次启动/重启前跟踪当前 v3 开发分支，更新失败只告警，不阻断当前启动。旧 `dev/release` 值统一转换为 `MOVIEPILOT_AUTO_UPDATE=true`；旧 `dev` 在未显式配置新开关时迁移为 `MOVIEPILOT_UPDATE_DEV=true`
 - Release 更新由后台每 6 小时检查 GitHub Release；管理员确认后先静默下载安装包并显示进度，下载完成后再次确认重启，启动阶段只安装已下载且通过 SHA-256 校验的包
 - 页面中的“稍后”会在当前浏览器暂停提醒 24 小时，“忽略此版本”只屏蔽当前版本；出现更高版本时会重新提示
 - 通过系统内置的重启入口触发重启时，本地 CLI 安装模式也会复用同一套前后端进程管理完成重启
@@ -464,10 +464,12 @@ moviepilot config set NGINX_PORT 3000
 moviepilot config set API_TOKEN your-token-here
 moviepilot config set ACOUSTID_API_KEY your-acoustid-client-key
 moviepilot config set LRCLIB_BASE_URL https://lrclib.net
+moviepilot config set AMLL_BASE_URL https://api.amll.dev
 moviepilot config set LYRICS_BATCH_TIMEOUT 120
 moviepilot config set LYRICS_PROVIDER_RETRY_MAX_WAIT 5
-moviepilot config set MUSIXMATCH_API_KEY your-authorized-api-key
 moviepilot config set MUSIC_METADATA_TO_SIMPLIFIED true
+moviepilot config set MUSIC_RELEASE_REGION_PRIORITY CN,TW,HK
+moviepilot config set MUSIC_RELEASE_SCRIPT_PRIORITY Hans,Hant,Latn
 ```
 
 查看所有可配置项：
@@ -487,8 +489,10 @@ moviepilot config describe API_TOKEN --show-secrets
 - `config keys` 显示配置项名称、类型和默认值
 - `ACOUSTID_API_KEY` 内置可用默认值，也可在前端“高级设置 - 媒体”或配置命令中覆盖；本地安装需要系统可执行路径中存在 Chromaprint `fpcalc`，官方 Docker 镜像已内置
 - `LRCLIB_BASE_URL` 默认使用官方实例，也可指向兼容 LRCLIB API 的自建实例；`LYRICS_BATCH_TIMEOUT` 限制单次专辑刮削的在线歌词总预算，`LYRICS_PROVIDER_RETRY_MAX_WAIT` 决定长 `Retry-After` 进入来源冷却而非阻塞批次
-- `THEAUDIODB_API_KEY` 用于音乐元数据及纯文本歌词兜底，默认 `123` 为官方公开 V1 Key；`MUSIXMATCH_API_KEY` 留空时不加载 Musixmatch，配置后只调用官方或 `MUSIXMATCH_BASE_URL` 指定的授权代理，使用者必须遵守对应账户的歌词存储和展示授权
+- `AMLL_BASE_URL` 默认使用无需 API Key 的 AMLL TTML API，也可指向兼容原生接口的自建实例。来源优先按 ISRC 查询，再严格核对歌曲、艺术家及已有专辑信息；下载的 TTML 主唱时间轴转换为 Lyricsfile 和 LRC，限流时短暂冷却并让其他歌词来源继续处理
+- `THEAUDIODB_API_KEY` 用于音乐元数据及纯文本歌词兜底，默认 `123` 为官方公开 V1 Key；额外歌词来源可通过插件提供，接入方式见[歌词插件开发说明](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/faq/21-register-lyrics-provider.md)
 - `MUSIC_METADATA_TO_SIMPLIFIED` 默认开启；开启后会将识别结果中的曲名、艺术家、专辑和分类等标准音乐元数据转换为简体中文，不转换歌词与来源原始响应
+- `MUSIC_RELEASE_REGION_PRIORITY` 与 `MUSIC_RELEASE_SCRIPT_PRIORITY` 分别使用逗号分隔的 ISO 3166-1 地区代码和 ISO 15924 文字代码；仅在 MusicBrainz 候选结构同样可信时作为发行版本排序依据，最多使用前三项
 - `config describe` 显示单个配置项的类型、默认值和当前值
 
 ## 数据库备份命令

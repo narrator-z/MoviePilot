@@ -17,9 +17,9 @@ from app.application.history import (
     resolve_history,
 )
 from app.application.transfer.execution import (
-    TransferExecutionCommand,
     TransferExecutionRepository,
 )
+from app.application.transfer.recovery import TransferRecoveryCommand
 from app.chain._contracts import TransferMixinHost
 from app.chain.storage import StorageChain
 from app.chain.subscribe.facade import SubscribeChain
@@ -451,6 +451,39 @@ class ManualHistoryMixin(_TransferOwnerBase):
         )
         return history if self._is_successful_move_history(history) else None
 
+    def _has_successful_manual_transfer_history(self, fileitem: FileItem) -> bool:
+        """仅为跳过选项匹配同存储的成功历史，源失败记录不得遮蔽成功移动目标。"""
+        return bool(self._get_successful_manual_transfer_histories(fileitem))
+
+    def _get_successful_manual_transfer_histories(
+            self, fileitem: FileItem, recursive: bool = False,
+    ) -> List[TransferHistorySnapshot]:
+        """统一界面检测与候选过滤；候选目录本身按路径匹配，只有界面目录检测递归。"""
+        if not fileitem.path:
+            return []
+        repository = self.transfer_history_repository
+        storage = fileitem.storage or "local"
+        histories = repository.list_success_by_src(fileitem.path, storage=storage, recursive=recursive)
+        histories.extend(repository.list_success_move_by_dest(fileitem.path, storage=storage, recursive=recursive))
+        return histories
+
+    def _filter_manual_transfer_history(
+            self,
+            fileitems: List[Tuple[FileItem, bool]],
+            skip_success: bool,
+            record_skipped: Callable[[FileItem], None],
+    ) -> List[Tuple[FileItem, bool]]:
+        """规划前过滤成功记录，预览和执行共用候选范围，保留失败项的既有重试规则。"""
+        if not skip_success:
+            return fileitems
+        pending = []
+        for fileitem, bluray_dir in fileitems:
+            if self._has_successful_manual_transfer_history(fileitem):
+                record_skipped(fileitem)
+            else:
+                pending.append((fileitem, bluray_dir))
+        return pending
+
     def get_manual_transfer_histories(
             self,
             fileitems: List[FileItem],
@@ -461,32 +494,14 @@ class ManualHistoryMixin(_TransferOwnerBase):
         :param fileitems: 待查询的文件或目录项
         :return: 去重后的成功整理记录
         """
-        transfer_history_oper = self.transfer_history_repository
         histories: Dict[int, TransferHistorySnapshot] = {}
         for fileitem in fileitems or []:
             if not fileitem or not fileitem.path:
                 continue
-            storage = fileitem.storage or "local"
-            if fileitem.type == "dir":
-                matched_histories = transfer_history_oper.list_success_by_src(
-                    fileitem.path,
-                    storage=storage,
-                    recursive=True,
-                )
-                matched_histories.extend(
-                    transfer_history_oper.list_success_move_by_dest(
-                        fileitem.path,
-                        storage=storage,
-                        recursive=True,
-                    )
-                )
-            else:
-                history = self._get_manual_transfer_history(
-                    fileitem=fileitem,
-                    transfer_history_oper=transfer_history_oper,
-                    include_move_dest=True,
-                )
-                matched_histories = [history] if history and history.status else []
+            matched_histories = self._get_successful_manual_transfer_histories(
+                fileitem,
+                recursive=fileitem.type == "dir",
+            )
 
             for history in matched_histories:
                 histories[history.id] = history
@@ -501,7 +516,7 @@ class ManualHistoryMixin(_TransferOwnerBase):
         """将 durable 历史重试交还持久调度器，旧历史返回 ``None``。
 
         普通重试和 AI 接管只登记重试意图；显式重新整理由
-        ``_delete_manual_transfer_history`` 先放弃确定失败任务，再重新准入。
+        ``_delete_manual_transfer_history`` 先放弃无有效租约的旧任务，再重新准入。
 
         :param history: 整理历史
         :param requested_by: 发起重试的稳定入口身份
@@ -518,22 +533,18 @@ class ManualHistoryMixin(_TransferOwnerBase):
             history: TransferHistorySnapshot,
             transfer_history_oper: TransferHistoryRepository,
     ) -> Tuple[bool, str]:
-        """删除手动重整历史；失败 durable 回执先原子放弃再清理旧目标。"""
+        """显式重新规划先原子放弃无有效租约的旧任务，再清理历史和旧目标。
+
+        用户已明确重新整理，缺失结算版本或停在重试、人工复核态的旧记录也必须
+        能放弃；普通重试仍由持久调度器沿原计划继续，有效租约拒绝任何清理。
+        """
         task_id = getattr(history, "transfer_task_id", None)
         if task_id:
-            settlement_revision = getattr(
-                history,
-                "transfer_settlement_revision",
-                None,
-            )
-            if not settlement_revision:
-                return False, "持久整理失败记录缺少结算版本，请刷新后重试"
-            discard = TransferExecutionCommand(
+            discard = TransferRecoveryCommand(
                 self.transfer_execution_repository
-            ).discard_failed(
+            ).discard_corrupt_by_history(
                 task_id=task_id,
                 history_id=history.id,
-                settlement_revision=settlement_revision,
             )
             if not discard.discarded:
                 return False, discard.message
@@ -542,14 +553,17 @@ class ManualHistoryMixin(_TransferOwnerBase):
                 and not ManualHistoryMixin._is_successful_move_history(history)
         ):
             if not isinstance(history.dest_fileitem, dict):
-                return False, "目标文件历史数据无效"
+                return False, "目标文件历史数据无效，请删除该整理记录后从文件管理重新整理"
             dest_fileitem = FileItem(**history.dest_fileitem)
             storage_chain = StorageChain()
             if (
                     storage_chain.exists(dest_fileitem)
                     and not storage_chain.delete_media_file(dest_fileitem)
             ):
-                return False, f"{dest_fileitem.path} 删除失败"
+                return False, (
+                    f"旧目标文件 {dest_fileitem.path} 删除失败，请检查媒体库权限，"
+                    "或手动删除该文件后重试"
+                )
         transfer_history_oper.delete(history.id)
         # 删除记录是用户显式要求重来，失败计数一并清零，否则重整仍会受上一轮次数限制
         clear_transfer_failures(history.src, history.src_storage)

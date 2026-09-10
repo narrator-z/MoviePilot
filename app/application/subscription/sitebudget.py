@@ -15,14 +15,43 @@ class SubscriptionSearchCancelled(RuntimeError):
     """表示订阅搜索在可取消预算等待点终止。"""
 
 
-class SubscriptionSiteBudgetUnavailable(RuntimeError):
-    """表示站点仍处于错误冷却或已有未释放租约。"""
+@dataclass(frozen=True, slots=True)
+class SubscriptionSiteBudgetDeferral:
+    """记录一次站点预算冲突及该站点最早可再次尝试的时间。"""
 
-    def __init__(self, *, site_id: int, retry_at: str) -> None:
-        """保存站点和下一次可尝试时间，供批次聚合失败展示。"""
-        super().__init__(f"站点 {site_id} 冷却或已有在途搜索，最早可重试：{retry_at}")
+    site_id: int
+    retry_at: str
+    wait_reason: Optional[str] = None
+
+
+class SubscriptionSearchDeferred(RuntimeError):
+    """表示订阅搜索未失败，而是应在站点预算可用后重新入队。"""
+
+    def __init__(
+        self, *, retry_at: str, site_ids: tuple[int, ...], wait_reason: Optional[str] = None,
+    ) -> None:
+        """保存队列恢复所需的时间和站点，避免把临时等待写成错误。"""
+        super().__init__("站点冷却中" if wait_reason == "cooldown" else "等待站点")
+        self.retry_at = retry_at
+        self.site_ids = site_ids
+
+
+class SubscriptionSiteBudgetUnavailable(RuntimeError):
+    """表示站点暂时不可用，调用方应记录为等待而非失败。"""
+
+    def __init__(
+        self,
+        *,
+        site_id: int,
+        retry_at: str,
+        wait_reason: Optional[str] = None,
+    ) -> None:
+        """保存站点和下一次可尝试时间，供订阅队列恢复。"""
+        message = "站点正在处理其他搜索，稍后会自动继续" if wait_reason == "busy" else "站点暂时不可用，稍后会自动重试"
+        super().__init__(message)
         self.site_id = site_id
         self.retry_at = retry_at
+        self.wait_reason = wait_reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +63,7 @@ class SiteBudgetClaim:
     retry_at: str
     consecutive_failures: int
     lease_token: Optional[str] = None
+    wait_reason: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +179,10 @@ class SubscriptionSiteBudget:
         clock: Callable[[], datetime] = _utc_now,
         phase_changed: Optional[Callable[[str, Optional[int]], None]] = None,
         metrics: Optional[SubscriptionSiteBudgetMetrics] = None,
+        pending_site_ids: Optional[tuple[int, ...]] = None,
     ) -> None:
-        """保存持久化端口及可注入的时钟和阶段回调。"""
+        """保存站点预算及恢复范围；首次搜索的 pending_site_ids 为 None。"""
+        self.pending_site_ids = pending_site_ids
         self._repository = repository
         self._owner = owner
         self._cancelled = cancelled
@@ -159,6 +191,8 @@ class SubscriptionSiteBudget:
         self._clock = clock
         self._phase_changed = phase_changed
         self._metrics = metrics
+        self._outcome_lock = threading.Lock()
+        self._successful_site_ids: set[int] = set()
 
     def acquire(self, site_id: int) -> SiteBudgetClaim:
         """只认领一次指定站点，未就绪时留待下一次正常调度。"""
@@ -173,10 +207,12 @@ class SubscriptionSiteBudget:
             return claim
         if self._metrics:
             self._metrics.record_unavailable(site_id)
-        self._report_phase("waiting_site_budget", site_id)
+        # 单站点不可用不代表整条订阅已等待；其它站点可能仍在搜索。
+        # 由任务所有者在全部请求收口并持久化续跑时间后发布等待阶段。
         raise SubscriptionSiteBudgetUnavailable(
             site_id=site_id,
             retry_at=claim.retry_at,
+            wait_reason=claim.wait_reason,
         )
 
     def _report_phase(self, phase: str, site_id: Optional[int]) -> None:
@@ -188,6 +224,16 @@ class SubscriptionSiteBudget:
         """把真实请求及返回候选数写入轮次聚合器。"""
         if self._metrics:
             self._metrics.record_request(site_id, candidate_count)
+
+    def record_success(self, site_id: int) -> None:
+        """记录一个已正常完成真实请求的站点。"""
+        with self._outcome_lock:
+            self._successful_site_ids.add(site_id)
+
+    def has_successful_site(self) -> bool:
+        """判断本轮是否至少有一个站点正常完成真实请求。"""
+        with self._outcome_lock:
+            return bool(self._successful_site_ids)
 
     def record_release_failure(self) -> None:
         """把站点租约释放异常写入轮次聚合器。"""
@@ -233,4 +279,4 @@ class SubscriptionSiteBudget:
     def _raise_if_cancelled(self) -> None:
         """在创建站点租约前传播取消或停机。"""
         if self._stop_state.is_system_stopped or self._cancelled():
-            raise SubscriptionSearchCancelled("订阅搜索已取消")
+            raise SubscriptionSearchCancelled("搜索已停止")

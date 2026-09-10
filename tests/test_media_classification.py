@@ -9,6 +9,9 @@ from typing import Any, Callable
 
 import pytest
 
+from app.application.classification.configuration import (
+    build_default_classification_policy,
+)
 from app.domain.classification.evaluator import ClassificationEvaluator
 from app.domain.classification.fields import get_standard_classification_fields
 from app.domain.classification.validation import ClassificationPolicyValidator
@@ -186,6 +189,40 @@ def _leaf(field: str, operator: str, value: Any = _MISSING) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
+    ("album_type", "secondary_types", "category_id", "category_path"),
+    [
+        ("Album", ["Compilation"], "music.compilation", ["Album", "Compilation"]),
+        ("EP", [], "music.ep", ["EP"]),
+        ("Single", [], "music.single", ["Single"]),
+        ("Album", [], "music.album", ["Album"]),
+    ],
+)
+def test_default_music_policy_uses_structured_album_categories(
+    album_type: str,
+    secondary_types: list[str],
+    category_id: str,
+    category_path: list[str],
+) -> None:
+    """默认音乐规则应优先识别精选集，并生成不带空白的安全路径段。"""
+    policy = build_default_classification_policy().model_copy(update={"revision": 1})
+    result = _evaluate(
+        policy,
+        _facts(
+            media_type="音乐",
+            media_source="musicbrainz",
+            values={
+                "music.album_type": album_type,
+                "music.secondary_types": secondary_types,
+            },
+        ),
+    )
+
+    assert result.result.effective is not None
+    assert result.result.effective.category_id == category_id
+    assert result.result.effective.category_path == category_path
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
     ("condition", "fact_values"),
     [
         (_leaf("media.language", "equals", "ja"), {}),
@@ -347,28 +384,6 @@ def test_media_type_fallback_is_used_when_no_category_rule_matches() -> None:
     assert evaluation.result.recommended.category_path == ["未分类"]
     assert evaluation.result.recommended.rule_id is None
     assert evaluation.result.effective.source == "fallback"
-
-
-def test_source_fallback_overrides_only_its_declared_media_source() -> None:
-    payload = _base_policy_payload()
-    payload["source_fallbacks"] = {
-        "themoviedb": {"电影": "movie.hit"},
-    }
-    policy = ClassificationPolicy.model_validate(payload)
-
-    tmdb_evaluation = _evaluate(
-        policy,
-        _facts(media_source="themoviedb"),
-    )
-    douban_evaluation = _evaluate(
-        policy,
-        _facts(media_source="douban"),
-    )
-
-    assert tmdb_evaluation.result.effective.category_id == "movie.hit"
-    assert tmdb_evaluation.result.effective.source == "source_fallback"
-    assert douban_evaluation.result.effective.category_id == "movie.fallback"
-    assert douban_evaluation.result.effective.source == "fallback"
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -617,24 +632,6 @@ def test_every_enabled_media_type_requires_a_fallback() -> None:
     payload["fallbacks"].pop("音乐")
 
     _assert_validation_error(payload, "missing_fallback")
-
-
-@pytest.mark.parametrize(  # type: ignore[misc]
-    ("source_fallbacks", "error_code"),
-    [
-        ({"TheMovieDB": {"电影": "movie.hit"}}, "invalid_fallback_source"),
-        ({"themoviedb": {"电影": "missing"}}, "unknown_source_fallback_category"),
-        ({"themoviedb": {"电影": "tv.fallback"}}, "source_fallback_media_type_mismatch"),
-    ],
-)
-def test_source_fallbacks_must_reference_valid_same_type_categories(
-    source_fallbacks: dict[str, dict[str, str]],
-    error_code: str,
-) -> None:
-    payload = _base_policy_payload()
-    payload["source_fallbacks"] = source_fallbacks
-
-    _assert_validation_error(payload, error_code)
 
 
 def test_extension_field_namespace_must_match_the_restricted_source() -> None:

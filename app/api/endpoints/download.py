@@ -4,7 +4,7 @@ import anyio
 from fastapi import Body, Depends
 
 from app.adapters.web.security.access import verify_token
-from app.api.dependencies.auth import get_current_active_user
+from app.api.dependencies.auth import get_current_active_manage_user, get_current_active_user
 from app.api.dependencies.site import get_site_sync_query_service
 from app.api.principal import ApiPrincipal
 from app.api.response import (
@@ -14,6 +14,7 @@ from app.api.response import (
 )
 from app.application.configuration import get_configured_system_config
 from app.application.directory import DirectoryHelper
+from app.application.download.organization import organize_existing_source
 from app.application.download.tasks import DownloadTaskMutationService
 from app.application.security.url import SecurityUtils
 from app.application.site.query import (
@@ -25,11 +26,12 @@ from app.chain.media import MediaChain
 from app.domain.context import Context, MediaInfo, MusicInfo, SubtitleInfo, TorrentInfo
 from app.domain.media import is_music_media_source, normalize_music_type
 from app.domain.meta.metabase import MetaBase
-from app.domain.meta.metamusic import MetaMusic
 from app.domain.metainfo import MetaInfo
 from app.schemas.common import ServiceClientInfo as _SchemaServiceClientInfo
 from app.schemas.download import DownloadAddedData as _SchemaDownloadAddedData
 from app.schemas.download import DownloadDirectory as _SchemaDownloadDirectory
+from app.schemas.download import DownloadSourceClassificationData as _SchemaDownloadSourceClassificationData
+from app.schemas.download import DownloadSourceClassificationRequest as _SchemaDownloadSourceClassificationRequest
 from app.schemas.download import DownloadTaskUpdateData as _SchemaDownloadTaskUpdateData
 from app.schemas.download import DownloadTaskUpdateRequest as _SchemaDownloadTaskUpdateRequest
 from app.schemas.download import SubtitleDownloadData as _SchemaSubtitleDownloadData
@@ -41,6 +43,8 @@ from app.schemas.token import TokenPayload as _SchemaTokenPayload
 from app.schemas.transfer import DownloaderTorrent as _SchemaDownloaderTorrent
 from app.schemas.transfer import MusicInfo as _SchemaMusicInfo
 from app.schemas.types import (
+    MUSIC_ARTIST_COLLECTION_CATEGORY,
+    MUSIC_ENTITY_ARTIST,
     MUSIC_ENTITY_RECORDING,
     MediaSource,
     MediaType,
@@ -162,11 +166,8 @@ def _resolve_add_media(
         )
     if is_music and not normalized_music_type:
         normalized_music_type = MUSIC_ENTITY_RECORDING
-    metainfo = (
-        MetaMusic.parse_query(torrent_in.title)
-        if is_music
-        else MetaInfo(title=torrent_in.title, subtitle=torrent_in.description)
-    )
+    metainfo = MetaInfo(title=torrent_in.title, subtitle=torrent_in.description,
+                        mtype=MediaType.MUSIC if is_music else None)
     if media_source and media_id:
         mediainfo = MediaChain().recognize_media(
             meta=metainfo,
@@ -232,12 +233,10 @@ def download(
     """
     if isinstance(media_in, _SchemaMusicInfo):
         mediainfo = MusicInfo.from_dict(media_in.model_dump())
-        metainfo = MetaMusic.from_music_info(mediainfo)
-        metainfo.org_string = torrent_in.title
     else:
-        metainfo = MetaInfo(title=torrent_in.title, subtitle=torrent_in.description)
         mediainfo = MediaInfo()
         mediainfo.from_dict(media_in.model_dump())
+    metainfo = MetaInfo(title=torrent_in.title, subtitle=torrent_in.description, mtype=mediainfo.type)
     # 种子信息
     torrentinfo = TorrentInfo()
     torrentinfo.from_dict(torrent_in.model_dump())
@@ -253,6 +252,64 @@ def download(
     )
     if not did:
         return _SchemaResponse(success=False, message="任务添加失败")
+    return _SchemaResponse(success=True, data={"download_id": did})
+
+
+@router.post(  # type: ignore[misc]
+    "/artist-collection",
+    summary="添加艺术家合集下载",
+    response_model=_SchemaResponse[_SchemaDownloadAddedData],
+)
+def download_artist_collection(
+    artist_name: Annotated[str, Body(min_length=1)],
+    artist_id: Annotated[str, Body(min_length=1)],
+    media_source: Annotated[MediaSource, Body()],
+    torrent_in: _SchemaTorrentInfo,
+    downloader: Annotated[str | None, Body()] = None,
+    save_path: Annotated[str | None, Body()] = None,
+    current_user: ApiPrincipal = Depends(get_current_active_user),
+) -> Any:
+    """Add one artist-wide torrent without pretending that it is one album.
+
+    The artist identity remains available for history and subsequent collection
+    organization.  ``library_category`` is an intentional download-directory
+    classification snapshot: when resource category folders are enabled the
+    task starts under ``Artist Collection`` and therefore never needs an
+    out-of-band filesystem move that could break seeding.
+    """
+    name = artist_name.strip()
+    identity = artist_id.strip()
+    if not is_music_media_source(media_source):
+        return _SchemaResponse(success=False, message="艺术家合集只能使用音乐元数据源")
+
+    mediainfo = MusicInfo(
+        media_source=media_source,
+        media_id=identity,
+        music_type=MUSIC_ENTITY_ARTIST,
+        title=f"{name} 艺术家合集",
+        artists=[name],
+        album_artist=name,
+        album_type=MUSIC_ARTIST_COLLECTION_CATEGORY,
+        library_category=MUSIC_ARTIST_COLLECTION_CATEGORY,
+    )
+    metainfo = MetaInfo(
+        title=torrent_in.title or "",
+        subtitle=torrent_in.description,
+        mtype=MediaType.MUSIC,
+    )
+    torrentinfo = TorrentInfo()
+    torrentinfo.from_dict(torrent_in.model_dump())
+    if downloader is not None:
+        torrentinfo.site_downloader = downloader
+    context = Context(meta_info=metainfo, media_info=mediainfo, torrent_info=torrentinfo)
+    did = DownloadChain().download_single(
+        context=context,
+        username=current_user.name,
+        save_path=save_path,
+        source="Manual",
+    )
+    if not did:
+        return _SchemaResponse(success=False, message="艺术家合集任务添加失败")
     return _SchemaResponse(success=True, data={"download_id": did})
 
 
@@ -402,6 +459,27 @@ async def update_task(
         success=all(item.get("success") for item in data["results"]),
         data=data,
     )
+
+
+@router.post(  # type: ignore[misc]
+    "/{hashString}/classify-source",
+    summary="识别并归类已有下载任务",
+    response_model=_SchemaResponse[_SchemaDownloadSourceClassificationData],
+)
+async def classify_source(
+    hashString: str,
+    payload: _SchemaDownloadSourceClassificationRequest,
+    _: ApiPrincipal = Depends(get_current_active_manage_user),
+) -> _SchemaResponse[Any]:
+    """复用媒体识别链生成资源目录和根目录名，确认后仅通过下载器执行。"""
+    chain = DownloadChain()
+    try:
+        data = await anyio.to_thread.run_sync(
+            lambda: organize_existing_source(hashString, payload, chain, MediaChain())
+        )
+    except ValueError as error:
+        return _SchemaResponse(success=False, message=str(error))
+    return _SchemaResponse(success=True, data=data)
 
 
 @router.get(

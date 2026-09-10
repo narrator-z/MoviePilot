@@ -25,7 +25,12 @@ from pydantic import BaseModel, Field
 
 from app.agent.llm.helper import LLMHelper
 from app.agent.middleware.policy import AgentPolicyMiddleware
+from app.agent.middleware.summarization import (
+    ContextPreservingSummarizationMiddleware,
+    FinalRequestCompactionMiddleware,
+)
 from app.agent.middleware.utils import append_to_system_message
+from app.agent.middleware.vision import VisionMiddleware
 from app.agent.policy.contracts import (
     AuthSource,
     PrincipalType,
@@ -75,6 +80,7 @@ Rules:
 - Subagents must not send messages to the user, ask for interaction, or reveal their internal tool activity.
 - Give the user only your synthesized final answer and the minimum necessary next step.
 - If a task requires configuration changes, deletion, adding downloads, adding subscriptions, or any high-impact action, the main agent must handle it directly under the confirmation policy.
+- Child tools enforce read-only operations. Perform command launches, browser navigation/interactions, and external MCP calls in the main agent; pass the resulting evidence to a child for analysis when useful.
 </subagents>"""
 
 SUBAGENT_TASK_DESCRIPTION = (
@@ -99,7 +105,7 @@ Requirements:
 - Handle only the delegated subtask from the main agent. Do not converse with the user.
 - Do not send messages, request user interaction, or output progress updates.
 - Use tool results only for analysis, and return the final result only to the main agent.
-- Unless the task explicitly requires it and your tool set permits it, limit yourself to read-only inspection and diagnosis.
+- Limit yourself to the read-only operations permitted by the host. Command launches, browser navigation/interactions, external MCP calls, and writes must be handled by the main agent; request the resulting evidence instead of bypassing a denial.
 - If user confirmation or a high-impact change is needed, explain why the main agent must confirm it instead of executing it yourself.
 - Return a concise structured Chinese result with key evidence, judgment, and recommended next step.
 """
@@ -469,7 +475,14 @@ class _SubAgentAgentProvider:
                 AgentPolicyMiddleware(
                     context=self._policy_context,
                     catalog=subagent_catalog,
-                )
+                ),
+                FinalRequestCompactionMiddleware(
+                    summarizer=ContextPreservingSummarizationMiddleware(
+                        model=self._model,
+                        keep=("messages", 20),
+                    ),
+                ),
+                VisionMiddleware(),
             ],
         )
         self._agents[profile.name] = agent
@@ -946,6 +959,10 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
     async def close(self) -> bool:
         """有限等待 detached 子代理；超时保留记录并返回 False。"""
         self.seal()
+        return await self._drain_tasks()
+
+    async def _drain_tasks(self) -> bool:
+        """清理本轮子任务，正常收敛后允许缓存图继续处理下一轮。"""
         if not hasattr(self, "_close_cancel_requested"):
             self._close_cancel_requested = set()
         unfinished_records = [
@@ -960,6 +977,8 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
             cancel_requested=self._close_cancel_requested,
         )
         if pending_records:
+            # 未收敛的子任务仍由该 owner 持有，不能让下一轮叠加新任务。
+            self.seal()
             self._tasks = {
                 record.task_id: record
                 for record in pending_records
@@ -1232,8 +1251,8 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
         return self._json_response(response)
 
     async def aafter_agent(self, state: Any, runtime: Any) -> None:
-        """Agent 结束时取消未完成的子代理任务，避免后台泄漏。"""
-        await self.close()
+        """本轮结束时回收子任务；永久关闭只由会话生命周期触发。"""
+        await self._drain_tasks()
 
     async def awrap_tool_call(
         self,

@@ -5,6 +5,8 @@ from typing import Mapping, Optional
 from uuid import uuid4
 
 from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -31,10 +33,15 @@ class SubscriptionSearchOper(DbOper):
         source: str,
         priority: int,
         available_at_by_subscription: Optional[Mapping[int, str]],
-    ) -> tuple[SubscriptionSearchBatch, int, int]:
+        refresh_pending: bool = False,
+    ) -> tuple[SubscriptionSearchBatch, int, int, tuple[str, ...]]:
         """创建批次，并以活动键合并同一订阅的重叠搜索入口。"""
         if not isinstance(self._db, Session):
             raise RuntimeError("订阅搜索入队需要调用方提供同步 Session")
+        dialect = self._db.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"订阅搜索入队不支持数据库方言：{dialect}")
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
         now = utc_now_text()
         batch = SubscriptionSearchBatch(
             batch_id=uuid4().hex,
@@ -49,15 +56,16 @@ class SubscriptionSearchOper(DbOper):
         self._db.flush()
         created = 0
         coalesced = 0
+        active_batch_ids: list[str] = []
         for position, subscription_id in enumerate(dict.fromkeys(subscription_ids)):
             active_key = f"subscription:{subscription_id}"
             available_at = (
-                available_at_by_subscription.get(subscription_id, now)
-                if available_at_by_subscription
-                else now
+                available_at_by_subscription.get(subscription_id, now) if available_at_by_subscription else now
             )
-            task = SubscriptionSearchTask(
-                task_id=uuid4().hex,
+            initial_phase = "scheduled" if source == "new" and available_at > now else "queued"
+            task_id = uuid4().hex
+            statement = insert(SubscriptionSearchTask).values(
+                task_id=task_id,
                 batch_id=batch.batch_id,
                 subscription_id=subscription_id,
                 active_key=active_key,
@@ -65,49 +73,79 @@ class SubscriptionSearchOper(DbOper):
                 priority=priority,
                 position=position,
                 state="queued",
-                phase="queued",
+                phase=initial_phase,
                 available_at=available_at,
                 created_at=now,
                 updated_at=now,
             )
-            try:
-                with self._db.begin_nested():
-                    self._db.add(task)
-                    self._db.flush()
-                created += 1
-            except IntegrityError:
-                coalesced += 1
-                execute_dml(
-                    self._db,
-                    update(SubscriptionSearchTask)
-                    .where(SubscriptionSearchTask.active_key == active_key)
-                    .values(
-                        priority=case(
-                            (SubscriptionSearchTask.priority < priority, priority),
-                            else_=SubscriptionSearchTask.priority,
-                        ),
-                        available_at=case(
-                            (
-                                or_(
-                                    SubscriptionSearchTask.available_at.is_(None),
-                                    SubscriptionSearchTask.available_at > available_at,
-                                ),
-                                available_at,
-                            ),
-                            else_=SubscriptionSearchTask.available_at,
-                        ),
-                        updated_at=now,
+            promote_queued_task = and_(
+                SubscriptionSearchTask.priority < priority,
+                SubscriptionSearchTask.state == "queued",
+            )
+            refresh_queued_task = and_(
+                refresh_pending,
+                SubscriptionSearchTask.state == "queued",
+                SubscriptionSearchTask.pending_site_ids.is_not(None),
+            )
+            # 唯一键仲裁与合并在同一条语句内完成，避免旧任务结束时丢失入队请求。
+            # 只处理 active_key 冲突，其余约束错误继续交给调用方事务处理。
+            statement = statement.on_conflict_do_update(
+                index_elements=[SubscriptionSearchTask.active_key],
+                set_=dict(
+                    source=case(
+                        (SubscriptionSearchTask.priority < priority, source),
+                        else_=SubscriptionSearchTask.source,
                     ),
-                    execution_options={"synchronize_session": False},
-                )
+                    priority=case(
+                        (SubscriptionSearchTask.priority < priority, priority),
+                        else_=SubscriptionSearchTask.priority,
+                    ),
+                    phase=case(
+                        (or_(promote_queued_task, refresh_queued_task), "queued"),
+                        else_=SubscriptionSearchTask.phase,
+                    ),
+                    last_error=case(
+                        (or_(promote_queued_task, refresh_queued_task), None),
+                        else_=SubscriptionSearchTask.last_error,
+                    ),
+                    # 用户重搜和已到期的新周期恢复完整范围；普通合并仍保留补查游标。
+                    pending_site_ids=case(
+                        (or_(
+                            and_(SubscriptionSearchTask.state == "queued", source in {"manual", "targeted"}),
+                            refresh_queued_task,
+                        ), None),
+                        else_=SubscriptionSearchTask.pending_site_ids,
+                    ),
+                    available_at=case(
+                        (
+                            or_(
+                                SubscriptionSearchTask.available_at.is_(None),
+                                SubscriptionSearchTask.available_at > available_at,
+                            ),
+                            available_at,
+                        ),
+                        else_=SubscriptionSearchTask.available_at,
+                    ),
+                    updated_at=now,
+                ),
+            ).returning(SubscriptionSearchTask.task_id, SubscriptionSearchTask.batch_id)
+            stored_task_id, stored_batch_id = self._db.execute(statement).one()
+            # 合并保留原任务及批次身份，无需依赖数据库专有的系统列判断插入结果。
+            if stored_task_id == task_id:
+                created += 1
+            else:
+                coalesced += 1
+                active_batch_ids.append(stored_batch_id)
         batch.total_count = created
         if created == 0:
             batch.state = "completed"
             batch.finished_at = now
-        return batch, created, coalesced
+        else:
+            active_batch_ids.insert(0, batch.batch_id)
+        return batch, created, coalesced, tuple(dict.fromkeys(active_batch_ids))
 
     def claim_next(self, *, owner: str, lease_seconds: int) -> Optional[SubscriptionSearchTask]:
-        """使用 CAS 认领最高优先级任务，过期 running 任务可被恢复。"""
+        """CAS 认领任务并清除旧等待提示，过期 running 任务保留站点游标恢复。"""
         if not isinstance(self._db, Session):
             raise RuntimeError("订阅搜索认领需要调用方提供同步 Session")
         now = utc_now_text()
@@ -139,6 +177,7 @@ class SubscriptionSearchOper(DbOper):
                 )
                 .order_by(
                     case(
+                        (SubscriptionSearchTask.priority >= 100, 2),
                         (SubscriptionSearchTask.created_at <= fairness_before, 1),
                         else_=0,
                     ).desc(),
@@ -177,6 +216,7 @@ class SubscriptionSearchOper(DbOper):
                 .values(
                     state="running",
                     phase="matching",
+                    last_error=None,
                     current_site_id=None,
                     lease_owner=owner,
                     lease_token=lease_token,
@@ -355,6 +395,64 @@ class SubscriptionSearchOper(DbOper):
                 lease_token=None,
                 lease_expires_at=None,
                 updated_at=now,
+            ),
+            execution_options={"synchronize_session": False},
+        )
+        if not updated:
+            return False
+        self._refresh_batch(task.batch_id, now=now, error=None)
+        return True
+
+    def defer_task(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        available_at: str,
+        phase: str,
+        message: Optional[str],
+        pending_site_ids: Optional[tuple[int, ...]] = None,
+    ) -> bool:
+        """释放租约并保存重试站点；普通准入等待保留已有站点游标。"""
+        if not isinstance(self._db, Session):
+            raise RuntimeError("订阅搜索延后需要调用方提供同步 Session")
+        task = self._db.execute(
+            select(SubscriptionSearchTask).where(
+                SubscriptionSearchTask.task_id == task_id,
+                SubscriptionSearchTask.state == "running",
+                SubscriptionSearchTask.lease_token == lease_token,
+            )
+        ).scalars().first()
+        if task is None:
+            return False
+        if bool(task.cancel_requested) or self._batch_cancel_requested(task.batch_id):
+            return self.finish_task(
+                task_id=task_id,
+                lease_token=lease_token,
+                state="cancelled",
+                error=None,
+            )
+        now = utc_now_text()
+        updated = execute_dml(
+            self._db,
+            update(SubscriptionSearchTask)
+            .where(
+                SubscriptionSearchTask.id == task.id,
+                SubscriptionSearchTask.state == "running",
+                SubscriptionSearchTask.lease_token == lease_token,
+            )
+            .values(
+                state="queued",
+                phase=phase,
+                current_site_id=None,
+                lease_owner=None,
+                lease_token=None,
+                lease_expires_at=None,
+                available_at=available_at,
+                updated_at=now,
+                finished_at=None,
+                last_error=message,
+                pending_site_ids=list(pending_site_ids) if pending_site_ids is not None else task.pending_site_ids,
             ),
             execution_options={"synchronize_session": False},
         )

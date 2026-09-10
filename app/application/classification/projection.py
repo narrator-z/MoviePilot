@@ -11,12 +11,12 @@ from app.application.classification.migration import (
     _EXTENSION_PREFIX,
     _MEDIA_KEYS,
     _SAFE_FIELD_SEGMENT,
-    _TMDB_GENRE_KEYS,
     _TMDB_SOURCE,
     LegacyClassificationDiagnostic,
     LegacyDiagnosticPathPart,
     LegacyMediaKey,
 )
+from app.domain.classification.vocabulary import TMDB_GENRE_KEYS
 from app.schemas.category import (
     CategoryConfig,
     CategoryRule,
@@ -25,12 +25,11 @@ from app.schemas.category import (
     ClassificationFactScalar,
     ClassificationFactValue,
     ClassificationFieldDefinition,
-    ClassificationMediaType,
     ClassificationPolicy,
     ClassificationRule,
 )
 
-_TMDB_GENRE_IDS: Final[dict[str, str]] = {value: key for key, value in _TMDB_GENRE_KEYS.items()}
+_TMDB_GENRE_IDS: Final[dict[str, str]] = {value: key for key, value in TMDB_GENRE_KEYS.items()}
 
 LegacyPolicyOrFields: TypeAlias = ClassificationPolicy | Iterable[ClassificationFieldDefinition]
 """受控 TMDB 扩展事实可以从策略或字段声明中发现。"""
@@ -55,13 +54,12 @@ def project_policy_to_legacy_category_projection(
     """
     把新版策略尽可能投影为旧 CategoryConfig
 
-    本迁移器生成的分类、规则和来源兜底可精确恢复；新版独有结构会保留可表达部分并返回警告。
+    本迁移器生成的分类、规则和全局兜底可精确恢复；新版独有结构会保留可表达部分并返回警告。
 
     :param policy: 待兼容投影的新版策略
     :return: 旧配置和无法精确表达的结构化诊断
     """
     diagnostics: list[LegacyClassificationDiagnostic] = []
-    source_fallbacks = _policy_source_fallbacks(policy)
     rules_by_category = _category_rules(policy)
     projected: dict[LegacyMediaKey, dict[str, Optional[CategoryRule]]] = {
         "movie": {},
@@ -73,7 +71,7 @@ def project_policy_to_legacy_category_projection(
         if media_key is None or not category.id.startswith(f"legacy.{media_key}."):
             continue
         category_path: list[LegacyDiagnosticPathPart] = ["categories", category_index]
-        if source_fallbacks.get(_TMDB_SOURCE, {}).get(category.media_type) == category.id:
+        if policy.fallbacks.get(category.media_type) == category.id:
             rule = rules_by_category.get(category.id)
             if rule is not None and rule.id.endswith(".fallback"):
                 projected[media_key][category.name] = CategoryRule.model_validate(_project_fallback_metadata(rule))
@@ -158,14 +156,6 @@ def resolve_legacy_tmdb_category(
     return _resolve_legacy_category_mapping(categories, tmdb_info)
 
 
-def _policy_source_fallbacks(
-    policy: ClassificationPolicy,
-) -> Mapping[str, Mapping[ClassificationMediaType, str]]:
-    """读取新版来源专属兜底映射，并兼容并行 schema 合入前的空状态。"""
-    value = getattr(policy, "source_fallbacks", {})
-    return value if isinstance(value, Mapping) else {}
-
-
 def _category_rules(policy: ClassificationPolicy) -> dict[str, ClassificationRule]:
     """按目标分类 ID 索引 TMDB 主分类规则，保持首条规则优先。"""
     result: dict[str, ClassificationRule] = {}
@@ -229,11 +219,11 @@ def _project_rule(
             continue
         if not values:
             continue
-        token = _render_legacy_token(values)
-        rendered = f"!{token}" if negative else token
         field_tokens = tokens_by_field.setdefault(field_name, [])
-        if rendered not in field_tokens:
-            field_tokens.append(rendered)
+        for value in values:
+            rendered = f"!{value}" if negative else value
+            if rendered not in field_tokens:
+                field_tokens.append(rendered)
     return (
         {field_name: ",".join(tokens) for field_name, tokens in tokens_by_field.items()},
         diagnostics,
@@ -308,17 +298,6 @@ def _original_alias_value(value: str, aliases: Mapping[str, str]) -> str:
         if canonical == value.upper():
             return alias
     return value
-
-
-def _render_legacy_token(values: Sequence[str]) -> str:
-    """把一个迁移时保留边界的值集合恢复为单个旧逗号项。"""
-    if len(values) == 1:
-        return values[0]
-    if values and all(value.isdigit() for value in values):
-        numbers = [int(value) for value in values]
-        if numbers == list(range(numbers[0], numbers[-1] + 1)):
-            return f"{numbers[0]}-{numbers[-1]}"
-    return "-".join(values)
 
 
 def _projection_warning(

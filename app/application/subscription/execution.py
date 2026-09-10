@@ -1,12 +1,18 @@
 """订阅执行准入、搜索上下文、批次任务与持久队列端口。"""
 
+from __future__ import annotations
+
 import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional, Protocol
 from uuid import uuid4
 
-from app.application.subscription.sitebudget import SiteBudgetClaim
+from app.application.subscription.sitebudget import (
+    SiteBudgetClaim,
+    SubscriptionSearchDeferred,
+    SubscriptionSiteBudgetDeferral,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +68,10 @@ class SubscriptionExecutionAdmission:
         return self._clock() >= lease.expires_at
 
 
+class SubscriptionSiteSearchFailed(RuntimeError):
+    """表示本轮没有搜索源成功完成，无需输出内部异常堆栈。"""
+
+
 @dataclass(slots=True)
 class SubscriptionExecutionContext:
     """一次订阅执行的显式取消、阶段和副作用边界。"""
@@ -72,6 +82,7 @@ class SubscriptionExecutionContext:
     cancel_requested: Optional[Callable[[], bool]] = None
     phase_changed: Optional[Callable[[str, Optional[int]], None]] = None
     download_started: bool = False
+    resuming_sites: bool = False
 
     def is_cancel_requested(self) -> bool:
         """判断调用入口是否请求在下一个安全边界退出。"""
@@ -94,6 +105,45 @@ class SubscriptionExecutionContext:
         """标记执行已越过下载器副作用边界。"""
         self.download_started = True
         self.report_phase("submitting")
+
+
+def raise_subscription_site_budget_failures(failures: tuple[str, ...]) -> None:
+    """在所有实际搜索源均未成功时暴露站点聚合失败。"""
+    if failures:
+        raise SubscriptionSiteSearchFailed("；".join(failures))
+
+
+def raise_subscription_site_budget_deferral(
+    deferrals: tuple[SubscriptionSiteBudgetDeferral, ...],
+    execution_context: Optional[SubscriptionExecutionContext],
+) -> None:
+    """在没有下载副作用时，将临时站点冲突转换为持久队列延后。"""
+    if not deferrals or (execution_context and execution_context.download_started):
+        return
+    retry_at = min(deferrals, key=lambda item: item.retry_at).retry_at
+    site_ids = tuple(dict.fromkeys(item.site_id for item in deferrals))
+    wait_reason = "cooldown" if all(item.wait_reason == "cooldown" for item in deferrals) else "busy"
+    raise SubscriptionSearchDeferred(retry_at=retry_at, site_ids=site_ids, wait_reason=wait_reason)
+
+
+def handle_subscription_search_deferred(
+    queue: SubscriptionSearchRepository,
+    task_id: str,
+    lease_token: str,
+    deferred: SubscriptionSearchDeferred,
+    record: Callable[..., None],
+) -> None:
+    """把站点暂时不可用的任务重新入队，而不是记录为搜索失败。"""
+    requeued = queue.defer_task(
+        task_id=task_id,
+        lease_token=lease_token,
+        available_at=deferred.retry_at,
+        phase="waiting_site_budget",
+        message=str(deferred),
+        pending_site_ids=deferred.site_ids,
+    )
+    if requeued:
+        record("requeued", "site_budget_deferred")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +189,7 @@ class SearchTaskSnapshot:
     finished_at: Optional[str] = None
     last_error: Optional[str] = None
     current_site_id: Optional[int] = None
+    pending_site_ids: Optional[tuple[int, ...]] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +199,7 @@ class SearchEnqueueResult:
     batch: SearchBatchSnapshot
     created_count: int
     coalesced_count: int
+    active_batch_ids: tuple[str, ...]
 
 
 class SubscriptionSearchRepository(Protocol):
@@ -160,8 +212,21 @@ class SubscriptionSearchRepository(Protocol):
         source: str,
         priority: int,
         available_at_by_subscription: Optional[Mapping[int, str]] = None,
+        refresh_pending: bool = False,
     ) -> SearchEnqueueResult:
-        """按订阅 ID 和各自到期时间建立或合并活动任务。"""
+        """建立或合并活动任务；新自动周期可恢复等待任务的完整搜索范围。"""
+        ...
+
+    async def async_enqueue(
+        self,
+        *,
+        subscription_ids: tuple[int, ...],
+        source: str,
+        priority: int,
+        available_at_by_subscription: Optional[Mapping[int, str]] = None,
+        refresh_pending: bool = False,
+    ) -> SearchEnqueueResult:
+        """异步建立或合并活动任务，可为新周期刷新尚未运行的站点游标。"""
         ...
 
     def claim_next(self, *, owner: str, lease_seconds: int = 900) -> Optional[SearchTaskSnapshot]:
@@ -198,6 +263,19 @@ class SubscriptionSearchRepository(Protocol):
         cancelled: bool = False,
     ) -> bool:
         """释放尚未完成的任务租约，供停止或取消后恢复。"""
+        ...
+
+    def defer_task(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        available_at: str,
+        phase: str = "waiting_site_budget",
+        message: Optional[str] = None,
+        pending_site_ids: Optional[tuple[int, ...]] = None,
+    ) -> bool:
+        """延后任务并保存等待原因与待搜站点；省略站点时保留已有游标。"""
         ...
 
     def is_cancel_requested(self, task_id: str) -> bool:

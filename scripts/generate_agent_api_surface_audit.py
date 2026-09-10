@@ -75,6 +75,8 @@ CONSOLIDATED_ROUTE_OWNERS: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/system/setting/{key}"): "config.system.update",
     ("GET", "/api/v1/transfer/now"): "scheduler.run",
     ("GET", "/api/v1/workflow/"): "workflow.list",
+    ("GET", "/api/v1/media/category"): "media.classification.policy.get",
+    ("GET", "/api/v1/media/category/config"): "media.classification.policy.get",
 }
 STREAM_OR_BINARY_PATHS = frozenset(
     {
@@ -96,7 +98,11 @@ UI_PRESENTATION_PATHS = frozenset(
         "/api/v1/plugin/dashboard/{plugin_id}",
         "/api/v1/plugin/dashboard/{plugin_id}/{key}",
         "/api/v1/plugin/page/{plugin_id}",
+        "/api/v1/plugin/runtime/{plugin_id}/data/summary",
         "/api/v1/plugin/sidebar_nav",
+        "/api/v1/rule/custom/reorder",
+        "/api/v1/rule/groups/reorder",
+        "/api/v1/storage/options",
     }
 )
 EXPLICIT_TRANSPORT_PATHS = frozenset(
@@ -107,7 +113,7 @@ EXPLICIT_TRANSPORT_PATHS = frozenset(
     }
 )
 SUBSCRIPTION_EXECUTION_UI_PREFIX = "/api/v1/subscribe/execution/"
-CLASSIFICATION_POLICY_UI_PREFIX = "/api/v1/media/classification/"
+MUSIC_LIBRARY_STATUS_UI_PATH = "/api/v1/music/library/status"
 
 
 def _gateway_routes() -> dict[tuple[str, str], list[str]]:
@@ -125,7 +131,7 @@ def _classify(
     tags: list[str],
     gateway_routes: dict[tuple[str, str], list[str]],
 ) -> tuple[str, str, str, list[str]]:
-    """Classify one OpenAPI operation into one reviewed Agent ownership boundary."""
+    """把 OpenAPI 操作归入经过审查的 Agent 或直接管理端契约。"""
     operations = gateway_routes.get((method, path), [])
     if operations:
         return (
@@ -164,6 +170,20 @@ def _classify(
             "Plugin-rendered page, dashboard, or navigation metadata owned by the frontend presentation contract rather than an Agent business action.",
             [],
         )
+    if method == "POST" and path == "/api/v1/history/transfer/{history_id}/cleanup-resolved":
+        return (
+            "ui_presentation",
+            "host-ui",
+            "Manual confirmation of downloader cleanup is owned by the authenticated history management workflow; it is not an Agent action that verifies external cleanup.",
+            [],
+        )
+    if path == "/api/v1/history/transfer/{history_id}/discard-corrupt":
+        return (
+            "ui_presentation",
+            "host-ui",
+            "Discarding corrupt transfer state is owned by the authenticated management recovery workflow; it is not a stable Agent gateway operation.",
+            [],
+        )
     if path.startswith(SUBSCRIPTION_EXECUTION_UI_PREFIX):
         return (
             "ui_presentation",
@@ -171,11 +191,11 @@ def _classify(
             "Background subscription execution status and cancellation are owned by the authenticated frontend workflow; they are not yet a stable Agent gateway contract.",
             [],
         )
-    if path.startswith(CLASSIFICATION_POLICY_UI_PREFIX):
+    if method == "POST" and path == MUSIC_LIBRARY_STATUS_UI_PATH:
         return (
             "ui_presentation",
             "host-ui",
-            "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+            "Batch music-library presence is a bounded projection for the authenticated artist resource matrix; it is not a standalone Agent business action.",
             [],
         )
     if path in EXPLICIT_TRANSPORT_PATHS:
@@ -242,9 +262,7 @@ def generate_audit() -> dict[str, Any]:
             )
     counts = Counter(entry["disposition"] for entry in entries)
     matched_gateway_routes = {
-        (entry["method"], entry["path"])
-        for entry in entries
-        if entry["disposition"] == "gateway"
+        (entry["method"], entry["path"]) for entry in entries if entry["disposition"] == "gateway"
     }
     dynamic_gateway_routes = [
         {
@@ -354,10 +372,7 @@ def main() -> int:
         encoding="utf-8",
     )
     MARKDOWN_OUTPUT.write_text(render_markdown(audit), encoding="utf-8")
-    print(
-        "generated "
-        f"{JSON_OUTPUT.relative_to(PROJECT_ROOT)} and {MARKDOWN_OUTPUT.relative_to(PROJECT_ROOT)}"
-    )
+    print(f"generated {JSON_OUTPUT.relative_to(PROJECT_ROOT)} and {MARKDOWN_OUTPUT.relative_to(PROJECT_ROOT)}")
     return 0
 
 

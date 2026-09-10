@@ -160,13 +160,7 @@
     },
     "target": "asyncio.create_task"
   },
-  "app/agent/tools/base.py:concurrent.futures.ThreadPoolExecutor": {
-    "owners": {
-      "_submit_blocking_call": 1
-    },
-    "target": "concurrent.futures.ThreadPoolExecutor"
-  },
-  "app/agent/tools/impl/_terminal_session.py:asyncio.create_task": {
+  "app/agent/terminal/manager.py:asyncio.create_task": {
     "owners": {
       "_TerminalSessionManager._start_pipe_session": 3,
       "_TerminalSessionManager._start_pty_session": 2,
@@ -174,12 +168,17 @@
     },
     "target": "asyncio.create_task"
   },
-  "app/agent/tools/impl/_terminal_session.py:asyncio.to_thread": {
+  "app/agent/terminal/manager.py:asyncio.to_thread": {
     "owners": {
-      "_TerminalSessionManager._wait_pty_process": 1,
-      "_TerminalSessionManager.write": 1
+      "_TerminalSessionManager._wait_pty_process": 1
     },
     "target": "asyncio.to_thread"
+  },
+  "app/agent/tools/base.py:concurrent.futures.ThreadPoolExecutor": {
+    "owners": {
+      "_submit_blocking_call": 1
+    },
+    "target": "concurrent.futures.ThreadPoolExecutor"
   },
   "app/agent/tools/impl/execute_command.py:asyncio.create_task": {
     "owners": {
@@ -336,17 +335,9 @@
     },
     "target": "app.runtime.execution.run_in_threadpool"
   },
-  "app/chain/search/media.py:app.runtime.execution.run_in_threadpool": {
+  "app/chain/search/execution.py:app.runtime.execution.run_in_threadpool": {
     "owners": {
-      "SearchMediaOwner._run_media_process_async": 1,
-      "SearchMediaOwner.async_process_stream": 1
-    },
-    "target": "app.runtime.execution.run_in_threadpool"
-  },
-  "app/chain/search/music.py:app.runtime.execution.run_in_threadpool": {
-    "owners": {
-      "SearchMusicOwner._async_process_music": 1,
-      "SearchMusicOwner._async_process_music_stream": 1
+      "SearchExecutionOwner.events": 2
     },
     "target": "app.runtime.execution.run_in_threadpool"
   },
@@ -596,11 +587,11 @@
     },
     "target": "asyncio.to_thread"
   },
-  "app/runtime/state.py:threading.Thread": {
+  "app/runtime/state.py:threading.Timer": {
     "owners": {
-      "SystemHelper._start_graceful_shutdown_monitor": 1
+      "SystemHelper._schedule_supervisor_command": 1
     },
-    "target": "threading.Thread"
+    "target": "threading.Timer"
   },
   "app/runtime/tasks.py:asyncio.create_task": {
     "owners": {

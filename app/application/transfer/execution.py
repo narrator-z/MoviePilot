@@ -506,6 +506,13 @@ class TransferExecutionRepository(Protocol):
     def get_snapshot(self, *, task_id: str) -> Optional[TransferExecutionSnapshot]:
         """读取任务执行快照。"""
 
+    async def async_get_snapshot(
+            self,
+            *,
+            task_id: str,
+    ) -> Optional[TransferExecutionSnapshot]:
+        """异步读取任务执行快照，供事件循环内状态观察使用。"""
+
     def list_manual_reviews(
             self,
             *,
@@ -607,6 +614,23 @@ class TransferExecutionRepository(Protocol):
             requested_by: str,
     ) -> TransferRetryRequestResult:
         """仅把 FAILED 终态转入到期可 claim 的 retry_wait。"""
+
+    def discard_corrupt_task(
+            self,
+            *,
+            task_id: str,
+            lease_token: str,
+            error: str,
+    ) -> bool:
+        """在当前租约下原子清除无法继续执行的损坏任务及其恢复证据。"""
+
+    def discard_corrupt_by_history(
+            self,
+            *,
+            task_id: str,
+            history_id: int,
+    ) -> TransferFailureDiscardResult:
+        """清理无活动租约的损坏任务，并解除对应历史绑定。"""
 
     def discard_failed(
             self,
@@ -830,22 +854,6 @@ class TransferExecutionCommand:
             task_id=task_id,
             reason=reason,
             requested_by=requested_by,
-        )
-
-    def discard_failed(
-            self,
-            *,
-            task_id: str,
-            history_id: int,
-            settlement_revision: int,
-    ) -> TransferFailureDiscardResult:
-        """放弃确定失败任务，使对应历史恢复为普通可维护记录。"""
-        if not task_id or history_id <= 0 or settlement_revision <= 0:
-            raise ValueError("放弃失败整理任务缺少任务、历史或结算版本")
-        return self._repository.discard_failed(
-            task_id=task_id,
-            history_id=history_id,
-            settlement_revision=settlement_revision,
         )
 
     def resolve_manual_review(

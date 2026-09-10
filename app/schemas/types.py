@@ -5,11 +5,12 @@ from typing import Literal, Optional, Tuple, Union
 from pydantic import GetJsonSchemaHandler
 from pydantic_core import CoreSchema
 
-
 # 音乐实体命名空间由公共类型模块统一持有，避免模型、接口和工具层重复定义。
 MUSIC_ENTITY_RECORDING = "recording"
 MUSIC_ENTITY_ALBUM = "album"
 MUSIC_ENTITY_ARTIST = "artist"
+# 艺术家大合集是下载资源包装分类，不是 MusicBrainz Release Group 类型。
+MUSIC_ARTIST_COLLECTION_CATEGORY = "Artist Collection"
 MusicEntityType = Literal["recording", "album", "artist"]
 MusicTargetEntityType = Literal["recording", "album"]
 MUSIC_ENTITY_TYPES = frozenset({
@@ -85,10 +86,6 @@ _MEDIA_SOURCE_VALUE_ALIASES = {
     "tmdb": "themoviedb",
     "audio_db": "theaudiodb",
     "douban_music": "doubanmusic",
-    "mango_tv": "mangguodiscover",
-    "migu_video": "migu",
-    "tencent_video": "tencentvideodiscover",
-    "iqiyi": "iqiyidiscover",
 }
 
 
@@ -104,11 +101,6 @@ class MediaSource(str, Enum):
     MusicBrainz = "musicbrainz"
     TheAudioDB = "theaudiodb"
     DoubanMusic = "doubanmusic"
-    Bilibili = "bilibili"
-    MangoTV = "mangguodiscover"
-    MiguVideo = "migu"
-    TencentVideo = "tencentvideodiscover"
-    Iqiyi = "iqiyidiscover"
 
     def __str__(self) -> str:
         """返回可直接用于 API 和数据库的规范值。"""
@@ -594,6 +586,8 @@ class MediaServerType(Enum):
     Ugreen = "Ugreen"
     # Navidrome 音乐服务器
     Navidrome = "Navidrome"
+    # MediaVault 自建媒体库
+    MediaVault = "MediaVault"
 
 
 # 识别器类型
@@ -650,8 +644,9 @@ class ModuleType(Enum):
     Other = "other"
 
 
-# 其他杂项模块类型
 class OtherModulesType(Enum):
+    """标识字幕、歌词等不属于专用服务分类的模块。"""
+
     # 字幕
     Subtitle = "站点字幕"
     # Fanart
@@ -670,8 +665,8 @@ class OtherModulesType(Enum):
     ListenBrainz = "ListenBrainz"
     # LRCLIB 歌词
     Lrclib = "LRCLIB"
-    # Musixmatch 授权歌词
-    Musixmatch = "Musixmatch"
+    # AMLL TTML 歌词
+    Amll = "AMLL TTML"
     # AcoustID 音频指纹
     AcoustId = "AcoustID"
 

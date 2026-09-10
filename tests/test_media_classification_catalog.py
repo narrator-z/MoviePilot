@@ -98,17 +98,44 @@ def test_catalog_separates_retired_fields_from_new_rule_options() -> None:
     assert retired_fields[0].replacement_field == "media.countries"
 
 
-def test_discover_only_builtin_sources_are_explicitly_unavailable() -> None:
-    """仅提供发现入口的内置来源不能被误认为可形成分类事实。"""
+def test_plugin_sources_have_no_builtin_capability_declarations() -> None:
+    """无宿主模块的来源不得预占插件标识或预设不可用的字段能力。"""
     discover_sources = {
-        MediaSource.Bilibili.value,
-        MediaSource.MangoTV.value,
-        MediaSource.MiguVideo.value,
-        MediaSource.TencentVideo.value,
-        MediaSource.Iqiyi.value,
+        "bilibili", "mangguodiscover", "migu", "tencentvideodiscover", "iqiyidiscover",
     }
 
-    for media_source in discover_sources:
-        assert set(builtin_source_field_support(media_source).values()) == {
-            "unavailable"
-        }
+    assert discover_sources.isdisjoint(BUILTIN_CLASSIFICATION_SOURCES)
+    assert discover_sources.isdisjoint(source.value for source in MediaSource)
+    for field in get_standard_classification_fields():
+        assert discover_sources.isdisjoint(field.source_support)
+
+
+def test_catalog_dictionary_values_match_normalized_facts() -> None:
+    """中文标签对应规则实际读取的稳定值，规范风格词表与事实映射保持一致。"""
+    from app.domain.classification.vocabulary import GENRE_KEY_ALIASES, TMDB_GENRE_KEYS
+
+    fields = {item.id: item for item in build_classification_field_catalog()}
+    countries = {item.value: item.label for item in fields["media.countries"].options}
+    assert len(countries) == 249
+    assert countries["JP"] == "日本"
+    assert countries["KR"] == "韩国"
+    assert {item.value for item in fields["media.genre_keys"].options} == set(GENRE_KEY_ALIASES.values()) | set(
+        TMDB_GENRE_KEYS.values()
+    )
+    assert any(item.value == "ja" and item.label == "日语" for item in fields["media.language"].options)
+    assert fields["media.countries"].allow_custom_values
+    assert fields["media.genre_keys"].allow_custom_values
+
+
+def test_catalog_source_candidates_preserve_original_values_and_are_isolated() -> None:
+    """来源风格只作为开放候选，序列化保留来源和原值且不共享可变状态。"""
+    fields = {item.id: item for item in build_classification_field_catalog()}
+    genres = fields["media.genre_names"]
+    assert genres.allow_custom_values
+    assert any(item.value == "动画" for item in genres.source_options["douban"])
+    assert any(item.value == "Action" for item in genres.source_options["anilist"])
+    assert "bangumi" not in genres.source_options
+    assert genres.model_dump()["source_options"]["anilist"][0]["value"] == "Action"
+    genres.source_options["anilist"].clear()
+    fresh = {item.id: item for item in build_classification_field_catalog()}
+    assert fresh["media.genre_names"].source_options["anilist"]

@@ -1,12 +1,12 @@
 {
   "disposition_counts": {
     "alternate-auth-duplicate": 11,
-    "consolidated": 72,
-    "gateway": 199,
-    "provider-skill": 11,
+    "consolidated": 74,
+    "gateway": 208,
+    "provider-skill": 13,
     "stream_or_binary": 10,
     "transport_or_identity": 66,
-    "ui_presentation": 16
+    "ui_presentation": 15
   },
   "dynamic_gateway_routes": [
     {
@@ -18,10 +18,10 @@
       "reason": "The executor validates and expands this bounded source placeholder to one of tmdb, douban, bangumi, or anilist before calling the corresponding concrete OpenAPI route."
     }
   ],
-  "gateway_http_route_count": 200,
-  "gateway_operation_count": 202,
-  "matched_gateway_http_route_count": 199,
-  "openapi_operation_count": 385,
+  "gateway_http_route_count": 209,
+  "gateway_operation_count": 211,
+  "matched_gateway_http_route_count": 208,
+  "openapi_operation_count": 397,
   "operations": [
     {
       "disposition": "consolidated",
@@ -640,6 +640,18 @@
       ]
     },
     {
+      "disposition": "provider-skill",
+      "method": "POST",
+      "operation_ids": [],
+      "owner": "downloader-operation",
+      "path": "/api/v1/download/artist-collection",
+      "reason": "Low-level provider behavior is exposed by the self-describing provider Skill; high-level MoviePilot operations remain in moviepilot-api.",
+      "summary": "添加艺术家合集下载",
+      "tags": [
+        "download"
+      ]
+    },
+    {
       "disposition": "gateway",
       "method": "GET",
       "operation_ids": [
@@ -728,6 +740,18 @@
       ]
     },
     {
+      "disposition": "provider-skill",
+      "method": "POST",
+      "operation_ids": [],
+      "owner": "downloader-operation",
+      "path": "/api/v1/download/{hashString}/classify-source",
+      "reason": "Low-level provider behavior is exposed by the self-describing provider Skill; high-level MoviePilot operations remain in moviepilot-api.",
+      "summary": "识别并归类已有下载任务",
+      "tags": [
+        "download"
+      ]
+    },
+    {
       "disposition": "gateway",
       "method": "DELETE",
       "operation_ids": [
@@ -751,20 +775,6 @@
       "path": "/api/v1/history/download",
       "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "查询下载历史记录",
-      "tags": [
-        "history"
-      ]
-    },
-    {
-      "disposition": "gateway",
-      "method": "GET",
-      "operation_ids": [
-        "transfer.history.clear"
-      ],
-      "owner": "moviepilot-api",
-      "path": "/api/v1/history/empty/transfer",
-      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
-      "summary": "清空整理记录",
       "tags": [
         "history"
       ]
@@ -813,6 +823,20 @@
     },
     {
       "disposition": "gateway",
+      "method": "DELETE",
+      "operation_ids": [
+        "transfer.history.clear"
+      ],
+      "owner": "moviepilot-api",
+      "path": "/api/v1/history/transfer/all",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
+      "summary": "清空旧整理记录",
+      "tags": [
+        "history"
+      ]
+    },
+    {
+      "disposition": "gateway",
       "method": "POST",
       "operation_ids": [
         "transfer.history.redo"
@@ -821,6 +845,30 @@
       "path": "/api/v1/history/transfer/{history_id}/ai-redo",
       "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "智能助手重新整理",
+      "tags": [
+        "history"
+      ]
+    },
+    {
+      "disposition": "ui_presentation",
+      "method": "POST",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/history/transfer/{history_id}/cleanup-resolved",
+      "reason": "Manual confirmation of downloader cleanup is owned by the authenticated history management workflow; it is not an Agent action that verifies external cleanup.",
+      "summary": "确认下载器清理已完成",
+      "tags": [
+        "history"
+      ]
+    },
+    {
+      "disposition": "ui_presentation",
+      "method": "POST",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/history/transfer/{history_id}/discard-corrupt",
+      "reason": "Discarding corrupt transfer state is owned by the authenticated management recovery workflow; it is not a stable Agent gateway operation.",
+      "summary": "放弃损坏的整理任务",
       "tags": [
         "history"
       ]
@@ -982,124 +1030,140 @@
       ]
     },
     {
-      "disposition": "gateway",
+      "disposition": "consolidated",
       "method": "GET",
       "operation_ids": [
-        "media.categories"
+        "media.classification.policy.get"
       ],
       "owner": "moviepilot-api",
       "path": "/api/v1/media/category",
-      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
+      "reason": "This compatibility, broader-response, or UI route is represented by the safer stable operation media.classification.policy.get.",
       "summary": "查询自动分类配置",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "gateway",
+      "disposition": "consolidated",
       "method": "GET",
       "operation_ids": [
-        "media.category.config.get"
+        "media.classification.policy.get"
       ],
       "owner": "moviepilot-api",
       "path": "/api/v1/media/category/config",
-      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
+      "reason": "This compatibility, broader-response, or UI route is represented by the safer stable operation media.classification.policy.get.",
       "summary": "获取分类策略配置",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "GET",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.fields"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/fields",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "读取媒体分类字段能力目录",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "GET",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.policy.history"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/history",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "读取媒体分类策略历史",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "POST",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.policy.impact"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/impact",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "分析分类策略对近期样本的估算影响",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "GET",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.policy.get"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/policy",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "读取当前媒体分类策略",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "PUT",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.policy.update"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/policy",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "校验并发布媒体分类策略",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "POST",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.policy.preview"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/preview",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "预览媒体分类策略命中过程",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "POST",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.policy.rollback"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/rollback/{revision}",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "把历史媒体分类策略发布为新版本",
       "tags": [
         "media"
       ]
     },
     {
-      "disposition": "ui_presentation",
+      "disposition": "gateway",
       "method": "POST",
-      "operation_ids": [],
-      "owner": "host-ui",
+      "operation_ids": [
+        "media.classification.policy.validate"
+      ],
+      "owner": "moviepilot-api",
       "path": "/api/v1/media/classification/validate",
-      "reason": "Classification policy authoring, validation, preview, impact analysis, and publication are owned by the authenticated frontend editor until a stable Agent governance contract is approved.",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "校验媒体分类策略草稿",
       "tags": [
         "media"
@@ -1209,7 +1273,7 @@
       "owner": "moviepilot-api",
       "path": "/api/v1/media/search",
       "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
-      "summary": "搜索媒体/人物信息",
+      "summary": "搜索媒体/人物/艺术家信息",
       "tags": [
         "media"
       ]
@@ -1859,6 +1923,18 @@
       ]
     },
     {
+      "disposition": "ui_presentation",
+      "method": "POST",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/music/library/status",
+      "reason": "Batch music-library presence is a bounded projection for the authenticated artist resource matrix; it is not a standalone Agent business action.",
+      "summary": "批量查询音乐专辑入库状态",
+      "tags": [
+        "music"
+      ]
+    },
+    {
       "disposition": "gateway",
       "method": "POST",
       "operation_ids": [
@@ -2053,6 +2129,20 @@
     },
     {
       "disposition": "gateway",
+      "method": "PATCH",
+      "operation_ids": [
+        "plugin.folder.update"
+      ],
+      "owner": "moviepilot-api",
+      "path": "/api/v1/plugin/folders/{folder_name}",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
+      "summary": "更新插件文件夹",
+      "tags": [
+        "plugin"
+      ]
+    },
+    {
+      "disposition": "gateway",
       "method": "POST",
       "operation_ids": [
         "plugin.folder.create"
@@ -2075,6 +2165,34 @@
       "path": "/api/v1/plugin/folders/{folder_name}/plugins",
       "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "更新文件夹中的插件",
+      "tags": [
+        "plugin"
+      ]
+    },
+    {
+      "disposition": "gateway",
+      "method": "DELETE",
+      "operation_ids": [
+        "plugin.folder.plugin.remove"
+      ],
+      "owner": "moviepilot-api",
+      "path": "/api/v1/plugin/folders/{folder_name}/plugins/{plugin_id}",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
+      "summary": "从文件夹移除插件",
+      "tags": [
+        "plugin"
+      ]
+    },
+    {
+      "disposition": "gateway",
+      "method": "PUT",
+      "operation_ids": [
+        "plugin.folder.plugin.assign"
+      ],
+      "owner": "moviepilot-api",
+      "path": "/api/v1/plugin/folders/{folder_name}/plugins/{plugin_id}",
+      "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
+      "summary": "移动插件到文件夹",
       "tags": [
         "plugin"
       ]
@@ -2205,7 +2323,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "plugin.reload"
       ],
@@ -2281,6 +2399,18 @@
       "path": "/api/v1/plugin/runtime/{plugin_id}/data",
       "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "查询插件持久化数据",
+      "tags": [
+        "plugin"
+      ]
+    },
+    {
+      "disposition": "ui_presentation",
+      "method": "GET",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/plugin/runtime/{plugin_id}/data/summary",
+      "reason": "Plugin-rendered page, dashboard, or navigation metadata owned by the frontend presentation contract rather than an Agent business action.",
+      "summary": "查询插件持久化数据摘要",
       "tags": [
         "plugin"
       ]
@@ -2658,6 +2788,18 @@
       ]
     },
     {
+      "disposition": "ui_presentation",
+      "method": "PUT",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/rule/custom/reorder",
+      "reason": "Plugin-rendered page, dashboard, or navigation metadata owned by the frontend presentation contract rather than an Agent business action.",
+      "summary": "调整自定义过滤规则顺序",
+      "tags": [
+        "rule"
+      ]
+    },
+    {
       "disposition": "gateway",
       "method": "DELETE",
       "operation_ids": [
@@ -2709,6 +2851,18 @@
       "path": "/api/v1/rule/groups",
       "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "新增过滤规则组",
+      "tags": [
+        "rule"
+      ]
+    },
+    {
+      "disposition": "ui_presentation",
+      "method": "PUT",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/rule/groups/reorder",
+      "reason": "Plugin-rendered page, dashboard, or navigation metadata owned by the frontend presentation contract rather than an Agent business action.",
+      "summary": "调整过滤规则组顺序",
       "tags": [
         "rule"
       ]
@@ -3023,7 +3177,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "site.cookiecloud.sync"
       ],
@@ -3105,7 +3259,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "site.reset"
       ],
@@ -3380,6 +3534,18 @@
       ]
     },
     {
+      "disposition": "ui_presentation",
+      "method": "GET",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/storage/options",
+      "reason": "Plugin-rendered page, dashboard, or navigation metadata owned by the frontend presentation contract rather than an Agent business action.",
+      "summary": "查询可用存储选项",
+      "tags": [
+        "storage"
+      ]
+    },
+    {
       "disposition": "gateway",
       "method": "POST",
       "operation_ids": [
@@ -3437,7 +3603,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "subscription.metadata.refresh"
       ],
@@ -3456,7 +3622,7 @@
       "owner": "host-ui",
       "path": "/api/v1/subscribe/execution/batches",
       "reason": "Background subscription execution status and cancellation are owned by the authenticated frontend workflow; they are not yet a stable Agent gateway contract.",
-      "summary": "查询订阅搜索批次状态",
+      "summary": "查看订阅搜索进度",
       "tags": [
         "subscribe"
       ]
@@ -3468,7 +3634,7 @@
       "owner": "host-ui",
       "path": "/api/v1/subscribe/execution/batches/{batch_id}",
       "reason": "Background subscription execution status and cancellation are owned by the authenticated frontend workflow; they are not yet a stable Agent gateway contract.",
-      "summary": "查询订阅搜索批次",
+      "summary": "查看一次订阅搜索",
       "tags": [
         "subscribe"
       ]
@@ -3480,7 +3646,7 @@
       "owner": "host-ui",
       "path": "/api/v1/subscribe/execution/batches/{batch_id}/cancel",
       "reason": "Background subscription execution status and cancellation are owned by the authenticated frontend workflow; they are not yet a stable Agent gateway contract.",
-      "summary": "取消订阅搜索批次",
+      "summary": "停止一次订阅搜索",
       "tags": [
         "subscribe"
       ]
@@ -3641,7 +3807,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "subscription.refresh"
       ],
@@ -3655,7 +3821,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "subscription.reset"
       ],
@@ -3669,7 +3835,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "subscription.search_all"
       ],
@@ -3683,7 +3849,7 @@
     },
     {
       "disposition": "gateway",
-      "method": "GET",
+      "method": "POST",
       "operation_ids": [
         "subscription.search"
       ],

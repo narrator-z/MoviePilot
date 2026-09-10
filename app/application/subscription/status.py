@@ -18,6 +18,7 @@ class SubscriptionExecutionStatus:
     batch_id: Optional[str] = None
     task_id: Optional[str] = None
     current_site_id: Optional[int] = None
+    next_run_at: Optional[str] = None
     error: Optional[str] = None
     can_cancel: bool = False
 
@@ -79,6 +80,8 @@ class SubscriptionExecutionStatusService:
         "running",
         "matching",
         "searching",
+        "scheduled",
+        "waiting_subscription",
         "waiting_site_budget",
         "preparing",
         "submitting",
@@ -153,6 +156,8 @@ class SubscriptionExecutionStatusService:
             state = phase = "cancelling"
         elif task.state == "running":
             state = phase = task.phase or "running"
+        elif task.state == "queued" and task.phase in cls._ACTIVE_STATES:
+            state = phase = task.phase
         else:
             state = phase = task.state
         return SubscriptionExecutionStatus(
@@ -162,6 +167,7 @@ class SubscriptionExecutionStatusService:
             batch_id=task.batch_id,
             task_id=task.task_id,
             current_site_id=task.current_site_id,
+            next_run_at=task.available_at if task.state == "queued" else None,
             updated_at=task.updated_at,
             error=cls._safe_error(task.last_error),
             can_cancel=state in cls._ACTIVE_STATES,
@@ -218,4 +224,6 @@ class SubscriptionExecutionStatusService:
         """压平并限制内部错误文本，避免把堆栈或超长响应暴露给界面。"""
         if not error:
             return None
-        return " ".join(str(error).split())[:500]
+        from app.runtime.errors import public_error_message
+
+        return public_error_message(error, context="subscription")[:500]

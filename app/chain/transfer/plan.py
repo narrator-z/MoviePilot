@@ -306,7 +306,7 @@ class TransferPlanningOwner(_TransferOwnerBase):
             target_oper=self._TransferChain__select_storage_oper(target_storage),
         )
         if not transferinfo:
-            raise RuntimeError("文件整理模块未返回检查点执行结果")
+            raise RuntimeError("整理服务没有返回有效结果，请稍后重试")
         if callback:
             return callback(task, transferinfo)
         return transferinfo.success, transferinfo.message or ""
@@ -325,14 +325,14 @@ class TransferPlanningOwner(_TransferOwnerBase):
         if repository is None or not task_id:
             if task.execution_checkpoint is not None:
                 raise TransferExecutionConflictError(
-                    "绑定执行检查点的整理任务缺少持久状态仓储"
+                    "整理任务暂时无法继续，请稍后再试"
                 )
             return None
         snapshot = repository.get_snapshot(task_id=task_id)
         if snapshot is None:
             if task.execution_checkpoint is not None:
                 raise TransferExecutionConflictError(
-                    "绑定执行检查点的整理任务缺少持久执行状态"
+                    "整理任务状态暂时无法确认，请刷新整理历史后再试"
                 )
             return None
         if snapshot.state is not TransferExecutionState.SETTLING:
@@ -345,11 +345,11 @@ class TransferPlanningOwner(_TransferOwnerBase):
                 and bound_checkpoint.fingerprint != checkpoint.fingerprint
         ):
             raise TransferExecutionConflictError(
-                "内存整理任务与持久结算检查点不一致"
+                "整理任务状态已发生变化，请刷新整理历史后再试"
             )
         if checkpoint is None:
             raise TransferExecutionConflictError(
-                "settling 整理任务缺少可重放终态检查点"
+                "整理任务记录不完整，请重新识别文件后再整理"
             )
         self._TransferChain__assert_owned_lease(task)
         payload = checkpoint.payload
@@ -360,7 +360,7 @@ class TransferPlanningOwner(_TransferOwnerBase):
             )
         except (TypeError, ValueError) as error:
             raise TransferExecutionConflictError(
-                "整理执行检查点缺少确定终态"
+                "整理任务记录不完整，请重新识别文件后再整理"
             ) from error
         transfer_payload = payload.get("transferinfo")
         if isinstance(transfer_payload, dict):
@@ -388,7 +388,7 @@ class TransferPlanningOwner(_TransferOwnerBase):
             )
         else:
             raise TransferExecutionConflictError(
-                "成功整理执行检查点缺少可重放 TransferInfo"
+                "整理任务记录不完整，请重新识别文件后再整理"
             )
         expected_success = outcome is TransferExecutionOutcome.SUCCEEDED
         expected_overwrite_skip = (
@@ -399,7 +399,7 @@ class TransferPlanningOwner(_TransferOwnerBase):
                 or bool(transferinfo.overwrite_skipped) != expected_overwrite_skip
         ):
             raise TransferExecutionConflictError(
-                "整理执行检查点终态与 TransferInfo 不一致"
+                "整理任务状态已发生变化，请刷新整理历史后再试"
             )
         task.bind_execution_checkpoint(checkpoint)
         return transferinfo
@@ -551,7 +551,7 @@ class TransferPlanningOwner(_TransferOwnerBase):
             task.bind_execution_checkpoint(error.snapshot.checkpoint)
             return TransferInfo(
                 success=False,
-                message=str(error),
+                message="整理操作多次失败，请稍后重试",
                 fileitem=task.fileitem,
                 fail_list=[task.fileitem.path],
                 transfer_type=checkpoint.resolved_transfer_type,
@@ -599,14 +599,14 @@ class TransferPlanningOwner(_TransferOwnerBase):
             task.bind_execution_checkpoint(error.snapshot.checkpoint)
             return TransferInfo(
                 success=False,
-                message=str(error),
+                message="整理操作多次失败，请稍后重试",
                 fileitem=task.fileitem,
                 fail_list=[task.fileitem.path],
                 transfer_type=checkpoint.resolved_transfer_type,
                 need_notify=checkpoint.need_notify,
             )
         if result is None:
-            raise RuntimeError("文件整理模块未返回检查点执行结果")
+            raise RuntimeError("整理服务没有返回有效结果，请稍后重试")
         if step_runner is not None:
             task.bind_execution_checkpoint(step_runner.checkpoint(result))
         return result
@@ -648,7 +648,7 @@ class TransferPlanningOwner(_TransferOwnerBase):
                 classification_snapshot=classification_snapshot,
             )
         if checkpoint is None:
-            raise RuntimeError("文件整理模块未返回规划检查点")
+            raise RuntimeError("整理服务暂时无法生成有效计划，请稍后重试")
         return replace(
             checkpoint,
             classification_snapshot=classification_snapshot,
@@ -894,7 +894,7 @@ class TransferPlanningOwner(_TransferOwnerBase):
             self._TransferChain__release_task_claim(task, error=str(error))
             return TransferInfo(
                 success=False,
-                message=str(error),
+                message="整理失败，请稍后重试",
                 fileitem=fileitem,
                 fail_list=[fileitem.path],
                 transfer_type=transfer_type,
@@ -904,12 +904,12 @@ class TransferPlanningOwner(_TransferOwnerBase):
         try:
             self._TransferChain__settle_legacy_transfer_result(task, result)
         except Exception as error:
-            message = f"旧整理兼容命令 durable 终态结算失败：{error}"
-            logger.error(message)
-            self._TransferChain__release_task_claim(task, error=message)
+            diagnostic = f"旧整理兼容命令 durable 终态结算失败：{error}"
+            logger.error(diagnostic, exc_info=True)
+            self._TransferChain__release_task_claim(task, error=diagnostic)
             return TransferInfo(
                 success=False,
-                message=message,
+                message="整理结果确认失败，后台将自动重试",
                 fileitem=fileitem,
                 fail_list=[fileitem.path],
                 transfer_type=transfer_type,

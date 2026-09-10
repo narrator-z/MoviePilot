@@ -1,5 +1,6 @@
 """订阅执行治理最终受控规模门禁。"""
 
+import json
 import threading
 
 import pytest
@@ -23,7 +24,7 @@ def test_subscription_governance_controlled_scale_matrix() -> None:
     result = run_acceptance()
 
     assert result["schema_version"] == 5
-    assert result["passed"] is True
+    assert result["passed"] is True, json.dumps(result, ensure_ascii=False, indent=2)
     assert all(result["gates"].values())
     assert result["method"]["match_entrypoint"] == "SubscribeChain.match"
     assert result["method"]["download_selection"] == "DownloadChain.batch_download"
@@ -97,6 +98,53 @@ def test_subscription_governance_controlled_scale_matrix() -> None:
         for case in result["durable_cases"]
         for observation in case["site_observations"]
     )
+
+
+def test_scale_pressure_waits_for_transport_after_first_lease(monkeypatch, tmp_path):
+    """首个租约取得后延迟进入请求，也必须在请求真正进行时验证并发拒绝。"""
+    coordinator = threading.current_thread()
+    contender_observed = threading.Event()
+    first_lease = threading.Event()
+
+    class RequestStartedEvent(threading.Event):
+        """让租约持有者知道另一 owner 已等待真实请求开始。"""
+
+        def wait(self, timeout=None):
+            """排除主协调线程的等待，仅由请求竞争方放行首个租约。"""
+            if threading.current_thread() is not coordinator:
+                contender_observed.set()
+            return super().wait(timeout)
+
+    class DelayedRequestBoundary(scale._ScaleSiteRequestBoundary):
+        """区分正确的在途等待与过早发生的预算拒绝。"""
+
+        def __init__(self, *, site_id):
+            """替换请求开始事件，控制首个租约到网络边界之间的调度。"""
+            super().__init__(site_id=site_id)
+            self.first_started = RequestStartedEvent()
+
+        def record_budget_rejection(self):
+            """保留拒绝瞬间的在途数量，再解除首个租约的受控暂停。"""
+            super().record_budget_rejection()
+            contender_observed.set()
+
+    original_acquire = scale.SubscriptionSiteBudgetController.acquire
+
+    def acquire_before_transport(self, site_id):
+        """将首个合法租约暂停到竞争方已等待请求或提前遭到拒绝。"""
+        claim = original_acquire(self, site_id)
+        if not first_lease.is_set():
+            first_lease.set()
+            assert contender_observed.wait(timeout=scale._SITE_PRESSURE_SYNC_TIMEOUT)
+        return claim
+
+    monkeypatch.setattr(scale, "_ScaleSiteRequestBoundary", DelayedRequestBoundary)
+    monkeypatch.setattr(scale.SubscriptionSiteBudgetController, "acquire", acquire_before_transport)
+
+    result = _run_durable_governance(ScaleCase("delayed-request", 2, 1, 2, 1), tmp_path)
+
+    assert result["site_pressure_valid"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+    assert result["site_observations"][0]["request_active_at_rejection"] == 1
 
 
 @pytest.mark.parametrize("mutation", ["bypass", "early_release", "allow_concurrent"])
@@ -179,22 +227,21 @@ def test_scale_validator_rejects_fake_site_pressure(monkeypatch, tmp_path, mutat
 
 
 def test_scale_validator_rejects_unfinished_site_wrapper(monkeypatch, tmp_path):
-    """失败已登记但 wrapper 尚未返回时，压力门禁必须拒绝并暴露未收口 owner。"""
+    """延后已登记但 wrapper 尚未返回时，压力门禁必须拒绝并暴露未收口 owner。"""
     original_wrapper = SearchChain._search_site_torrents_with_budget
     release_stalled = threading.Event()
     threads_before = set(threading.enumerate())
 
     def stall_after_rejection(self, *, site, keyword, mtype, page):
         """模拟预算拒绝已记录、调用方却未取得返回值的挂起路径。"""
-        original_record_failure = self.record_subscription_site_budget_failure
+        original_record_deferred = self.record_subscription_site_budget_deferred
 
-        def record_failure_and_stall(error: str) -> None:
+        def record_deferred_and_stall(deferral) -> None:
             """在拒绝已登记后阻塞原始 wrapper 的返回。"""
-            original_record_failure(error)
-            if "冷却或已有在途搜索" in error:
-                release_stalled.wait()
+            original_record_deferred(deferral)
+            release_stalled.wait()
 
-        self.record_subscription_site_budget_failure = record_failure_and_stall
+        self.record_subscription_site_budget_deferred = record_deferred_and_stall
         try:
             return original_wrapper(
                 self,
@@ -204,7 +251,7 @@ def test_scale_validator_rejects_unfinished_site_wrapper(monkeypatch, tmp_path):
                 page=page,
             )
         finally:
-            self.record_subscription_site_budget_failure = original_record_failure
+            self.record_subscription_site_budget_deferred = original_record_deferred
 
     monkeypatch.setattr(
         SearchChain,

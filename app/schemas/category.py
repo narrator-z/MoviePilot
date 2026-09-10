@@ -3,6 +3,8 @@ from typing import Dict, Literal, Optional, TypeAlias, Union
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
+from app.schemas.common import JsonData
+
 
 class CategoryRule(BaseModel):
     """
@@ -196,10 +198,6 @@ class ClassificationPolicy(_ClassificationModel):
     categories: list[ClassificationCategory] = Field(default_factory=list, description="稳定分类定义列表")
     rules: list[ClassificationRule] = Field(default_factory=list, description="全局有序规则列表")
     fallbacks: dict[ClassificationMediaType, str] = Field(default_factory=dict, description="各媒体类型的兜底分类 ID")
-    source_fallbacks: dict[str, dict[ClassificationMediaType, str]] = Field(
-        default_factory=dict,
-        description="按数据源覆盖的媒体类型兜底分类 ID",
-    )
     field_aliases: dict[str, dict[str, str]] = Field(default_factory=dict, description="字段值别名到规范值的映射")
     updated_at: Optional[datetime] = Field(default=None, description="策略最后发布时间")
 
@@ -424,6 +422,10 @@ class ClassificationFieldDefinition(_ClassificationModel):
     operators: list[ClassificationOperator] = Field(default_factory=list, description="字段允许的操作符")
     media_types: list[ClassificationMediaType] = Field(default_factory=list, description="字段适用的媒体类型")
     options: list[ClassificationFieldOption] = Field(default_factory=list, description="字段可选值目录")
+    source_options: dict[str, list[ClassificationFieldOption]] = Field(
+        default_factory=dict,
+        description="按数据源区分的开放候选值；与通用选项合并展示",
+    )
     allow_custom_values: bool = Field(
         default=True,
         description="前端是否允许输入选项目录之外的值",
@@ -523,8 +525,32 @@ class ClassificationFactsPreviewInput(_ClassificationModel):
     facts: ClassificationFacts = Field(description="本次预览使用的标准化分类事实")
 
 
-ClassificationPreviewInput: TypeAlias = ClassificationFactsPreviewInput
-"""首版预览输入联合；C1 将在不破坏 facts 形状的前提下增加身份和历史输入。"""
+class ClassificationMediaPreviewInput(_ClassificationModel):
+    """从媒体搜索结果选择的完整媒体信息，用于直接预览分类结果。"""
+
+    kind: Literal["media"] = Field(default="media", description="预览输入类型")
+    media: dict[str, JsonData] = Field(description="从媒体搜索结果选择的媒体信息")
+
+    @model_validator(mode="after")  # type: ignore[misc]
+    def validate_media_identity(self) -> "ClassificationMediaPreviewInput":
+        """确保搜索结果包含分类所需的来源、编号和媒体类型。"""
+        source = str(self.media.get("media_source") or "").strip()
+        media_id = str(self.media.get("media_id") or "").strip()
+        media_type = str(self.media.get("type") or "").strip()
+        if not source:
+            raise ValueError("选择的媒体缺少数据来源")
+        if not media_id:
+            raise ValueError("选择的媒体缺少媒体编号")
+        if media_type not in {"电影", "电视剧", "音乐"}:
+            raise ValueError("选择的媒体类型不受分类规则支持")
+        return self
+
+
+ClassificationPreviewInput: TypeAlias = Union[
+    ClassificationFactsPreviewInput,
+    ClassificationMediaPreviewInput,
+]
+"""预览输入联合；前端通常提交搜索结果，旧调用仍可提交标准事实。"""
 
 
 class ClassificationPreviewRequest(_ClassificationModel):
@@ -603,7 +629,11 @@ class ClassificationImpactAnalysis(_ClassificationModel):
     candidate_revision: int = Field(ge=2, description="候选策略预计发布 revision")
     requested_limit: int = Field(ge=1, le=200, description="请求的最大样本数量")
     scanned_count: int = Field(ge=0, description="为生成样本实际扫描的记录数量")
-    skipped_count: int = Field(ge=0, description="因身份缺失、类型无效或重复而跳过的记录数量")
+    skipped_count: int = Field(ge=0, description="未参与比较的记录数量")
+    unresolved_count: int = Field(
+        ge=0,
+        description="身份有效但无法重新获取完整媒体信息的记录数量",
+    )
     truncated: bool = Field(description="是否因样本或示例上限截断结果")
     sample_count: int = Field(ge=0, description="实际参与比较的唯一有效样本数量")
     changed_count: int = Field(ge=0, description="分类结果发生变化的样本数量")
@@ -611,7 +641,7 @@ class ClassificationImpactAnalysis(_ClassificationModel):
     category_changed_count: int = Field(ge=0, description="稳定分类 ID 发生变化的样本数量")
     path_only_changed_count: int = Field(ge=0, description="分类 ID 不变但路径变化的样本数量")
     rule_changed_only_count: int = Field(ge=0, description="分类与路径不变但命中规则变化的样本数量")
-    became_fallback_count: int = Field(ge=0, description="候选策略改为通用或来源级兜底的样本数量")
+    became_fallback_count: int = Field(ge=0, description="候选策略改为媒体类型默认分类的样本数量")
     partial_count: int = Field(ge=0, description="任一策略因事实缺失产生 partial 的样本数量")
     degraded_count: int = Field(
         ge=0,

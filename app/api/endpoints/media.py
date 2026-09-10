@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, Any, List, Optional, Union
+from typing import Annotated, Any, List, Optional, Union, cast
 from uuid import UUID
 
 from fastapi import Depends, Query
@@ -25,6 +25,7 @@ from app.domain.meta.metamusic import MetaMusic
 from app.domain.metainfo import MetaInfo, MetaInfoPath
 from app.schemas.category import CategoryConfig as _SchemaCategoryConfig
 from app.schemas.category import MediaCategoryMap as _SchemaMediaCategoryMap
+from app.schemas.context import MediaDetailResult as _SchemaMediaDetailResult
 from app.schemas.context import MediaEpisodeGroup as _SchemaMediaEpisodeGroup
 from app.schemas.context import MediaPerson as _SchemaMediaPerson
 from app.schemas.context import MediaSearchResults as _SchemaMediaSearchResults
@@ -33,7 +34,7 @@ from app.schemas.event import MediaSourceInfo as _SchemaMediaSourceInfo
 from app.schemas.media import normalize_media_source, resolve_media_identity
 from app.schemas.response import Response as _SchemaResponse
 from app.schemas.token import TokenPayload as _SchemaTokenPayload
-from app.schemas.types import MUSIC_ENTITY_RECORDING, MediaSource, MediaType
+from app.schemas.types import MUSIC_ENTITY_ALBUM, MUSIC_ENTITY_RECORDING, MediaSource, MediaType, MusicEntityType
 from app.schemas.workflow import Context as _SchemaContext
 from app.schemas.workflow import FileItem as _SchemaFileItem
 from app.schemas.workflow import MediaInfo as _SchemaMediaInfo
@@ -63,11 +64,6 @@ _BUILTIN_MEDIA_SOURCES = (
         media_source=MediaSource.DoubanMusic,
         media_types=[MediaType.MUSIC],
     ),
-    _SchemaMediaSourceInfo(name="哔哩哔哩", media_source=MediaSource.Bilibili),
-    _SchemaMediaSourceInfo(name="芒果TV", media_source=MediaSource.MangoTV),
-    _SchemaMediaSourceInfo(name="咪咕视频", media_source=MediaSource.MiguVideo),
-    _SchemaMediaSourceInfo(name="腾讯视频", media_source=MediaSource.TencentVideo),
-    _SchemaMediaSourceInfo(name="爱奇艺", media_source=MediaSource.Iqiyi),
 )
 
 
@@ -103,6 +99,26 @@ MediaSourceQuery = Annotated[
     BeforeValidator(_split_media_source_query),
     Query(),
 ]
+
+
+def _get_search_result_source(
+    obj: Union[_SchemaMediaInfo, _SchemaMediaPerson, dict[str, Any]],
+) -> Any:
+    """读取影视、人物或音乐搜索结果中的媒体来源标识。"""
+    if isinstance(obj, dict):
+        return obj.get("media_source") or obj.get("source")
+    return getattr(obj, "media_source", None) or getattr(obj, "source", None)
+
+
+def _serialize_search_result(obj: Any) -> dict[str, Any]:
+    """将域对象或 Pydantic 人物对象转换为统一搜索响应字典。"""
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "to_dict"):
+        return cast(dict[str, Any], obj.to_dict())
+    if hasattr(obj, "model_dump"):
+        return cast(dict[str, Any], obj.model_dump())
+    return {}
 
 
 def _is_valid_source_media_id(
@@ -280,7 +296,7 @@ async def recognize_file2(
 
 @router.get(
     "/search",
-    summary="搜索媒体/人物信息",
+    summary="搜索媒体/人物/艺术家信息",
     response_model=_SchemaMediaSearchResults,
 )
 async def search(
@@ -289,27 +305,21 @@ async def search(
     page: int = 1,
     count: int = 8,
     media_source: MediaSourceQuery = (),
+    music_type: Optional[MusicEntityType] = None,
     _: _SchemaTokenPayload = Depends(verify_token),
 ) -> Any:
     """
-    模糊搜索媒体、合集、人物或音乐信息列表。
+    模糊搜索媒体、合集、影视人物、音乐艺术家或音乐信息列表。
 
     :param title: 搜索关键词
     :param type: 搜索类型，支持 media、music、collection、person
     :param page: 页码
     :param count: 每页数量
     :param media_source: 请求级搜索数据源枚举；可重复传入，逗号格式仅用于兼容旧客户端
+    :param music_type: 可选音乐实体类型；未指定时音乐搜索仅返回单曲和专辑，显式指定时用于实体选择
     :param _: Token校验
     :return: 搜索结果列表
     """
-
-    def __get_source(obj: Union[_SchemaMediaInfo, _SchemaMediaPerson, dict]):
-        """
-        获取对象属性
-        """
-        if isinstance(obj, dict):
-            return obj.get("media_source")
-        return obj.media_source
 
     # 直接函数调用也可能绕过 FastAPI/Pydantic，仅在该测试与内部兼容边界补一次规范化。
     selected_sources = (
@@ -321,23 +331,28 @@ async def search(
     source_selection = selected_sources or None
 
     media_chain = MediaChain()
-    if type == "music" or any(is_music_media_source(source) for source in selected_sources):
-        # 音乐搜索统一入口，与影视搜索共用 /media/search
-        music_search_params = {"query": title, "limit": count}
-        # 未指定来源时由 MediaChain 使用默认 MusicBrainz 来源。
-        if source_selection:
-            music_search_params["media_source"] = source_selection
-        music_infos = await media_chain.async_search_music(**music_search_params)
-        return [info.to_dict() for info in music_infos] if music_infos else []
-    if type == "media":
-        _, medias = await media_chain.async_search(title=title, media_source=source_selection)
+    is_music = type == "music" or any(is_music_media_source(source) for source in selected_sources)
+    if type == "person":
+        persons = await media_chain.async_search_persons(name=title, media_source=source_selection)
+        result = [_serialize_search_result(person) for person in persons or []]
+    elif is_music:
+        music_types = (music_type,) if music_type else (MUSIC_ENTITY_RECORDING, MUSIC_ENTITY_ALBUM)
+        filtered_music_results = await media_chain.async_search_music(
+            query=title,
+            limit=count,
+            media_source=source_selection,
+            music_types=music_types,
+        )
+        result = [media.to_dict() for media in filtered_music_results] if filtered_music_results else []
+    elif type == "media":
+        _media_meta, medias = await media_chain.async_search(title=title, media_source=source_selection)
         result = [media.to_dict() for media in medias] if medias else []
     elif type == "collection":
         collections = await media_chain.async_search_collections(name=title, media_source=source_selection)
         result = [collection.to_dict() for collection in collections] if collections else []
     else:  # person
         persons = await media_chain.async_search_persons(name=title, media_source=source_selection)
-        result = [person.model_dump() for person in persons] if persons else []
+        result = [_serialize_search_result(person) for person in persons or []]
 
     if not result:
         return []
@@ -347,7 +362,7 @@ async def search(
     setting_order = search_source.split(",") if search_source else []
     sort_order = {source: index for index, source in enumerate(setting_order)}
 
-    sorted_result = sorted(result, key=lambda x: sort_order.get(__get_source(x), 4))
+    sorted_result = sorted(result, key=lambda x: sort_order.get(_get_search_result_source(x), 4))
     return sorted_result[(page - 1) * count : page * count]
 
 
@@ -624,7 +639,7 @@ async def seasons(
     return []
 
 
-@router.get("/{media_id}", summary="查询媒体详情", response_model=_SchemaMediaInfo)
+@router.get("/{media_id}", summary="查询媒体详情", response_model=_SchemaMediaDetailResult)
 async def detail(
     media_id: str,
     media_source: MediaSource,
@@ -632,7 +647,7 @@ async def detail(
     _: _SchemaTokenPayload = Depends(verify_token),
 ) -> Any:
     """
-    根据媒体来源和原生 ID 查询媒体信息，type_name: 电影/电视剧
+    根据媒体来源和原生 ID 查询影视或音乐信息
     """
     mtype = MediaType(type_name)
     normalized_source, normalized_media_id = resolve_media_identity(

@@ -18,6 +18,7 @@ from app.application.subscription.execution import (
 )
 from app.application.subscription.mutation import SubscriptionMutation
 from app.application.subscription.sitebudget import SubscriptionSearchCancelled
+from app.chain.search import SearchChain
 from app.chain.subscribe.facade import SubscribeChain
 from app.domain.context import (
     MUSIC_ENTITY_ALBUM,
@@ -44,6 +45,14 @@ def _music_info() -> MusicInfo:
     )
 
 
+def _search_chain_for_torrents(contexts: list[Context]) -> SearchChain:
+    """只替换站点 I/O，保留真实共用搜索、解析、过滤和匹配流程。"""
+    chain = SearchChain()
+    chain._SearchChain__search_all_sites = Mock(return_value=[context.torrent_info for context in contexts])
+    chain.process = Mock(wraps=chain.process)
+    return chain
+
+
 def _subscribe(**overrides) -> SimpleNamespace:
     """构造不依赖数据库的音乐订阅对象。"""
     values = dict(
@@ -52,6 +61,7 @@ def _subscribe(**overrides) -> SimpleNamespace:
         year="2003",
         type=MediaType.MUSIC.value,
         keyword=None,
+        search_imdbid=False,
         media_source="musicbrainz",
         media_id="recording-1",
         mediaid=None,
@@ -196,10 +206,9 @@ def test_music_subscribe_reuses_search_download_and_finish_flow():
             category=MediaType.MUSIC.value,
         )
     )
-    search_chain = Mock()
-    search_chain.search_by_title.side_effect = [[context], []]
+    search_chain = _search_chain_for_torrents([context])
     download_chain = Mock()
-    download_chain.batch_download.return_value = ([context], None)
+    download_chain.batch_download.side_effect = lambda **kwargs: (kwargs["contexts"], None)
     chain = SubscribeChain()
     chain.finish_subscribe_or_not = Mock()
     chain.check_and_handle_existing_media = Mock(return_value=(False, {}))
@@ -209,17 +218,17 @@ def test_music_subscribe_reuses_search_download_and_finish_flow():
     chain.subscription_repository = subscribe_oper
 
     with patch.object(SubscribeChain, "_recognize_music_subscribe", return_value=target), \
-            patch("app.chain._music.SearchChain", return_value=search_chain), \
+            patch("app.chain.subscribe.search.SearchChain", return_value=search_chain), \
             patch("app.chain._music.DownloadChain", return_value=download_chain):
         chain._search_music_subscribe(subscribe)
 
-    search_chain.search_by_title.assert_any_call(
-        title="周杰伦 晴天", sites=[], mtype=MediaType.MUSIC, rule_groups=[]
-    )
+    search_chain.process.assert_called_once()
+    assert search_chain.process.call_args.kwargs["keyword"] == "周杰伦 晴天"
+    assert search_chain.process.call_args.kwargs["sites"] == []
     download_chain.batch_download.assert_called_once()
     matched_context = download_chain.batch_download.call_args.kwargs["contexts"][0]
     assert matched_context is not context
-    assert matched_context.media_info is target
+    assert matched_context.media_info.media_id == target.media_id
     assert isinstance(matched_context.meta_info, MetaMusic)
     assert matched_context.meta_info.org_string == "周杰伦 - 晴天 FLAC"
     assert matched_context.meta_info.audio_format == "FLAC"
@@ -233,7 +242,7 @@ def test_music_search_honours_cancel_before_external_work():
     chain = SubscribeChain()
     execution_context = _execution_context(cancelled=lambda: True)
 
-    with patch("app.chain._music.SearchChain") as search_chain, \
+    with patch("app.chain.subscribe.search.SearchChain") as search_chain, \
             pytest.raises(SubscriptionSearchCancelled):
         chain._search_music_subscribe(
             subscribe,
@@ -241,6 +250,39 @@ def test_music_search_honours_cancel_before_external_work():
         )
 
     search_chain.assert_not_called()
+
+
+def test_music_best_version_filters_before_stopping_keyword_search():
+    """首关键词只有当前音质时，应继续换词直到找到满足洗版条件的资源。"""
+    subscribe = _subscribe(best_version=1, current_priority=90)
+    target = _music_info()
+    chain = SubscribeChain()
+    chain.subscription_repository = Mock()
+    chain.subscription_repository.get.return_value = subscribe
+    search_chain = SearchChain()
+    calls = []
+
+    def search(**kwargs):
+        """首轮为 CD 音质，组合词返回更高音质。"""
+        calls.append(kwargs["keyword"])
+        quality = "16bit 44.1kHz" if len(calls) == 1 else "24bit 96kHz"
+        return [TorrentInfo(title=f"周杰伦 - 晴天 FLAC {quality}", category=MediaType.MUSIC.value)]
+
+    search_chain._SearchChain__search_all_sites = Mock(side_effect=search)
+    with (
+        patch.object(chain, "_prepare_music_subscribe", return_value=(subscribe, target, MetaMusic.from_music_info(target))),
+        patch.object(chain, "_download_music_subscribe") as download,
+        patch("app.chain.search.execution.time.sleep"),
+        patch.object(search_chain, "consume_subscription_site_budget_failures", wraps=search_chain.consume_subscription_site_budget_failures) as budget,
+    ):
+        chain._process_search_subscription(subscribe, search_chain)
+    assert calls == ["晴天", "周杰伦 晴天"]
+    budget.assert_called_once_with(has_results=True)
+    download.assert_called_once()
+    contexts = download.call_args.args[2]
+    assert len(contexts) == 1
+    assert contexts[0].meta_info.bit_depth == 24
+    assert contexts[0].torrent_info.pri_order > 90
 
 
 def test_music_download_marks_shared_execution_context_before_side_effect():
@@ -466,6 +508,43 @@ def test_music_subscribe_matches_artist_from_resource_description():
     assert len(matched) == 1
 
 
+def test_music_rss_applies_subscription_words_without_mutating_cache():
+    """RSS 与主动搜索使用同一订阅识别词，并保持缓存中的资源原文独立。"""
+    subscribe = _subscribe(custom_words="错误曲名 => 晴天")
+    torrent = TorrentInfo(title="周杰伦 - 错误曲名 FLAC", category=MediaType.MUSIC.value)
+    original_meta = MetaMusic.parse_resource(torrent.title)
+    context = Context(torrent_info=torrent, meta_info=original_meta)
+    chain = SubscribeChain()
+    chain.filter_torrents = Mock(side_effect=lambda **kwargs: kwargs["torrent_list"])
+
+    matched = chain._filter_music_subscribe_contexts(subscribe, _music_info(), [context])
+
+    assert len(matched) == 1
+    assert matched[0].meta_info.title == "晴天"
+    assert matched[0].meta_info.apply_words == ["错误曲名 => 晴天"]
+    assert matched[0].meta_info is not original_meta
+    assert context.meta_info.title == "错误曲名"
+    assert context.torrent_info.title == "周杰伦 - 错误曲名 FLAC"
+
+
+@pytest.mark.parametrize("album_target", [False, True])
+def test_music_rss_rejects_subtitle_version_or_partial_album(album_target):
+    """RSS 不能把副标题现场版或单曲所属专辑当作可自动下载的目标。"""
+    target = _music_info()
+    if album_target:
+        target.music_type = MUSIC_ENTITY_ALBUM
+        target.title = target.album
+    context = Context(torrent_info=TorrentInfo(
+        title="周杰伦 - 晴天 FLAC",
+        description="专辑：叶惠美" if album_target else "版本：Live",
+        category=MediaType.MUSIC.value,
+    ))
+    chain = SubscribeChain()
+    chain.filter_torrents = Mock(side_effect=lambda **kwargs: kwargs["torrent_list"])
+
+    assert chain._filter_music_subscribe_contexts(_subscribe(), target, [context]) == []
+
+
 def test_album_best_version_requires_confirmed_full_coverage():
     """最高优先级的非完整专辑不得写入洗版基线或完成订阅。"""
     subscribe = _subscribe(
@@ -520,13 +599,13 @@ def test_music_subscribe_ignores_non_music_category():
             category=MediaType.MOVIE.value,
         )
     )
-    search_chain = Mock()
-    search_chain.search_by_title.return_value = [context]
+    search_chain = _search_chain_for_torrents([context])
     chain = SubscribeChain()
     chain.check_and_handle_existing_media = Mock(return_value=(False, {}))
 
     with patch.object(SubscribeChain, "_recognize_music_subscribe", return_value=_music_info()), \
-            patch("app.chain._music.SearchChain", return_value=search_chain), \
+            patch("app.chain.subscribe.search.SearchChain", return_value=search_chain), \
+            patch("app.chain.search.execution.time.sleep"), \
             patch("app.chain._music.DownloadChain") as download_chain:
         chain._search_music_subscribe(subscribe)
 
@@ -542,14 +621,14 @@ def test_music_subscribe_ignores_unrelated_music_title():
             category=MediaType.MUSIC.value,
         )
     )
-    search_chain = Mock()
-    search_chain.search_by_title.return_value = [context]
+    search_chain = _search_chain_for_torrents([context])
 
     chain = SubscribeChain()
     chain.check_and_handle_existing_media = Mock(return_value=(False, {}))
 
     with patch.object(SubscribeChain, "_recognize_music_subscribe", return_value=_music_info()), \
-            patch("app.chain._music.SearchChain", return_value=search_chain), \
+            patch("app.chain.subscribe.search.SearchChain", return_value=search_chain), \
+            patch("app.chain.search.execution.time.sleep"), \
             patch("app.chain._music.DownloadChain") as download_chain:
         chain._search_music_subscribe(subscribe)
 
@@ -563,7 +642,7 @@ def test_music_subscribe_skips_search_when_target_is_already_in_library():
     chain.check_and_handle_existing_media = Mock(return_value=(True, {}))
 
     with patch.object(SubscribeChain, "_recognize_music_subscribe", return_value=_music_info()), \
-            patch("app.chain._music.SearchChain") as search_chain, \
+            patch("app.chain.subscribe.search.SearchChain") as search_chain, \
             patch("app.chain._music.DownloadChain") as download_chain:
         chain._search_music_subscribe(subscribe)
 

@@ -90,3 +90,19 @@ vulnerabilities:
       - pkg:golang/golang.org/x/image@v0.44.0
     expired_at: 2026-11-20
     statement: The official rclone binary (1.75.0) embeds golang.org/x/image v0.44.0; CVE-2026-46603 is fixed only in x/image 0.45.0, for which no patched rclone release is available yet.
+  - id: CVE-2026-33164
+    paths:
+      - usr/lib/*-linux-gnu/libde265.so.0
+    purls:
+      - pkg:deb/debian/libde265-0@1.0.15-1+deb13u1
+      - pkg:deb/debian/libde265-0
+    expired_at: 2026-11-20
+    statement: libde265 (HEVC decoder) is pulled in via the pinned Debian base image; the fixed version 1.0.15-1+deb13u2 is not yet adopted by the base image tag we pin, so this HIGH is suppressed until the base image picks up the Debian security update. Reassess when this exception expires.
+  - id: CVE-2026-84445
+    paths:
+      - usr/bin/rclone
+    purls:
+      - pkg:golang/google.golang.org/grpc@v1.84.0-dev.0.20260723093437-b6eac429d7b6
+      - pkg:golang/google.golang.org/grpc
+    expired_at: 2026-11-20
+    statement: gRPC-Go is embedded in the rclone binary (1.75.0); CVE-2026-84445 is fixed only in grpc 1.82.2/1.83.2/1.85.0-dev, for which no patched rclone release is available yet. Reassess when this exception expires.

@@ -182,7 +182,7 @@ async def all_plugins(
     state: Optional[str] = "all",
     force: bool = False,
     query: Optional[str] = None,
-    max_results: Annotated[int, Query(ge=1, le=200)] = 50,
+    max_results: Annotated[int, Query(ge=1, le=1000)] = 500,
     page: CompatiblePageParam = None, count: CompatibleCountParam = None,
     response: Response = None,
 ) -> List[_SchemaPlugin]:

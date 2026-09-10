@@ -72,18 +72,22 @@ jobs:
             platform: linux/amd64
             platform_tag: amd64
             runner: ubuntu-latest
+            cache_scope: moviepilot-v3-standard-docker-amd64
           - variant: standard
             platform: linux/arm64/v8
             platform_tag: arm64
             runner: ubuntu-24.04-arm
+            cache_scope: moviepilot-v3-standard-docker-arm64
           - variant: free-threaded
             platform: linux/amd64
             platform_tag: amd64
             runner: ubuntu-latest
+            cache_scope: moviepilot-v3t-docker-amd64
           - variant: free-threaded
             platform: linux/arm64/v8
             platform_tag: arm64
             runner: ubuntu-24.04-arm
+            cache_scope: moviepilot-v3t-docker-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -180,8 +184,8 @@ jobs:
             MOVIEPILOT_PLUGINS_REF=${{ steps.payloads.outputs.plugins_revision }}
             MOVIEPILOT_RESOURCES_REF=${{ steps.payloads.outputs.resources_revision }}
             MOVIEPILOT_PYTHON_VARIANT=${{ matrix.variant }}
-          cache-from: type=gha,scope=moviepilot-v3-${{ matrix.variant }}-docker-${{ matrix.platform_tag }},version=2
-          cache-to: type=gha,scope=moviepilot-v3-${{ matrix.variant }}-docker-${{ matrix.platform_tag }},mode=max,version=2
+          cache-from: type=gha,scope=${{ matrix.cache_scope }},version=2
+          cache-to: type=gha,scope=${{ matrix.cache_scope }},mode=max,version=2
 
       - name: Scan ${{ matrix.variant }} ${{ matrix.platform_tag }} candidate vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
@@ -343,6 +347,19 @@ jobs:
 
       - name: Set Up Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Login DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Login GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish multi-architecture image
         uses: docker/build-push-action@v7

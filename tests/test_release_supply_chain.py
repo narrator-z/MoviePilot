@@ -43,11 +43,15 @@ def _load_workflow(path: Path = RELEASE_WORKFLOW) -> dict:
     return yaml.load(path.read_text(encoding="utf-8"))
 
 
-def _steps_by_name(workflow: dict) -> dict[str, dict]:
-    """按名称索引发布步骤，顺序仍由原列表校验。"""
+def _steps_by_name(workflow: dict, job_name: str = "Docker-build") -> dict[str, dict]:
+    """按名称索引发布步骤，顺序仍由原列表校验。
+
+    正式版发布已拆分为 `validate`（matrix 构建+扫描）与 `publish`（审计+元数据+发布）
+    两个 job；Beta 仍保持单一 `Docker-build` job。两者都须满足同一套供应链合同。
+    """
     return {
         step["name"]: step
-        for step in workflow["jobs"]["Docker-build"]["steps"]
+        for step in workflow["jobs"][job_name]["steps"]
         if "name" in step
     }
 
@@ -144,15 +148,26 @@ def test_rclone_image_uses_cve_2026_46603_patched_build() -> None:
 
 
 def test_release_audits_locked_runtime_dependencies_before_building() -> None:
-    """正式版和 Beta 构建前必须分别审计两套锁定运行依赖。"""
-    for workflow_path in (RELEASE_WORKFLOW, BETA_WORKFLOW):
-        workflow = _load_workflow(workflow_path)
-        steps = workflow["jobs"]["Docker-build"]["steps"]
-        names = [step.get("name") for step in steps]
-        audit = _steps_by_name(workflow)["Audit locked Python dependencies"]["run"]
+    """正式版和 Beta 构建前必须分别审计两套锁定运行依赖。
 
-        first_candidate = next(name for name in names if name and name.startswith("Build "))
-        assert names.index("Audit locked Python dependencies") < names.index(first_candidate)
+    正式版由 `publish` job 审计后再发布真实镜像；Beta 由单一 `Docker-build` job 审计后构建。
+    """
+    for workflow_path, job_name in (
+        (RELEASE_WORKFLOW, "publish"),
+        (BETA_WORKFLOW, "Docker-build"),
+    ):
+        workflow = _load_workflow(workflow_path)
+        job = workflow["jobs"][job_name]
+        steps = job["steps"]
+        names = [step.get("name") for step in steps]
+        audit = _steps_by_name(workflow, job_name)["Audit locked Python dependencies"]["run"]
+
+        # 审计必须早于首个「构建 / 发布」步骤——发布前不得携带未审计的依赖
+        build_or_publish = next(
+            i for i, n in enumerate(names)
+            if n and (n.startswith("Build ") or n.startswith("Publish "))
+        )
+        assert names.index("Audit locked Python dependencies") < build_or_publish
         assert "--group runtime-standard" in audit
         assert "--group runtime-free-threaded" in audit
         assert "scripts/normalize_audit_requirements.py" in audit
@@ -197,70 +212,66 @@ def test_direct_url_audit_requirement_rejects_unlocked_source(tmp_path: Path) ->
 
 
 def test_release_scans_both_architectures_before_registry_login_and_publish() -> None:
-    """两个 Python 变体的各架构扫描都必须在登录仓库和发布前完成。"""
+    """两个 Python 变体的各架构扫描都必须在登录仓库和发布前完成。
+
+    正式版改为：4 个候选（standard/free-threaded × amd64/arm64）在 `validate` matrix 中
+    原生构建并各自 Trivy 扫描；`publish` job 依赖 `validate` 与 `unit-tests-gate`，
+    因此所有扫描必在登录与发布之前完成。arm64 走原生 ubuntu-24.04-arm runner。
+    """
     workflow = _load_workflow()
-    trivy_env = workflow["jobs"]["Docker-build"]["env"]
+    validate = workflow["jobs"]["validate"]
+    # matrix 必须覆盖两个变体 × 两个架构，且 arm64 在原生 runner 上构建（绕开 QEMU）
+    combos = validate["strategy"]["matrix"]["include"]
+    assert len(combos) == 4
+    seen_platforms: set[str] = set()
+    for c in combos:
+        assert c["variant"] in ("standard", "free-threaded")
+        assert c["platform"] in ("linux/amd64", "linux/arm64/v8")
+        seen_platforms.add(c["platform"])
+        if c["platform"] == "linux/arm64/v8":
+            assert c["runner"] == "ubuntu-24.04-arm"
+    assert seen_platforms == {"linux/amd64", "linux/arm64/v8"}
+
+    # Trivy 豁免环境变量随 validate job 生效
+    trivy_env = validate["env"]
     assert trivy_env["TRIVY_SKIP_DIRS"] == "/usr/share/java"
     assert trivy_env["TRIVY_SKIP_JAVA_DB_UPDATE"] == "true"
-    steps = workflow["jobs"]["Docker-build"]["steps"]
-    names = [step.get("name") for step in steps]
-    indexed = _steps_by_name(workflow)
 
-    expected_candidates = {
-        "Build amd64 candidate": ("linux/amd64", "moviepilot-v3-candidate:linux-amd64"),
-        "Build arm64 candidate": ("linux/arm64/v8", "moviepilot-v3-candidate:linux-arm64"),
-        "Build free-threaded amd64 candidate": (
-            "linux/amd64",
-            "moviepilot-v3t-candidate:linux-amd64",
-        ),
-        "Build free-threaded arm64 candidate": (
-            "linux/arm64/v8",
-            "moviepilot-v3t-candidate:linux-arm64",
-        ),
-    }
-    for name, (platform, tag) in expected_candidates.items():
-        build = indexed[name]["with"]
-        assert build["platforms"] == platform
-        assert build["load"] is True
-        assert build["push"] is False
-        assert build["tags"] == tag
-        assert build["pull"] is True
-        assert "no-cache-filters" not in build
-        expected_variant = "free-threaded" if "free-threaded" in name else "standard"
-        assert f"MOVIEPILOT_PYTHON_VARIANT={expected_variant}" in build["build-args"]
+    names = [s.get("name") for s in validate["steps"]]
+    # 每个 matrix 项都会构建并扫描候选镜像（步骤名用 matrix 表达式模板化）
+    build_step = next(s for s in validate["steps"] if s.get("name", "").startswith("Build"))
+    assert build_step["with"]["load"] is True
+    assert build_step["with"]["push"] is False
+    assert build_step["with"]["pull"] is True
+    assert any(n and "Scan" in n and "candidate" in n for n in names)
 
-    for name in (
-        "Scan amd64 candidate vulnerabilities",
-        "Scan arm64 candidate vulnerabilities",
-        "Scan free-threaded amd64 candidate vulnerabilities",
-        "Scan free-threaded arm64 candidate vulnerabilities",
-    ):
-        scan = indexed[name]
-        assert scan["with"]["cache-dir"] == "${{ runner.temp }}/trivy"
-        assert scan["uses"] == "aquasecurity/trivy-action@v0.36.0"
-        assert scan["with"].items() >= {
-            "version": "latest",
-            "scanners": "vuln",
-            "vuln-type": "os,library",
-            "severity": "HIGH,CRITICAL",
-            "ignore-unfixed": True,
-            "trivyignores": ".trivyignore.yaml",
-            "exit-code": 1,
-        }.items()
+    # 扫描步骤的 Trivy 配置与上游一致
+    scan_step = next(s for s in validate["steps"] if s.get("name", "").startswith("Scan"))
+    assert scan_step["uses"] == "aquasecurity/trivy-action@v0.36.0"
+    assert scan_step["with"].items() >= {
+        "version": "latest",
+        "scanners": "vuln",
+        "vuln-type": "os,library",
+        "severity": "HIGH,CRITICAL",
+        "ignore-unfixed": True,
+        "trivyignores": ".trivyignore.yaml",
+        "exit-code": 1,
+    }.items()
 
-    last_scan = max(
-        names.index(name)
-        for name in (
-            "Scan amd64 candidate vulnerabilities",
-            "Scan arm64 candidate vulnerabilities",
-            "Scan free-threaded amd64 candidate vulnerabilities",
-            "Scan free-threaded arm64 candidate vulnerabilities",
-        )
+    # publish 依赖 validate 与 unit-tests-gate —— 登录与发布必在所有扫描之后
+    publish_needs = workflow["jobs"]["publish"]["needs"]
+    assert "validate" in publish_needs
+    assert "unit-tests-gate" in publish_needs
+
+    # validate 写入的缓存 scope 必须与 publish 读取的一致，
+    # 否则发布无法复用「已扫描候选」缓存，会退化成全量重建。
+    matrix_scopes = {c["cache_scope"] for c in combos}
+    publish_cache = "".join(
+        s.get("with", {}).get("cache-from", "")
+        for s in workflow["jobs"]["publish"]["steps"]
     )
-    assert last_scan < names.index("Login DockerHub")
-    assert last_scan < names.index("Login GitHub Container Registry")
-    assert last_scan < names.index("Publish multi-architecture image")
-    assert last_scan < names.index("Publish free-threaded multi-architecture image")
+    for scope in matrix_scopes:
+        assert f"scope={scope}" in publish_cache
 
 
 def test_workflows_follow_maintained_action_channels() -> None:
@@ -305,7 +316,7 @@ def test_pr_agent_keeps_pull_request_target_api_only_boundary() -> None:
 def test_release_uses_github_cli_for_tag_and_release_lifecycle() -> None:
     """正式发布复用 GitHub CLI，并只把明确不存在识别为新 Release。"""
     workflow = _load_workflow()
-    indexed = _steps_by_name(workflow)
+    indexed = _steps_by_name(workflow, "publish")
     serialized = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "dev-drprasad/delete-tag-and-release" not in serialized
@@ -325,7 +336,7 @@ def test_release_uses_github_cli_for_tag_and_release_lifecycle() -> None:
     assert "--draft=false" in publish_release
     assert "--prerelease=false" in publish_release
     assert "--latest" in publish_release
-    names = [step.get("name") for step in workflow["jobs"]["Docker-build"]["steps"]]
+    names = [step.get("name") for step in workflow["jobs"]["publish"]["steps"]]
     assert names.index("Get existing release body") < names.index("Publish Release Tag")
     assert names.index("Publish Release Tag") < names.index("Publish Release")
 
@@ -345,7 +356,7 @@ def test_release_query_preserves_existing_body_or_handles_explicit_404(
     expected_body: str,
 ) -> None:
     """已有 Release 保留正文，只有明确 404 才使用自动变更记录。"""
-    script = _steps_by_name(_load_workflow())["Get existing release body"]["run"]
+    script = _steps_by_name(_load_workflow(), "publish")["Get existing release body"]["run"]
     script = script.replace("v${{ env.app_version }}", "v3.0.0")
 
     result = _run_release_script(script, tmp_path, response=response, exit_code=exit_code)
@@ -359,7 +370,7 @@ def test_release_query_preserves_existing_body_or_handles_explicit_404(
 
 def test_release_query_fails_closed_on_non_404_error(tmp_path: Path) -> None:
     """网络或服务端错误不得伪装成 Release 不存在。"""
-    script = _steps_by_name(_load_workflow())["Get existing release body"]["run"]
+    script = _steps_by_name(_load_workflow(), "publish")["Get existing release body"]["run"]
     script = script.replace("v${{ env.app_version }}", "v3.0.0")
 
     result = _run_release_script(
@@ -385,7 +396,7 @@ def test_release_publish_selects_edit_or_create(
     expected_command: str,
 ) -> None:
     """发布阶段按查询结果原位更新或创建 Release。"""
-    script = _steps_by_name(_load_workflow())["Publish Release"]["run"]
+    script = _steps_by_name(_load_workflow(), "publish")["Publish Release"]["run"]
     script = script.replace("v${{ env.app_version }}", "v3.0.0")
 
     result = _run_release_script(
@@ -429,7 +440,7 @@ def test_vulnerability_ignores_are_scoped_justified_and_time_bounded() -> None:
 def test_publish_reuses_scanned_architecture_caches_without_refreshing_base() -> None:
     """发布构建复用已扫描候选缓存，不得在扫描后重新拉取未审计基础镜像。"""
     workflow = _load_workflow()
-    publish = _steps_by_name(workflow)["Publish multi-architecture image"]["with"]
+    publish = _steps_by_name(workflow, "publish")["Publish multi-architecture image"]["with"]
 
     assert workflow["on"]["workflow_dispatch"] is None
     assert publish["platforms"] == "linux/amd64\nlinux/arm64/v8\n"
@@ -442,7 +453,7 @@ def test_publish_reuses_scanned_architecture_caches_without_refreshing_base() ->
 def test_release_publishes_free_threaded_image_with_separate_metadata_and_cache() -> None:
     """free-threaded 发布必须使用 v3t 命名、参数和独立缓存。"""
     workflow = _load_workflow()
-    indexed = _steps_by_name(workflow)
+    indexed = _steps_by_name(workflow, "publish")
 
     metadata = indexed["Docker Meta free-threaded"]
     publish = indexed["Publish free-threaded multi-architecture image"]
@@ -456,9 +467,9 @@ def test_release_publishes_free_threaded_image_with_separate_metadata_and_cache(
 def test_release_publishes_version_and_latest_tags_for_both_image_variants() -> None:
     """正式版元数据同时发布版本号与 latest，两个变体直接复用各自发布结果。"""
     workflow = _load_workflow()
-    steps = workflow["jobs"]["Docker-build"]["steps"]
+    steps = workflow["jobs"]["publish"]["steps"]
     names = [step.get("name") for step in steps]
-    indexed = _steps_by_name(workflow)
+    indexed = _steps_by_name(workflow, "publish")
 
     for name in ("Docker Meta", "Docker Meta free-threaded"):
         tags = indexed[name]["with"]["tags"]

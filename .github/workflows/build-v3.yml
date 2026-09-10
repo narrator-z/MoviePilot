@@ -59,7 +59,6 @@ jobs:
           echo "等待 Unit Tests 结论超时，中止构建"; exit 1
 
   validate:
-    needs: []
     runs-on: ${{ matrix.runner }}
     name: Validate ${{ matrix.variant }} ${{ matrix.platform_tag }}
     env:
@@ -413,9 +412,9 @@ jobs:
         id: changelog
         run: |
           # 获取上一个 tag（优先 v3.*，回退到任意 v* 版本 tag）
-          PREVIOUS_TAG=$(git tag -l 'v3.*' --sort=-v:refname | grep -v "^v${{ env.app_version }}$" | head -n 1)
+          PREVIOUS_TAG=$(git tag -l 'v3.*' --sort=-v:refname | grep -v '^v${{ env.app_version }}$' | head -n 1)
           if [ -z "$PREVIOUS_TAG" ]; then
-            PREVIOUS_TAG=$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -v "^v${{ env.app_version }}$" | head -n 1)
+            PREVIOUS_TAG=$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -v '^v${{ env.app_version }}$' | head -n 1)
           fi
           echo "Previous tag: $PREVIOUS_TAG"
 
@@ -497,7 +496,7 @@ jobs:
 
           # 添加版本对比链接
           if [ -n "$PREVIOUS_TAG" ]; then
-            CHANGELOG="${CHANGELOG}**完整更新记录**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...v${{ env.app_version}"
+            CHANGELOG="${CHANGELOG}**完整更新记录**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...v${{ env.app_version }}"
           fi
 
           # 写入环境变量

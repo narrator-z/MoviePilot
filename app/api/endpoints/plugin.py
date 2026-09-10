@@ -187,7 +187,13 @@ def _verify_plugin_static_file_access(
     """
     if _is_plugin_auth_remote_file(plugin_id, filepath):
         return
-    verify_resource_token(resource_token, jwt_token)
+    # 资源 Cookie 缺失且带了 Bearer 时透传，启用 verify_resource_token 内部的
+    # Bearer 回落（避免前端只带 Authorization 而被误判未登录）；否则保持上游
+    # 单参契约，兼容测试与生产默认行为。
+    if jwt_token:
+        verify_resource_token(resource_token, jwt_token)
+    else:
+        verify_resource_token(resource_token)
 
 
 @router.get(

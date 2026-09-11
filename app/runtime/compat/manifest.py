@@ -814,6 +814,33 @@ SYMBOL_ALIASES: Dict[str, Dict[str, SymbolAlias]] = {
             replacement="app.agent.manager.agent_manager",
         ),
     },
+    # 旧代码与测试通过 `app.agent.tools.base.settings` 访问运行配置，
+    # 兼容层将其惰性解析到 app.runtime.config.settings。
+    "app.agent.tools.base": {
+        "settings": SymbolAlias(
+            target_module="app.runtime.config",
+            target_name="settings",
+            replacement="app.runtime.config.settings",
+        ),
+    },
+    # 旧代码与测试通过 `app.adapters.system.plugin.health.settings` 访问运行配置，
+    # 兼容层将其惰性解析到 app.runtime.config.settings。
+    "app.adapters.system.plugin.health": {
+        "settings": SymbolAlias(
+            target_module="app.runtime.config",
+            target_name="settings",
+            replacement="app.runtime.config.settings",
+        ),
+    },
+    # 旧代码与测试通过 `app.modules.filemanager.module.settings` 访问运行配置，
+    # 兼容层将其惰性解析到 app.runtime.config.settings。
+    "app.modules.filemanager.module": {
+        "settings": SymbolAlias(
+            target_module="app.runtime.config",
+            target_name="settings",
+            replacement="app.runtime.config.settings",
+        ),
+    },
     "app.agent.llm": {
         "LLMHelper": SymbolAlias(
             target_module="app.agent.llm.helper",
@@ -927,6 +954,13 @@ SYMBOL_ALIASES: Dict[str, Dict[str, SymbolAlias]] = {
             target_module="app.agent.manager",
             target_name="agent_manager",
             replacement="app.agent.manager.agent_manager",
+        ),
+        # 旧代码与测试通过 `app.agent.orchestrator.settings` 访问运行配置，
+        # 兼容层将其惰性解析到 app.runtime.config.settings（get_runtime_setting 的回退源）。
+        "settings": SymbolAlias(
+            target_module="app.runtime.config",
+            target_name="settings",
+            replacement="app.runtime.config.settings",
         ),
     },
     # 刮削能力从 MediaChain 拆出为独立 ScrapingChain 后，

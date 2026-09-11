@@ -878,6 +878,13 @@
       }
     },
     "symbol_aliases": {
+      "app.adapters.system.plugin.health": {
+        "settings": {
+          "replacement": "app.runtime.config.settings",
+          "target_module": "app.runtime.config",
+          "target_name": "settings"
+        }
+      },
       "app.agent": {
         "AgentChain": {
           "replacement": "app.chain.agent.AgentChain",
@@ -977,6 +984,18 @@
           "replacement": "app.agent.manager.agent_manager",
           "target_module": "app.agent.manager",
           "target_name": "agent_manager"
+        },
+        "settings": {
+          "replacement": "app.runtime.config.settings",
+          "target_module": "app.runtime.config",
+          "target_name": "settings"
+        }
+      },
+      "app.agent.tools.base": {
+        "settings": {
+          "replacement": "app.runtime.config.settings",
+          "target_module": "app.runtime.config",
+          "target_name": "settings"
         }
       },
       "app.application.transfer": {
@@ -1084,6 +1103,13 @@
           "replacement": "app.schemas.media.resolve_media_identity",
           "target_module": "app.schemas.media",
           "target_name": "resolve_media_identity"
+        }
+      },
+      "app.modules.filemanager.module": {
+        "settings": {
+          "replacement": "app.runtime.config.settings",
+          "target_module": "app.runtime.config",
+          "target_name": "settings"
         }
       },
       "app.schemas": {

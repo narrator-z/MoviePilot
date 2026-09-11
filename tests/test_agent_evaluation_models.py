@@ -1,6 +1,7 @@
 """真实模型评测的凭据边界、调用限额及用量可信度。"""
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from uuid import uuid4
@@ -29,6 +30,68 @@ def test_model_settings_do_not_expose_explicit_credential(tmp_path):
     assert "private-test-key" not in repr(settings)
     assert "private-test-key" not in json.dumps(settings.public_metadata())
     assert settings.model == "test-model"
+    assert settings.wire_api == "responses"
+
+
+def test_chat_completions_provider_is_supported(tmp_path):
+    """Google 等 OpenAI 兼容 provider 可以明确选择 Chat Completions 协议。"""
+    path = _config(tmp_path).read_text(encoding="utf-8").replace('wire_api = "responses"',
+                                                                     'wire_api = "chat_completions"')
+    config = tmp_path / "chat-completions.toml"
+    config.write_text(path, encoding="utf-8")
+    settings = load_codex_model_settings(config)
+    assert settings.wire_api == "chat_completions"
+    assert settings.public_metadata()["wire_api"] == "chat_completions"
+
+
+def test_native_probe_accepts_oauth_only_provider_without_endpoint_or_key(tmp_path):
+    """原生探针不发模型请求，因此可以检查仅有 OAuth 的官方 provider。"""
+    path = tmp_path / "oauth-only.toml"
+    path.write_text(
+        'model = "gpt-test"\nmodel_provider = "selected"\n'
+        '[model_providers.selected]\nwire_api = "responses"\nrequires_openai_auth = true\n',
+        encoding="utf-8",
+    )
+    settings = load_codex_model_settings(path, probe_only=True)
+    assert settings.base_url == "https://evaluation-probe.invalid/v1"
+    assert settings.api_key == "evaluation-probe-only"
+
+
+def test_real_run_still_rejects_provider_without_explicit_endpoint_or_key(tmp_path):
+    """真实评测不能把本地登录态或探针占位值当成供应商凭据。"""
+    path = tmp_path / "oauth-only.toml"
+    path.write_text(
+        'model = "gpt-test"\nmodel_provider = "selected"\n'
+        '[model_providers.selected]\nwire_api = "responses"\nrequires_openai_auth = true\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="endpoint"):
+        load_codex_model_settings(path)
+
+
+def test_codex_oauth_is_opt_in_and_keeps_token_out_of_public_metadata(tmp_path, monkeypatch):
+    """配对评测显式启用本机 OAuth 后只向控制进程传递令牌和账户头。"""
+    path = tmp_path / "oauth-only.toml"
+    path.write_text(
+        'model = "gpt-test"\nmodel_provider = "selected"\n'
+        '[model_providers.selected]\nwire_api = "responses"\nrequires_openai_auth = true\n',
+        encoding="utf-8",
+    )
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    codex_home.joinpath("auth.json").write_text(json.dumps({
+        "tokens": {"access_token": "oauth-private-token", "account_id": "acct-private"},
+    }), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", os.fspath(codex_home))
+    settings = load_codex_model_settings(path, use_codex_auth=True)
+    assert settings.auth_mode == "codex_oauth"
+    assert settings.base_url == "https://chatgpt.com/backend-api/codex"
+    assert settings.api_key == "oauth-private-token"
+    assert settings.account_id == "acct-private"
+    assert "oauth-private-token" not in repr(settings)
+    assert "acct-private" not in repr(settings)
+    assert "oauth-private-token" not in json.dumps(settings.public_metadata())
+    assert "acct-private" not in json.dumps(settings.public_metadata())
 
 
 def test_only_named_provider_environment_key_is_used(tmp_path, monkeypatch):
@@ -109,7 +172,8 @@ def test_empty_or_partial_usage_does_not_break_response_handling():
     ("base_url", "https://model.invalid/v1?api_key=private-test-key"),
     ("base_url", "https://model.invalid/v1#private-test-key"),
     ("api_key", ""), ("api_key", "  "), ("api_key", "private\ntest"), ("api_key", False),
-    ("reasoning_effort", "unbounded"), ("max_model_calls", 0), ("max_model_calls", 65),
+    ("reasoning_effort", "unbounded"), ("wire_api", "unknown"), ("max_model_calls", 0),
+    ("max_model_calls", 65),
     ("max_model_calls", True), ("max_model_calls", 2.5),
     ("max_output_tokens", 255), ("max_output_tokens", 32769), ("max_output_tokens", True),
     ("timeout_seconds", 29), ("timeout_seconds", 901), ("timeout_seconds", False),

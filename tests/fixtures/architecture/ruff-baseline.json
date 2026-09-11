@@ -32,9 +32,6 @@
   "app/agent/tools/impl/ask_user_choice.py": {
     "I001": 1
   },
-  "app/agent/tools/impl/recognize_captcha.py": {
-    "I001": 1
-  },
   "app/agent/tools/impl/send_local_file.py": {
     "I001": 1
   },
@@ -462,12 +459,6 @@
   "app/runtime/execution.py": {
     "I001": 1
   },
-  "app/runtime/extensions/module/adapter.py": {
-    "I001": 1
-  },
-  "app/runtime/extensions/module/manager.py": {
-    "I001": 1
-  },
   "app/runtime/extensions/plugin/loader.py": {
     "I001": 1
   },
@@ -579,9 +570,6 @@
     "I001": 1
   },
   "tests/test_agent_llm_capability.py": {
-    "I001": 1
-  },
-  "tests/test_agent_recognize_captcha_tool.py": {
     "I001": 1
   },
   "tests/test_agent_session_status.py": {
@@ -883,9 +871,6 @@
     "I001": 1
   },
   "tests/test_system_database_backup_api.py": {
-    "I001": 1
-  },
-  "tests/test_system_i18n.py": {
     "I001": 1
   },
   "tests/test_system_notification_dispatch.py": {

@@ -14,7 +14,7 @@ from pydantic import Field
 
 from app.agent.policy.api import resolve_api_operation
 from app.agent.policy.contracts import ActionEffect, ExecutionOutcome, ToolPolicyContext
-from app.agent.policy.sanitizer import sanitize_for_host
+from app.agent.policy.sanitizer import sanitize_for_host, summarize_error
 from app.agent.tools.base import run_agent_blocking
 from app.agent.tools.impl.api import MoviePilotApiTool
 from app.agent.tools.impl.mcp import McpExternalTool
@@ -223,6 +223,19 @@ class InvocationMiddleware(AgentMiddleware):  # type: ignore[misc]
             )
         except InvocationConflictError:
             return self._message(request, "failed", "同一调用 ID 的工具或参数发生变化，未执行。")
+        except (TypeError, ValueError) as error:
+            detail = summarize_error(error, max_chars=240)
+            logger.info(f"工具参数未通过 API 输入合同校验: {detail}")
+            operation_id = str(request.tool_call.get("args", {}).get("operation_id", ""))
+            input_contract = request.tool.get_operation_input_contract(operation_id)
+            return self._message(
+                request,
+                "failed",
+                f"{operation_id} 的输入未通过当前 operation 输入合同校验：{detail}。"
+                "请按 input_contract 只提交允许字段并补齐 required 字段后再调用。",
+                operation_id=operation_id,
+                input_contract=input_contract,
+            )
         except Exception as error:
             logger.warning(f"工具执行认领失败: {type(error).__name__}")
             return self._message(request, "failed", "无法持久记录本次写入，未执行工具。")

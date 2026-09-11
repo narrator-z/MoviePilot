@@ -33,6 +33,7 @@ MAX_RESULTS = 8
 RESULT_TTL_SECONDS = 900
 FIRST_PAGE_CHARS = 8192
 NEXT_PAGE_CHARS = 16000
+DIRECT_RESULT_MAX_CHARS = 64 * 1024
 
 # 与 Agent 的 MoviePilotApiInput 保持相同字段，不提前暴露场景支持操作或 oracle 判据。
 API_INPUT_SCHEMA: dict[str, Any] = {
@@ -70,6 +71,56 @@ class _Session:
     initialized: bool = False
 
 
+def _operation_input_contract(schema: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    """压缩一个 operation 的参数字段，保持评测服务不依赖 MoviePilot 运行时。"""
+    branch = next(
+        (
+            item for item in schema.get("oneOf", [])
+            if isinstance(item, dict)
+            and item.get("properties", {}).get("operation_id", {}).get("const") == operation_id
+        ),
+        None,
+    )
+    if not isinstance(branch, dict):
+        return {"operation_id": operation_id, "available": False}
+    properties = branch.get("properties", {})
+    contract: dict[str, Any] = {
+        "operation_id": operation_id,
+        "allowed_arguments": [name for name in properties if name != "operation_id"],
+        "required_arguments": [
+            name for name in branch.get("required", []) if name != "operation_id"
+        ],
+    }
+    for name in ("path_params", "query", "body"):
+        node = properties.get(name)
+        if not isinstance(node, dict):
+            continue
+        shape: dict[str, Any] = {}
+        if isinstance(node.get("type"), str):
+            shape["type"] = node["type"]
+        if isinstance(node.get("required"), list) and node["required"]:
+            shape["required"] = list(node["required"])
+        fields = node.get("properties")
+        if isinstance(fields, dict):
+            shape["fields"] = {}
+            for field, declaration in fields.items():
+                if not isinstance(declaration, dict):
+                    continue
+                field_shape: dict[str, Any] = {}
+                for key in ("type", "enum", "const", "default", "$ref"):
+                    if key in declaration:
+                        field_shape[key] = deepcopy(declaration[key])
+                alternatives = declaration.get("anyOf", declaration.get("oneOf"))
+                if isinstance(alternatives, list):
+                    field_shape["one_of"] = [
+                        {key: deepcopy(option[key]) for key in ("type", "enum", "const") if key in option}
+                        for option in alternatives if isinstance(option, dict)
+                    ]
+                shape["fields"][field] = field_shape
+        contract[name] = shape
+    return contract
+
+
 class _LocalServer(uvicorn.Server):  # type: ignore[misc]  # follow_imports=skip 不展开外部 Server 基类。
     """让控制器拥有服务启停，嵌入运行时不替换进程信号处理器。"""
 
@@ -93,7 +144,7 @@ class EvaluationMcpServer:
     """为一个独立世界提供受认证的本地 Streamable HTTP 必需子集。"""
 
     def __init__(self, world: EvaluationWorld, *, root_dir: Optional[Path] = None, max_world_calls: int = 32) -> None:
-        """固定世界与可信源码目录；模型不能通过请求选择场景、文件或真实后端。"""
+        """固定世界与可信源码目录；模型只能读取预先列出的 Skill 文档。"""
         if type(max_world_calls) is not int or not 1 <= max_world_calls <= 32:
             raise ValueError("max_world_calls 必须为 1 到 32 的整数")
         self._world = world
@@ -111,7 +162,9 @@ class EvaluationMcpServer:
         self._closed = False
         self._sessions: dict[str, _Session] = {}
         self._results: OrderedDict[str, _StoredResult] = OrderedDict()
-        self._skill = self._load_skill(Path(root_dir) if root_dir is not None else Path(__file__).resolve().parents[2])
+        self._skill_root = Path(root_dir) if root_dir is not None else Path(__file__).resolve().parents[2]
+        self._skill = self._load_skill(self._skill_root)
+        self._api_contract_schema = self._load_api_contract(self._skill_root)
 
     @property
     def endpoint(self) -> str:
@@ -324,12 +377,15 @@ class EvaluationMcpServer:
         """只公开与 MoviePilot 任务输入等价的工具合同，不注入场景答案。"""
         return [
             {"name": "moviepilot_api", "description": (
-                "Call allowlisted MoviePilot business APIs. Use the domain Skill to select operation_id, parameters, and failure handling. "
-                "For collection counts, use the smallest documented page and read collection.total_count instead of querying the database after item truncation. "
-                "Arbitrary URLs, commands, and authentication endpoints are forbidden."
+                "Call allowlisted MoviePilot business APIs through operation-specific input contracts. "
+                "Load the relevant domain Skill before calling and use operation error feedback to correct inputs. "
+                "Arbitrary URLs, commands, authentication endpoints, headers, and tokens are forbidden."
             ), "inputSchema": deepcopy(API_INPUT_SCHEMA)},
-            {"name": "read_skill", "description": "Read the named MoviePilot Skill including its full body and supporting file paths. Available skill: moviepilot-api.", "inputSchema": {
-                "type": "object", "required": ["name"], "additionalProperties": False, "properties": {"name": {"type": "string"}},
+            {"name": "read_skill", "description": "Read the named MoviePilot Skill or one of its listed supporting documents. Available skill: moviepilot-api.", "inputSchema": {
+                "type": "object", "required": ["name"], "additionalProperties": False, "properties": {
+                    "name": {"type": "string"},
+                    "file": {"type": "string", "description": "Relative supporting Skill document path listed by a prior read_skill call."},
+                },
             }},
             {"name": "read_tool_result", "description": "Read an archived tool result using result_id and next_offset. Offsets count Unicode characters. Results expire after 15 minutes or eviction; never guess result IDs.", "inputSchema": {
                 "type": "object", "required": ["result_id"], "additionalProperties": False, "properties": {
@@ -360,6 +416,7 @@ class EvaluationMcpServer:
                 else:
                     self._world_calls += 1
                     result = self._world.execute(**arguments)
+                result = self._attach_input_contract(result, arguments)
             elif name == "read_skill":
                 result = self._read_skill(arguments)
             elif name == "read_tool_result":
@@ -393,6 +450,31 @@ class EvaluationMcpServer:
         ), "truncated": truncated,
             "truncation_message": "SKILL.md exceeds 512 KiB; content contains only the first 512 KiB." if truncated else None}
 
+    @staticmethod
+    def _load_api_contract(root: Path) -> dict[str, Any]:
+        """读取与生产网关相同的 operation schema，供评测错误回执提供纠正提示。"""
+        path = root / "app/agent/policy/resources/api_mcp_schema.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("oneOf"), list):
+            raise ValueError("moviepilot_api operation schema 无效")
+        return payload
+
+    def _attach_input_contract(self, result: Any, arguments: dict[str, Any]) -> Any:
+        """为 operation 失败回执附加允许字段和必填字段，不回显错误请求值。"""
+        if not isinstance(result, dict) or result.get("success") is not False:
+            return result
+        operation_id = arguments.get("operation_id")
+        if type(operation_id) is not str:
+            return result
+        payload = dict(result)
+        payload["operation_id"] = operation_id
+        payload["message"] = (
+            f"{operation_id} 调用失败，请按 input_contract 只提交允许字段并补齐 required 字段后重试。"
+            f" 原因：{str(result.get('message', ''))[:240]}"
+        )
+        payload["input_contract"] = _operation_input_contract(self._api_contract_schema, operation_id)
+        return payload
+
     def _prune_results(self) -> None:
         """匹配 MoviePilot 的 15 分钟、8 项、4MiB 会话归档约束。"""
         now = time.monotonic()
@@ -417,11 +499,43 @@ class EvaluationMcpServer:
         return best
 
     def _read_skill(self, arguments: dict[str, Any]) -> Any:
-        """返回完整真实技能的首屏或可续读归档，不提供精简场景专用说明。"""
-        if set(arguments) != {"name"} or arguments.get("name") != "moviepilot-api":
+        """返回真实 Skill 主体或一个分类文档的首屏及可续读归档。"""
+        requested_file = arguments.get("file")
+        if (
+            set(arguments) - {"name", "file"}
+            or arguments.get("name") != "moviepilot-api"
+            or (requested_file is not None and type(requested_file) is not str)
+        ):
             return self._failure("skill_not_found", "Unknown Skill")
-        text = json.dumps(self._skill, ensure_ascii=False, indent=2)
-        if len(text) <= FIRST_PAGE_CHARS:
+
+        if requested_file is None:
+            skill_payload = self._skill
+        elif requested_file not in self._skill["supporting_files"]:
+            return self._failure("skill_file_not_found", "Unknown Skill supporting file")
+        else:
+            skill_payload = dict(self._skill)
+            content_path = self._skill_root / "skills/moviepilot-api" / requested_file
+            if content_path.is_symlink() or not content_path.is_file():
+                return self._failure("skill_file_not_found", "Unknown Skill supporting file")
+
+            skill_payload["loaded_file"] = requested_file
+            with content_path.open("rb") as handle:
+                data = handle.read(MAX_SKILL_BYTES + 1)
+            truncated = len(data) > MAX_SKILL_BYTES
+            skill_payload["content"] = data[:MAX_SKILL_BYTES].decode(
+                "utf-8", errors="ignore" if truncated else "replace"
+            )
+            skill_payload["truncated"] = truncated
+            skill_payload["truncation_message"] = (
+                "The requested supporting skill file exceeds 512 KiB; content contains only the first 512 KiB."
+                if truncated
+                else None
+            )
+
+        text = json.dumps(skill_payload, ensure_ascii=False, indent=2)
+        # 生产 read_skill 先走统一工具结果上限 64 KiB；当前拆分后的主文档
+        # 与分类文档都应一次交付，只有更大的文档才进入 8 KiB 首屏归档。
+        if len(text) <= DIRECT_RESULT_MAX_CHARS:
             return text
         if len(text.encode("utf-8")) > MAX_RESULT_BYTES:
             return self._failure("result_too_large", "Skill result exceeds archive limit")

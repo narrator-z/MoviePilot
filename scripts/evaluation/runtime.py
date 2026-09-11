@@ -1,18 +1,25 @@
 """用完整生产 Agent 驱动隔离业务世界；工具目录受控，不代表真实部署配置。"""
 
+import json
 import os
 import re
 import sys
 from contextlib import ExitStack, contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Lock
+from threading import Lock, Thread
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
+from pydantic import PrivateAttr
+
+from app.agent.tools.impl.browse_webpage import BrowseWebpageTool
+from app.agent.tools.impl.execute_command import ExecuteCommandTool
+from app.agent.tools.impl.read_file import ReadFileTool
 from scripts.evaluation.world import EvaluationWorld
 
 if TYPE_CHECKING:
@@ -22,6 +29,7 @@ _RUN_LOCK = Lock()
 _OPERATIONS = (
     "subscription.list", "subscription.find", "subscription.get", "subscription.add", "subscription.delete",
     "download.tasks.active", "download.history.list", "download.clients", "download.paths", "download.add", "site.list",
+    "library.exists",
 )
 
 
@@ -112,6 +120,301 @@ class _MemoryPort:
         self.messages = messages
 
 
+class _EvaluationReadFileTool(ReadFileTool):
+    """评测专用文件读取工具，只允许访问本次运行的临时 Agent 根目录。"""
+
+    _evaluation_allowed_root: Path = PrivateAttr()
+
+    def __init__(self, *, allowed_root: Path, **kwargs: Any) -> None:
+        """绑定隔离根目录后复用生产文件读取、大小限制和行范围合同。"""
+        super().__init__(**kwargs)
+        self._evaluation_allowed_root = allowed_root.resolve()
+
+    def _get_non_admin_local_file_roots(self) -> list[Path]:
+        """返回评测临时 Agent 根，避免回退到宿主 CONFIG_PATH/agent。"""
+        return [self._evaluation_allowed_root]
+
+
+class _EvaluationExecuteCommandTool(ExecuteCommandTool):
+    """在临时工作目录执行命令或交互终端并保留生产工具的真实回执合同。"""
+
+    _evaluation_world: Any = PrivateAttr()
+    _evaluation_allowed_root: Path = PrivateAttr()
+    _evaluation_terminal_session_id: Optional[str] = PrivateAttr(default=None)
+
+    def __init__(self, *, world: EvaluationWorld, allowed_root: Path, **kwargs: Any) -> None:
+        """绑定假世界与临时目录，拒绝环境覆盖和目录逃逸。"""
+        super().__init__(**kwargs)
+        self._evaluation_world = world
+        self._evaluation_allowed_root = allowed_root.resolve()
+
+    @staticmethod
+    def _failure(
+        message: str,
+        command: str = "",
+        *,
+        action: str = "run",
+        session_id: Optional[str] = None,
+        input_text: Optional[str] = None,
+    ) -> str:
+        """返回带纠正提示的受控失败，供模型按评测合同修正输入。"""
+        payload: dict[str, Any] = {
+            "action": action, "success": False, "execution_outcome": "failed", "status": "error",
+            "exit_code": None, "timed_out": False, "command": command,
+            "error": "evaluation_command_rejected", "message": message,
+        }
+        if session_id is not None:
+            payload["session_id"] = session_id
+        if input_text is not None:
+            payload["input_text"] = input_text
+        return ExecuteCommandTool._dump(payload)
+
+    @staticmethod
+    def _payload(result: str) -> dict[str, Any]:
+        """解码生产命令工具的 JSON 回执，异常文本仍作为失败证据保留。"""
+        try:
+            decoded = json.loads(result)
+        except (TypeError, ValueError):
+            return {"execution_outcome": "failed", "raw": result}
+        return decoded if isinstance(decoded, dict) else {"execution_outcome": "failed", "raw": result}
+
+    async def _run_terminal(
+        self,
+        action: str,
+        *,
+        command: Optional[str],
+        cwd: Optional[str],
+        env: Optional[dict[str, Any]],
+        kwargs: dict[str, Any],
+    ) -> str:
+        """按固定顺序代理启动、读取、写入和等待动作，验证真实会话句柄不会被替换。"""
+        command_text = (command or "").strip()
+        session_id = kwargs.get("session_id")
+        input_text = kwargs.get("input_text")
+        close_stdin = kwargs.get("close_stdin", False)
+        if action not in {"start", "read", "wait", "write"}:
+            result = self._failure(
+                "终端场景只接受 action=start、read、wait、write；不要使用 action=run",
+                command_text, action=action, session_id=session_id,
+            )
+            self._evaluation_world.record_command(command_text, self._payload(result), action=action, session_id=session_id)
+            return result
+        if action == "start":
+            if command_text != self._evaluation_world.scenario.command:
+                result = self._failure("终端命令必须与任务中给定命令完全一致，不要执行其他命令", command_text, action=action)
+                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                return result
+            if env:
+                result = self._failure("终端启动不接受 env；请删除 env 后重试", command_text, action=action)
+                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                return result
+            if cwd is not None and Path(cwd).expanduser().resolve() != self._evaluation_allowed_root:
+                result = self._failure("cwd 必须省略或使用当前评测工作目录", command_text, action=action)
+                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                return result
+            if kwargs.get("use_pty", True) is not False:
+                result = self._failure("终端场景必须使用 use_pty=false 的 pipe 模式", command_text, action=action)
+                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                return result
+            if session_id:
+                result = self._failure("action=start 不接受已有 session_id；请先启动新会话", command_text, action=action)
+                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                return result
+            terminal_kwargs = dict(kwargs)
+            terminal_kwargs.update({
+                "action": "start", "command": command_text, "session_id": None, "input_text": None,
+                "close_stdin": False, "cwd": str(self._evaluation_allowed_root), "env": None, "use_pty": False,
+            })
+            result = await super().run(**terminal_kwargs)
+            payload = self._payload(result)
+            returned_session = payload.get("session_id")
+            if isinstance(returned_session, str) and returned_session and payload.get("execution_outcome") in {"pending", "succeeded"}:
+                self._evaluation_terminal_session_id = returned_session
+            self._evaluation_world.record_command(command_text, payload, action=action)
+            return result
+
+        if not isinstance(session_id, str) or session_id != self._evaluation_terminal_session_id:
+            result = self._failure(
+                "请使用 action=start 返回的同一 session_id，再执行 read、wait 或 write",
+                action=action, session_id=session_id,
+            )
+            self._evaluation_world.record_command("", self._payload(result), action=action, session_id=session_id)
+            return result
+        if action == "write":
+            if input_text != "MOVIEPILOT_TERMINAL_OK\n":
+                result = self._failure(
+                    "write 必须向当前 session_id 写入 MOVIEPILOT_TERMINAL_OK 并保留结尾换行",
+                    action=action, session_id=session_id, input_text=input_text,
+                )
+                self._evaluation_world.record_command(
+                    "", self._payload(result), action=action, session_id=session_id, input_text=input_text,
+                )
+                return result
+            if close_stdin is not False:
+                result = self._failure(
+                    "pipe 场景的 write 必须使用 close_stdin=false；写入后再读取或等待退出",
+                    action=action, session_id=session_id, input_text=input_text,
+                )
+                self._evaluation_world.record_command(
+                    "", self._payload(result), action=action, session_id=session_id, input_text=input_text,
+                )
+                return result
+
+        terminal_kwargs = dict(kwargs)
+        terminal_kwargs.update({
+            "action": action, "command": None, "session_id": session_id, "cwd": None, "env": None,
+            "use_pty": None,
+        })
+        if action != "write":
+            terminal_kwargs["input_text"] = None
+        result = await super().run(**terminal_kwargs)
+        payload = self._payload(result)
+        self._evaluation_world.record_command(
+            "", payload, action=action, session_id=session_id,
+            input_text=input_text if action == "write" else None,
+        )
+        return result
+
+    async def run(self, action: Optional[str] = "run", command: Optional[str] = None, cwd: Optional[str] = None,
+                  env: Optional[dict[str, Any]] = None, **kwargs: Any) -> str:
+        """仅允许场景给定的短命令，执行路径仍经过生产命令安全、超时和作用域清理。"""
+        scenario = self._evaluation_world.scenario
+        normalized_action = (action or ("start" if scenario.kind == "terminal" else "run")).strip().lower()
+        if scenario.kind == "terminal":
+            return await self._run_terminal(
+                normalized_action, command=command, cwd=cwd, env=env, kwargs=kwargs,
+            )
+        command_text = (command or "").strip()
+        if normalized_action != "run":
+            result = self._failure("命令场景只接受 action=run；请直接提交给定命令", command_text)
+            self._evaluation_world.record_command(command_text, json.loads(result))
+            return result
+        if command_text != self._evaluation_world.scenario.command:
+            result = self._failure("命令必须与任务中给定命令完全一致，不要执行其他命令", command_text)
+            self._evaluation_world.record_command(command_text, json.loads(result))
+            return result
+        if env:
+            result = self._failure("命令场景不接受 env；请删除 env 后重试", command_text)
+            self._evaluation_world.record_command(command_text, json.loads(result))
+            return result
+        if cwd is not None and Path(cwd).expanduser().resolve() != self._evaluation_allowed_root:
+            result = self._failure("cwd 必须省略或使用当前评测工作目录", command_text)
+            self._evaluation_world.record_command(command_text, json.loads(result))
+            return result
+        result = await super().run(
+            action="run", command=command_text, cwd=str(self._evaluation_allowed_root), env=None, **kwargs,
+        )
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            payload = {"execution_outcome": "failed", "raw": result}
+        self._evaluation_world.record_command(command_text, payload)
+        return result
+
+
+class _EvaluationBrowseWebpageTool(BrowseWebpageTool):
+    """在本地固定页面上复用生产 Playwright 工具，拒绝外部 URL 和任意脚本。"""
+
+    _evaluation_world: Any = PrivateAttr()
+
+    def __init__(self, *, world: EvaluationWorld, **kwargs: Any) -> None:
+        """绑定本轮世界；浏览器会话归属仍由生产 TerminalScope 管理。"""
+        super().__init__(**kwargs)
+        self._evaluation_world = world
+
+    @staticmethod
+    def _failure(action: str, message: str) -> str:
+        """返回告诉模型正确动作或输入的结构化失败。"""
+        return json.dumps({
+            "action": action, "success": False, "execution_outcome": "failed",
+            "error": "evaluation_browser_rejected", "message": message,
+        }, ensure_ascii=False)
+
+    async def run(self, action: str, url: Optional[str] = None, selector: Optional[str] = None,
+                  ref: Optional[str] = None, value: Optional[str] = None, script: Optional[str] = None,
+                  content_type: Optional[str] = "text", timeout: Optional[int] = 30,
+                  cookies: Optional[str] = None, user_agent: Optional[str] = None,
+                  session_key: Optional[str] = None, tab_index: Optional[int] = None,
+                  allow_private_network: bool = False, **kwargs: Any) -> Any:
+        """仅允许页面读取与按快照 ref 点击，执行仍走生产浏览器实现。"""
+        allowed_actions = {"goto", "snapshot", "click_ref", "get_content", "close_session"}
+        normalized_action = str(action or "").strip().lower()
+        browser_url = self._evaluation_world.browser_url
+        if normalized_action not in allowed_actions:
+            result = self._failure(normalized_action, "评测浏览器只接受 goto、snapshot、click_ref、get_content、close_session")
+            self._evaluation_world.record_browser(normalized_action, json.loads(result))
+            return result
+        if normalized_action == "goto" and (url != browser_url or not allow_private_network):
+            result = self._failure(normalized_action, "goto 必须使用任务给定的本地页面，并设置 allow_private_network=true")
+            self._evaluation_world.record_browser(normalized_action, json.loads(result))
+            return result
+        if normalized_action == "click_ref" and not ref:
+            result = self._failure(normalized_action, "click_ref 必须使用 snapshot 返回的 ref")
+            self._evaluation_world.record_browser(normalized_action, json.loads(result))
+            return result
+        if normalized_action == "get_content" and content_type not in (None, "text"):
+            result = self._failure(normalized_action, "get_content 只接受 content_type=text")
+            self._evaluation_world.record_browser(normalized_action, json.loads(result))
+            return result
+        if session_key is not None and session_key != self._session_id:
+            result = self._failure(normalized_action, "session_key 必须省略或使用当前 Agent 会话")
+            self._evaluation_world.record_browser(normalized_action, json.loads(result))
+            return result
+        result = await super().run(
+            action=normalized_action, url=url, selector=selector, ref=ref, value=value, script=script,
+            content_type=content_type, timeout=timeout, cookies=cookies, user_agent=user_agent,
+            session_key=session_key, tab_index=tab_index, allow_private_network=allow_private_network, **kwargs,
+        )
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+        except (TypeError, ValueError):
+            payload = {"execution_outcome": "failed", "raw": result}
+        if isinstance(payload, dict) and "execution_outcome" not in payload:
+            payload["execution_outcome"] = "failed" if payload.get("success") is False else "succeeded"
+        self._evaluation_world.record_browser(normalized_action, payload)
+        return result
+
+
+@contextmanager
+def _browser_fixture() -> Iterator[str]:
+    """启动只绑定回环地址的动态测试页，并在评测结束后等待线程退出。"""
+    class _Handler(BaseHTTPRequestHandler):
+        """返回固定页面，不记录请求正文或客户端环境。"""
+
+        def do_GET(self) -> None:  # noqa: N802 - 标准库处理器方法名
+            """仅提供固定路径和最小 HTML，其他请求返回 404。"""
+            if self.path != "/fixture":
+                self.send_error(404)
+                return
+            body = (
+                "<!doctype html><html><head><meta charset='utf-8'><title>MoviePilot Browser Fixture</title></head>"
+                "<body><main><h1>MoviePilot Browser Fixture</h1>"
+                "<button id='reveal' type='button'>显示结果</button><p id='result'>PENDING</p>"
+                "<script>document.getElementById('reveal').addEventListener('click', () => "
+                "document.getElementById('result').textContent = 'BROWSER_OK');</script>"
+                "</main></body></html>"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            """禁止标准库把本地测试请求写入 stderr。"""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = Thread(target=server.serve_forever, name="moviepilot-evaluation-browser", daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/fixture"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 class _McpDirectory:
     """受控目录不配置任何外部 MCP，禁止发现阶段启动服务或联网。"""
 
@@ -148,6 +451,7 @@ def _agent_type() -> type:
             self.display_messages: list[dict[str, Any]] = []
             self.execution_success = False
             self.evaluation_bundle: Any = None
+            self.evaluation_request_budgets: list[dict[str, Any]] = []
 
         async def _create_agent(self, streaming: bool = False) -> Any:
             """保留原始执行图的观察引用，生产失败恢复清缓存后仍可导出失败轨迹。"""
@@ -173,6 +477,17 @@ def _agent_type() -> type:
         def _get_recursion_limit(self) -> int:
             """将显式评测迭代预算交给真实 LangGraph 执行器。"""
             return self.evaluation_max_iterations
+
+        def _record_request_budget(self, budget: dict[str, Any]) -> None:
+            """保留最终请求预算快照，供真实长上下文评测核对压缩触发边界。"""
+            super()._record_request_budget(budget)
+            self.evaluation_request_budgets.append({
+                key: budget.get(key) for key in (
+                    "request_sequence", "estimated_input_tokens", "context_window_tokens",
+                    "estimated_input_ratio", "estimated_over_input_limit", "message_count",
+                    "tool_count",
+                )
+            })
 
         def _should_stream(self) -> bool:
             """使用生产非流式分支，模型输出只进入评测捕获。"""
@@ -276,8 +591,12 @@ async def _run_isolated(
             AgentInvocation.__table__.create(engine)
             invocation_repository = TransactionalInvocationRepository(sessionmaker(bind=engine))
         factory = stack.enter_context(_runtime_scope(directory, world))
+        if world.scenario.kind == "browser":
+            world.configure_browser_url(stack.enter_context(_browser_fixture()))
         memory_port = _MemoryPort()
         output: list[str] = []
+        command_root = directory / "command-workspace"
+        command_root.mkdir()
         agent = _agent_type()(
             session_id=uuid4().hex, user_id="1", username="evaluation", channel=NotificationChannel.WebAgent.value,
             source="evaluation", is_channel_admin=True, replay_mode=ReplyMode.CAPTURE_ONLY, allow_message_tools=False,
@@ -295,17 +614,49 @@ async def _run_isolated(
             tool.set_agent_context({"is_admin": True, "should_dispatch_reply": False, "require_secret_confirmation": True}
                                    if child else agent._tool_context)
             (agent.evaluation_child_tools if child else agent.evaluation_tools).append(tool)
+            # Skill 主体只返回相对 supporting_files；评测必须提供与生产一致的
+            # read_file 能力，才能验证模型是否按需加载 api/*.md 合同。工具使用
+            # 非管理员上下文，只能读取当前临时 CONFIG_DIR/agent 隔离目录。
+            skill_file_tool = _EvaluationReadFileTool(
+                allowed_root=directory / "agent", session_id=agent.session_id, user_id="1",
+            )
+            skill_file_tool.set_message_attr(agent.channel, agent.source, agent.username)
+            skill_file_tool.set_agent_context({
+                "is_admin": False,
+                "should_dispatch_reply": False,
+                "require_secret_confirmation": True,
+            })
+            (agent.evaluation_child_tools if child else agent.evaluation_tools).append(skill_file_tool)
+        if world.scenario.kind in {"command", "terminal"}:
+            command_tool = _EvaluationExecuteCommandTool(
+                world=world, allowed_root=command_root, session_id=agent.session_id, user_id="1",
+            )
+            command_tool.set_message_attr(agent.channel, agent.source, agent.username)
+            command_tool.set_agent_context(agent._tool_context)
+            agent.evaluation_tools.append(command_tool)
+        elif world.scenario.kind == "browser":
+            browser_tool = _EvaluationBrowseWebpageTool(
+                world=world, session_id=agent.session_id, user_id="1",
+            )
+            browser_tool.set_message_attr(agent.channel, agent.source, agent.username)
+            browser_tool.set_agent_context(agent._tool_context)
+            agent.evaluation_tools.append(browser_tool)
         try:
-            result = await agent.process(world.scenario.model_input())
+            result = await agent.process(world.model_input())
             bundle = agent.evaluation_bundle
             state = bundle.agent.get_state({"configurable": {"thread_id": agent.session_id}}).values if bundle else {}
+            tool_catalog = bundle.tool_catalog.audit_payload() if bundle and bundle.tool_catalog else None
+            child_tool_catalog = bundle.subagent_catalog.audit_payload() if bundle and bundle.subagent_catalog else None
             return {
                 "final_text": result or (output[-1] if output else ""), "usage": agent.get_session_status(),
+                "request_budgets": agent.evaluation_request_budgets,
                 "execution_success": agent.execution_success, "raw_messages": messages_to_dict(state.get("messages", [])),
                 "display_messages": agent.display_messages, "task_plan": state.get("task_plan"),
                 "tool_catalog_scope": "controlled_moviepilot_api_and_production_internal_tools",
                 "tool_names": sorted(tool.name for tool in bundle.tool_catalog.tools) if bundle else [],
                 "child_tool_names": sorted(tool.name for tool in agent.evaluation_child_tools),
+                "tool_catalog": tool_catalog,
+                "child_tool_catalog": child_tool_catalog,
                 "graph_nodes": sorted(bundle.agent.get_graph().nodes) if bundle else [],
             }
         finally:

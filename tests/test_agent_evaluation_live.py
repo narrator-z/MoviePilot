@@ -94,6 +94,7 @@ def test_worker_nonzero_exit_does_not_publish_private_logs(monkeypatch, model_se
     ('{"status":"completed"}', {"status": "completed"}),
     ('```json\n{"status":"completed"}\n```', {"status": "completed"}),
     ('```\n{"status":"blocked"}\n```', {"status": "blocked"}),
+    ('已完成。\n```json\n{"status":"completed"}\n```\n后续说明', {"status": "completed"}),
     ('```xml\n{"status":"completed"}\n```', None),
     ('已完成。\n{"status":"completed"}', None),
     ('```json\n{}\n```\n```json\n{}\n```', None),
@@ -209,8 +210,69 @@ async def test_successful_model_reply_still_requires_independent_business_eviden
     assert report["reported_models"] == ["provider-reported-model"]
     assert report["tokens"]["total_tokens"] == 40
     assert report["usage_complete"] is True
+    assert report["tool_catalog"] is None
+    assert report["child_tool_catalog"] is None
     assert worker_boundary.model.parameters["max_retries"] == 0
     assert worker_boundary.model.parameters["max_tokens"] == model_settings.max_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_provider_uses_google_compatible_request_options(worker_boundary, model_settings):
+    """Chat Completions provider 不得误走 Responses 参数，推理档位仍要显式传递。"""
+    model_settings = ModelSettings(**{**asdict(model_settings), "wire_api": "chat_completions"})
+
+    async def run(_world, model, **_kwargs):
+        """完成一次离线回调，保留模型构造参数供断言。"""
+        _record_model_reply(model, successful=True)
+        return {"execution_success": False, "final_text": "执行失败"}
+
+    worker_boundary.runner = run
+    await live._run_worker("unknown_download", model_settings)
+    parameters = worker_boundary.model.parameters
+    assert parameters["use_responses_api"] is False
+    assert parameters["reasoning_effort"] == model_settings.reasoning_effort
+    assert "reasoning" not in parameters
+
+
+def test_official_google_provider_uses_native_tool_transport():
+    """官方 Gemini 主机必须走原生 SDK，避免 OpenAI 兼容层丢失 thought_signature。"""
+    settings = ModelSettings(
+        model="gemini-3.1-pro-preview",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        api_key="private-test-key",
+        wire_api="chat_completions",
+    )
+    tracker = live.ModelUsageTracker(settings.max_model_calls)
+    model, transport = live._build_model(settings, tracker)
+    try:
+        assert transport == "google_generative_language"
+        assert model.model == settings.model
+        assert model.max_output_tokens == settings.max_output_tokens
+        assert model.max_retries == 0
+        assert model.thinking_level == "high"
+    finally:
+        asyncio.run(live._close_model_clients(model))
+
+
+def test_codex_oauth_uses_production_responses_headers():
+    """Codex OAuth 评测必须复用生产端点、Responses 协议和账户级请求头。"""
+    settings = ModelSettings(
+        model="gpt-5.6-luna", base_url="https://chatgpt.com/backend-api/codex",
+        api_key="private-oauth-token", auth_mode="codex_oauth", account_id="private-account",
+    )
+    tracker = live.ModelUsageTracker(settings.max_model_calls)
+    model, transport = live._build_model(settings, tracker)
+    try:
+        assert transport == "chatgpt_codex_oauth"
+        dumped = model.model_dump()
+        assert dumped["openai_api_base"] == settings.base_url
+        assert dumped["use_responses_api"] is True
+        assert dumped["streaming"] is True
+        assert dumped["store"] is False
+        assert dumped["max_tokens"] is None
+        assert dumped["default_headers"] == {"originator": "moviepilot", "ChatGPT-Account-Id": "private-account"}
+    finally:
+        asyncio.run(live._close_model_clients(model))
 
 
 @pytest.mark.asyncio

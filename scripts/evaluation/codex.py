@@ -15,7 +15,7 @@ from typing import Any
 
 from scripts.evaluation.live import _parse_final, _validate_report, _worker_environment
 from scripts.evaluation.models import ModelSettings
-from scripts.evaluation.proxy import EvaluationModelProxy
+from scripts.evaluation.proxy import NATIVE_SHELL_TOOLS, EvaluationModelProxy
 from scripts.evaluation.score import evaluate
 from scripts.evaluation.server import EvaluationMcpServer
 from scripts.evaluation.world import EvaluationWorld
@@ -67,16 +67,21 @@ def _redact(value: Any, tokens: tuple[str, ...]) -> Any:
 
 
 def _configuration(settings: ModelSettings, proxy: EvaluationModelProxy, server: EvaluationMcpServer,
-                   control_dir: Path) -> dict[str, Any]:
+                   control_dir: Path, *, scenario_id: str = "") -> dict[str, Any]:
     """显式隔离原生客户端的外部能力，仍保留其默认提示词、计划及子代理循环。"""
-    disabled = (
+    disabled = [
         "apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "computer_use",
-        "in_app_browser", "in_app_chat", "image_generation", "view_image", "shell_tool", "unified_exec",
-        "shell_snapshot", "hooks", "memories", "plugins", "remote_plugin", "plugin_sharing", "skill_search",
+        "in_app_browser", "in_app_chat", "image_generation", "view_image", "hooks", "memories", "plugins",
+        "remote_plugin", "plugin_sharing", "skill_search",
         "skill_mcp_dependency_install", "workspace_dependencies", "goals", "sleep_tool", "code_mode",
         "code_mode_host", "enable_request_compression", "unbounded_connection_retries", "tool_suggest",
-    )
-    return {
+    ]
+    if scenario_id not in {"command_execution", "terminal_session"}:
+        disabled.extend(("shell_tool", "unified_exec", "shell_snapshot"))
+    if scenario_id == "browser_navigation":
+        for feature in ("browser_use", "browser_use_external", "browser_use_full_cdp_access", "computer_use", "in_app_browser"):
+            disabled.remove(feature)
+    configuration = {
         "model": settings.model, "model_provider": "evaluation", "model_reasoning_effort": settings.reasoning_effort,
         "model_context_window": settings.context_window, "approval_policy": "never", "web_search": "disabled",
         "tools.update_plan.enabled": True,
@@ -99,6 +104,15 @@ def _configuration(settings: ModelSettings, proxy: EvaluationModelProxy, server:
             "tools": {name: {"approval_mode": "approve"} for name in ("moviepilot_api", "read_skill", "read_tool_result")},
         }},
     }
+    if scenario_id in {"command_execution", "terminal_session"}:
+        # 命令场景只开放 CLI 已核对的两个终端动作；仍使用只读沙箱和 never 审批。
+        configuration.update({f"features.{name}": True for name in ("shell_tool", "unified_exec", "shell_snapshot")})
+    elif scenario_id == "browser_navigation":
+        # 让探针核对 CLI 自身是否广告浏览器能力；当前版本未广告时必须留在差异证据中。
+        configuration.update({f"features.{name}": True for name in (
+            "browser_use", "browser_use_external", "browser_use_full_cdp_access", "computer_use", "in_app_browser",
+        )})
+    return configuration
 
 
 async def _read_output(stream: asyncio.StreamReader, result: bytearray) -> None:
@@ -181,6 +195,38 @@ def _events(text: str) -> tuple[list[dict[str, Any]], str, bool]:
     return events, final_text, completed and not malformed
 
 
+def _record_native_command_events(world: EvaluationWorld, events: list[dict[str, Any]]) -> None:
+    """把 CLI 的已完成命令事件映射为同一场景账本，避免只看模型文字。"""
+    seen: set[str] = set()
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") not in {"command_execution", "command_execution_output"}:
+            continue
+        command = item.get("command")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        identity = str(item.get("id") or command)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        output = item.get("aggregated_output", item.get("output", ""))
+        if not isinstance(output, str):
+            output = str(output or "")
+        exit_code = item.get("exit_code", item.get("exitCode"))
+        if type(exit_code) is not int:
+            exit_code = None
+        outcome = "succeeded" if exit_code == 0 else ("unknown" if exit_code is None else "failed")
+        terminal_input_observed = world.scenario.kind == "terminal" and "MOVIEPILOT_TERMINAL_OK" in output.replace("\r", "")
+        world.record_command(command.strip(), {
+            "action": "start" if world.scenario.kind == "terminal" else "run",
+            "success": outcome == "succeeded", "execution_outcome": outcome,
+            "status": "exited" if exit_code is not None else "unknown", "exit_code": exit_code,
+            "timed_out": False, "output": output, "terminal_input_observed": terminal_input_observed,
+        }, action="start" if world.scenario.kind == "terminal" else "run")
+
+
 def _probe_ready(usage: dict[str, Any], server_stats: dict[str, Any]) -> bool:
     """探针必须到达实际业务工具目录且没有真实模型或业务调用，仅有计划工具不算就绪。"""
     retained = {name for record in usage.get("model_requests", []) for name in record.get("retained_tools", [])}
@@ -195,6 +241,9 @@ async def _run_codex(scenario_id: str, settings: ModelSettings, executable: str,
     from scripts.evaluation.__main__ import _provenance
 
     world = EvaluationWorld(scenario_id)
+    if world.scenario.kind == "browser" and not world.browser_url:
+        # CLI 当前没有浏览器工具；探针仍需有一个不真实连接的公开地址可渲染输入。
+        world.configure_browser_url("http://127.0.0.1:1/fixture")
     provenance = _provenance(world)
     started = time.monotonic()
     result: dict[str, Any] = {}
@@ -208,8 +257,11 @@ async def _run_codex(scenario_id: str, settings: ModelSettings, executable: str,
             raise RuntimeError("无法读取当前原生客户端自带模型目录")
         catalog, catalog_metadata = _catalog(json.loads(catalog_result["stdout"]), settings.model)
         (control_dir / "models.json").write_text(json.dumps(catalog), encoding="utf-8")
-        async with EvaluationMcpServer(world) as server, EvaluationModelProxy(settings, probe_only=probe_only) as proxy:
-            config = _configuration(settings, proxy, server, control_dir)
+        extra_native_tools = NATIVE_SHELL_TOOLS if scenario_id in {"command_execution", "terminal_session"} else frozenset()
+        async with EvaluationMcpServer(world) as server, EvaluationModelProxy(
+            settings, probe_only=probe_only, extra_native_tools=extra_native_tools,
+        ) as proxy:
+            config = _configuration(settings, proxy, server, control_dir, scenario_id=scenario_id)
             command = [executable, "exec", "--ignore-user-config", "--ignore-rules", "--strict-config", "--ephemeral",
                        "--skip-git-repo-check", "--sandbox", "read-only", "--json", "--color", "never", "-C", str(work_dir)]
             for key, value in config.items():
@@ -219,15 +271,20 @@ async def _run_codex(scenario_id: str, settings: ModelSettings, executable: str,
             environment.update(MOVIEPILOT_EVAL_MODEL_TOKEN=proxy.bearer_token,
                                MOVIEPILOT_EVAL_MCP_TOKEN=server.bearer_token)
             try:
-                result = await _execute(command, world.scenario.model_input(), environment, work_dir, settings.timeout_seconds)
+                result = await _execute(command, world.model_input(), environment, work_dir, settings.timeout_seconds)
                 failure = result.get("error_type")
             except (RuntimeError, TimeoutError, OSError) as error:
                 failure = type(error).__name__
-            local_tokens = (proxy.bearer_token, server.bearer_token)
+            local_tokens = tuple(
+                value for value in (proxy.bearer_token, server.bearer_token, settings.account_id)
+                if isinstance(value, str) and value
+            )
         usage = proxy.snapshot()
         server_stats = server.stats
         skill_sha256 = server.skill_sha256
     events, final_text, completed = _events(result.get("stdout", ""))
+    if scenario_id in {"command_execution", "terminal_session"}:
+        _record_native_command_events(world, events)
     if any(event.get("type") == "evaluation.invalid_event" for event in events):
         failure = failure or "invalid_native_events"
     final_report = _parse_final(final_text)
@@ -252,13 +309,17 @@ async def _run_codex(scenario_id: str, settings: ModelSettings, executable: str,
     report["task_passed"] = report["passed"]
     report["passed"] = bool(report["passed"] and completed and result.get("returncode") == 0 and not failure)
     report["probe_ready"] = bool(probe_only and not failure and _probe_ready(usage, server_stats))
-    checked: dict[str, Any] = _validate_report(_redact(report, local_tokens), settings.api_key)
+    checked: dict[str, Any] = _validate_report(
+        _redact(report, local_tokens), settings.api_key, settings.account_id,
+    )
     checked["native_stderr_sha256"] = hashlib.sha256(checked["native_stderr"].encode()).hexdigest()
     return checked
 
 
 def run_codex(scenario_id: str, settings: ModelSettings, *, executable: str = "codex", probe_only: bool = False) -> dict[str, Any]:
     """仅运行已核对的原生版本，探针不会向真实供应商发送请求。"""
+    if settings.wire_api != "responses":
+        raise RuntimeError("原生 Codex 对照目前要求 Responses provider；当前配置是 Chat Completions")
     binary = shutil.which(executable)
     if binary is None:
         raise RuntimeError("未找到原生 Codex CLI")

@@ -24,9 +24,18 @@ class Scenario:
     title: str
     magnet: str
     infohash: str
+    kind: str = "api"
+    command: str = ""
+    browser_url: str = ""
 
     def model_input(self) -> str:
         """提供完整已知输入，但不把场景代号及隐藏故障布置传给模型。"""
+        if self.kind == "command":
+            return f"{self.task}\n\n命令：{self.command}"
+        if self.kind == "terminal":
+            return f"{self.task}\n\n命令：{self.command}"
+        if self.kind == "browser":
+            return f"{self.task}\n\n页面地址：{self.browser_url}"
         return (
             f"{self.task}\n\n媒体名称：{self.title}\n"
             f"媒体来源：{self.media_source}\n媒体 ID：{self.media_id}\n"
@@ -61,6 +70,76 @@ _SCENARIOS = (
         title="漫长夏日",
         magnet=f"magnet:?xt=urn:btih:{'c3' * 20}&dn=Summer.2025.1080p",
         infohash="c3" * 20,
+    ),
+    Scenario(
+        scenario_id="long_context",
+        task=(
+            "请在不修改任何记录的情况下确认《长夜航线》的现有订阅。订阅列表很长，必须只使用 "
+            "subscription.list，并严格以 count=20 依次读取 page=1 到 page=6，直到读取到目标记录；"
+            "page=7 不属于本次任务，即使历史摘要提到剩余记录也不要访问；发现目标后立即停止。"
+            "不要调用 subscription.find、subscription.get 或其他 operation，也不要写入。"
+            + _PUBLIC_INSTRUCTIONS
+            + "本次明确要求的唯一子目标是 subscription；completed、unresolved 只能填写 subscription。"
+        ),
+        media_source="themoviedb",
+        media_id="481004",
+        title="长夜航线",
+        magnet=f"magnet:?xt=urn:btih:{'d4' * 20}&dn=Night.Route.2025.1080p",
+        infohash="d4" * 20,
+    ),
+    Scenario(
+        scenario_id="command_execution",
+        task=(
+            "请使用当前工作目录的命令行运行给定的只读命令，并确认退出码与标准输出。"
+            "命令成功后完成 command 子目标；命令失败或无法确认时将 command 放入 unresolved。"
+            "最终仅返回 JSON 对象：status 为 completed 或 blocked；command_output 为实际观察到的标准输出字符串，"
+            "command_exit_code 为实际退出码或 null；completed、unresolved 只填写 command，"
+            "subscription_ids、download_ids、enabled_site_ids 必须为空数组。"
+            "不要编造命令结果，也不要执行其他命令。"
+        ),
+        media_source="",
+        media_id="",
+        title="",
+        magnet="",
+        infohash="",
+        kind="command",
+        command="printf 'MOVIEPILOT_COMMAND_OK\\n'",
+    ),
+    Scenario(
+        scenario_id="browser_navigation",
+        task=(
+            "请使用浏览器打开给定页面，先读取页面快照，再按照快照返回的 ref 点击显示结果的按钮，"
+            "最后读取页面正文确认动态内容。允许本次受控页面使用 allow_private_network=true。"
+            "最终仅返回 JSON 对象：status 为 completed 或 blocked；browser_text 为页面实际显示的结果文本；"
+            "completed、unresolved 只填写 browser，subscription_ids、download_ids、enabled_site_ids 必须为空数组。"
+            "不要执行其他浏览器操作，不要编造页面内容。"
+        ),
+        media_source="",
+        media_id="",
+        title="",
+        magnet="",
+        infohash="",
+        kind="browser",
+        browser_url="__EVALUATION_BROWSER_URL__",
+    ),
+    Scenario(
+        scenario_id="terminal_session",
+        task=(
+            "请使用后台终端会话运行给定命令，并按会话状态完成一次交互：先启动命令并读取 READY，"
+            "再向同一 session_id 写入 MOVIEPILOT_TERMINAL_OK 加换行，最后读取或等待到命令退出。"
+            "启动时使用 pipe 模式（use_pty=false），不要使用 action=run，也不要执行其他命令。"
+            "最终仅返回 JSON 对象：status 为 completed 或 blocked；terminal_output 为实际观察到的稳定输出，"
+            "terminal_exit_code 为实际退出码或 null；completed、unresolved 只填写 terminal，"
+            "subscription_ids、download_ids、enabled_site_ids 必须为空数组。"
+            "没有完整确认 READY、回复行和退出码时，将 terminal 放入 unresolved，不要编造结果。"
+        ),
+        media_source="",
+        media_id="",
+        title="",
+        magnet="",
+        infohash="",
+        kind="terminal",
+        command="printf 'READY\\n'; IFS= read -r reply; printf 'REPLY=%s\\n' \"$reply\"",
     ),
 )
 

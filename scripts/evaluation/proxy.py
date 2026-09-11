@@ -33,19 +33,26 @@ NATIVE_CONTROL_TOOLS = frozenset({
 NATIVE_COLLABORATION_TOOLS = frozenset({
     "spawn_agent", "followup_task", "interrupt_agent", "list_agents", "send_message", "wait_agent",
 })
-KNOWN_NAMESPACES = frozenset({"functions", "clock", "collaboration", "mcp__evaluation"})
+NATIVE_MULTI_AGENT_TOOLS = NATIVE_CONTROL_TOOLS | NATIVE_COLLABORATION_TOOLS
+NATIVE_SHELL_TOOLS = frozenset({"exec_command", "write_stdin"})
+KNOWN_NAMESPACES = frozenset({"functions", "clock", "collaboration", "mcp__evaluation", "multi_agent_v1"})
 FIXTURE_TOOLS = frozenset({"moviepilot_api", "read_skill", "read_tool_result"})
 
 
-def allowed_tool(name: str) -> bool:
-    """只允许原生计划/协作控制与本地固定 MCP 目录，不接入真实系统工具。"""
+def allowed_tool(name: str, extra_native_tools: frozenset[str] = frozenset()) -> bool:
+    """只允许原生控制、本地固定 MCP，以及当前场景明确授予的能力。"""
     normalized = name.removeprefix("functions.").replace(".", "__")
     return (normalized in NATIVE_CONTROL_TOOLS
+            or normalized in extra_native_tools
             or normalized in {f"collaboration__{tool}" for tool in NATIVE_COLLABORATION_TOOLS}
-            or normalized in {f"mcp__evaluation__{tool}" for tool in FIXTURE_TOOLS})
+            or normalized in {f"mcp__evaluation__{tool}" for tool in FIXTURE_TOOLS}
+            or (normalized.startswith("multi_agent_v1__")
+                and normalized.removeprefix("multi_agent_v1__") in NATIVE_MULTI_AGENT_TOOLS))
 
 
-def project_tools(tools: Any, prefix: str = "") -> tuple[list[dict[str, Any]], list[str], list[str]]:
+def project_tools(
+    tools: Any, prefix: str = "", extra_native_tools: frozenset[str] = frozenset(),
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     """保留允许工具的原始 schema；外部 MCP 配置污染必须中止，不能静默投影成合格评测。"""
     if not isinstance(tools, list) or prefix.count(".") > 8:
         raise ValueError("工具目录结构无效")
@@ -65,13 +72,13 @@ def project_tools(tools: Any, prefix: str = "") -> tuple[list[dict[str, Any]], l
         if tool["type"] == "mcp" or (normalized.startswith("mcp__") and not (
             normalized == "mcp__evaluation" or normalized.startswith("mcp__evaluation__")
         )):
-            raise ValueError("评测目录包含外部 MCP")
+            raise ValueError(f"评测目录包含外部 MCP：{qualified}")
         if tool["type"] == "namespace":
             if qualified not in KNOWN_NAMESPACES:
-                raise ValueError("评测目录包含未知命名空间")
+                raise ValueError(f"评测目录包含未知命名空间：{qualified}")
             if "tools" not in tool:
                 raise ValueError("命名空间没有工具目录")
-            children, kept, dropped = project_tools(tool["tools"], qualified)
+            children, kept, dropped = project_tools(tool["tools"], qualified, extra_native_tools)
             if children:
                 projected.append({**tool, "tools": children})
             retained.extend(kept)
@@ -79,11 +86,13 @@ def project_tools(tools: Any, prefix: str = "") -> tuple[list[dict[str, Any]], l
         elif tool["type"] == "tool_search":
             description = tool.get("description")
             sources = re.findall(r"(?m)^- ([^:\n]+):", description) if isinstance(description, str) else []
-            if prefix or tool.get("execution") != "client" or sources != ["evaluation"]:
+            allowed_sources = {"Multi-agent tools", "evaluation"}
+            if (prefix or tool.get("execution") != "client" or not sources
+                    or "evaluation" not in sources or any(source not in allowed_sources for source in sources)):
                 raise ValueError("原生工具搜索不是固定评测目录")
             projected.append(copy.deepcopy(tool))
             retained.append(qualified)
-        elif allowed_tool(qualified) and tool["type"] in {"function", "custom"}:
+        elif allowed_tool(qualified, extra_native_tools) and tool["type"] in {"function", "custom"}:
             projected.append(copy.deepcopy(tool))
             retained.append(qualified)
         else:
@@ -91,13 +100,15 @@ def project_tools(tools: Any, prefix: str = "") -> tuple[list[dict[str, Any]], l
     return projected, retained, removed
 
 
-def _project_catalogs(payload: dict[str, Any]) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+def _project_catalogs(
+    payload: dict[str, Any], extra_native_tools: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     """同时约束传统顶层目录和原生 additional_tools 输入目录，保持各自 wire 位置。"""
     retained, removed, catalogs = [], [], []
 
     def project(value: dict[str, Any], location: str) -> None:
         """替换已存在的目录并记录位置，不能凭空创建第二份工具定义。"""
-        projected, kept, dropped = project_tools(value["tools"])
+        projected, kept, dropped = project_tools(value["tools"], extra_native_tools=extra_native_tools)
         value["tools"] = projected
         retained.extend(kept)
         removed.extend(dropped)
@@ -114,7 +125,7 @@ def _project_catalogs(payload: dict[str, Any]) -> tuple[list[str], list[str], li
                 project(value, f"{location}.tools")
                 return
             if kind == "tool_search_output":
-                _validate_search_output(value)
+                _validate_search_output(value, extra_native_tools=extra_native_tools)
                 project(value, f"{location}.tools")
                 return
             for key, child in value.items():
@@ -224,37 +235,45 @@ def _validate_search_call(payload: dict[str, Any], *, partial: bool = False) -> 
         raise ValueError("原生工具搜索数量无效")
 
 
-def _validate_search_output(payload: dict[str, Any]) -> None:
+def _validate_search_output(
+    payload: dict[str, Any], *, extra_native_tools: frozenset[str] = frozenset(),
+) -> None:
     """延迟发现返回的定义只能属于三个评测工具，不能借搜索结果再引入原生危险工具。"""
     if (payload.get("execution") != "client" or payload.get("status") != "completed"
             or not isinstance(payload.get("call_id"), str) or not payload["call_id"]):
         raise ValueError("原生工具搜索结果边界无效")
-    _, retained, removed = project_tools(payload.get("tools"))
-    fixture_names = {f"mcp__evaluation__{tool}" for tool in FIXTURE_TOOLS}
-    if removed or any(name.removeprefix("functions.").replace(".", "__") not in fixture_names for name in retained):
-        raise ValueError("搜索结果包含评测目录以外的定义")
+    _, retained, removed = project_tools(payload.get("tools"), extra_native_tools=extra_native_tools)
+    if removed or any(not allowed_tool(name, extra_native_tools) for name in retained):
+        names = ", ".join(removed[:8]) or ", ".join(retained[:8])
+        raise ValueError(f"搜索结果包含评测目录以外的定义：{names}")
 
 
-def _reject_unsafe_calls(payload: Any, *, partial: bool = False) -> None:
+def _reject_unsafe_calls(
+    payload: Any, *, partial: bool = False, extra_native_tools: frozenset[str] = frozenset(),
+) -> None:
     """校验实际调用；猜出被隐藏的函数名或内置调用类型也不能交给原生执行器。"""
     if isinstance(payload, dict):
         kind = payload.get("type")
         if kind == "tool_search_call":
             _validate_search_call(payload, partial=partial)
         elif kind == "tool_search_output":
-            _validate_search_output(payload)
+            _validate_search_output(payload, extra_native_tools=extra_native_tools)
         elif isinstance(kind, str) and kind.endswith("_call"):
             name = payload.get("name")
             namespace = payload.get("namespace")
             if namespace:
                 name = f"{namespace}.{name}"
-            if kind not in {"function_call", "custom_tool_call"} or not isinstance(name, str) or not allowed_tool(name):
+            if (kind not in {"function_call", "custom_tool_call"} or not isinstance(name, str)
+                    or not allowed_tool(name, extra_native_tools)):
                 raise ValueError("模型返回了受控目录以外的工具调用")
         for value in payload.values():
-            _reject_unsafe_calls(value, partial=partial or kind == "response.output_item.added")
+            _reject_unsafe_calls(
+                value, partial=partial or kind == "response.output_item.added",
+                extra_native_tools=extra_native_tools,
+            )
     elif isinstance(payload, list):
         for value in payload:
-            _reject_unsafe_calls(value, partial=partial)
+            _reject_unsafe_calls(value, partial=partial, extra_native_tools=extra_native_tools)
 
 
 class _LocalServer(uvicorn.Server):
@@ -287,10 +306,12 @@ class EvaluationModelProxy:
     """原生 Codex 使用本地随机令牌，真正供应商凭据只由此固定目标代理持有。"""
 
     def __init__(self, settings: ModelSettings, *, probe_only: bool = False,
-                 transport: Optional[httpx.AsyncBaseTransport] = None) -> None:
+                 transport: Optional[httpx.AsyncBaseTransport] = None,
+                 extra_native_tools: frozenset[str] = frozenset()) -> None:
         """创建独立计数和目录记录；probe_only 只记录目录，绝不真正出站。"""
         self.settings = settings
         self.probe_only = probe_only
+        self._extra_native_tools = frozenset(extra_native_tools)
         self.bearer_token = secrets.token_urlsafe(32)
         self.endpoint = ""
         self.requests: list[dict[str, Any]] = []
@@ -378,11 +399,11 @@ class EvaluationModelProxy:
         tokens = payload.get("max_output_tokens", self.settings.max_output_tokens)
         if type(tokens) is not int or tokens <= 0 or type(payload.get("stream", False)) is not bool:
             raise ValueError("模型请求预算无效")
-        retained, removed, catalogs = _project_catalogs(payload)
-        _reject_unsafe_calls(payload.get("input", []))
+        retained, removed, catalogs = _project_catalogs(payload, self._extra_native_tools)
+        _reject_unsafe_calls(payload.get("input", []), extra_native_tools=self._extra_native_tools)
         choice = payload.get("tool_choice")
         if isinstance(choice, dict) and not (choice.get("type") in {"function", "custom"}
-                                             and allowed_tool(str(choice.get("name", "")))):
+                                             and allowed_tool(str(choice.get("name", "")), self._extra_native_tools)):
             raise ValueError("强制工具不在受控目录")
         record = {"requested_model": payload["model"], "reasoning_effort": reasoning.get("effort"),
                   "retained_tools": retained, "removed_tools": removed, "tool_catalogs": catalogs, "forwarded": False,
@@ -391,7 +412,12 @@ class EvaluationModelProxy:
                                                 "length": len(value) if isinstance(value, (str, list, dict)) else None}
                                           for key, value in payload.items()},
                   "completed": False, "usage": None, "response_model": None, "error_type": None}
-        payload["max_output_tokens"] = min(tokens, self.settings.max_output_tokens)
+        if self.settings.auth_mode == "codex_oauth":
+            # ChatGPT Codex Responses 不接受 max_output_tokens；原生 Codex
+            # 客户端本来也不发送该字段，调用预算由代理计数和超时控制。
+            payload.pop("max_output_tokens", None)
+        else:
+            payload["max_output_tokens"] = min(tokens, self.settings.max_output_tokens)
         return payload, record
 
     async def _respond(self, request: Request) -> Response:
@@ -413,8 +439,12 @@ class EvaluationModelProxy:
             parsed = json.loads(body)
             payload, record = self._validate_payload(parsed)
         except (ValueError, TypeError, RecursionError) as error:
-            self._rejected_requests.append({"error_type": type(error).__name__, "input_blocks": _input_metadata(parsed)})
-            return self._error("Invalid evaluation model request")
+            # 校验异常来自本文件的固定合同文本，可安全反馈给模型以便纠正
+            # 输入；请求正文、密钥和供应商响应仍不会回显。
+            message = str(error) or "请求字段不符合评测合同"
+            self._rejected_requests.append({"error_type": type(error).__name__, "message": message,
+                                             "input_blocks": _input_metadata(parsed)})
+            return self._error(f"Invalid evaluation model request: {message}")
         if self.probe_only:
             self.requests.append(record)
             return self._error("Evaluation probe complete; no model request was forwarded")
@@ -424,9 +454,14 @@ class EvaluationModelProxy:
         record["forwarded"] = True
         self.requests.append(record)
         try:
+            headers = {"Authorization": f"Bearer {self.settings.api_key}", "Content-Type": "application/json"}
+            if self.settings.auth_mode == "codex_oauth":
+                headers["originator"] = "moviepilot"
+                if self.settings.account_id:
+                    headers["ChatGPT-Account-Id"] = self.settings.account_id
             upstream = await self._client.send(self._client.build_request(
                 "POST", f"{self.settings.base_url.rstrip('/')}/responses", json=payload,
-                headers={"Authorization": f"Bearer {self.settings.api_key}", "Content-Type": "application/json"},
+                headers=headers,
             ), stream=True)
         except httpx.HTTPError as error:
             record["error_type"] = type(error).__name__
@@ -462,7 +497,7 @@ class EvaluationModelProxy:
         """在任何正文交给原生客户端之前拒绝凭据、非法调用与非对象响应。"""
         if not isinstance(value, dict) or self.settings.api_key in "".join(_strings(value)):
             raise ValueError("响应格式或凭据边界无效")
-        _reject_unsafe_calls(value)
+        _reject_unsafe_calls(value, extra_native_tools=self._extra_native_tools)
 
     @staticmethod
     def _capture(response: dict[str, Any], record: dict[str, Any]) -> None:

@@ -12,7 +12,8 @@ from typing import Any
 import httpx
 import pytest
 
-from scripts.evaluation.server import API_INPUT_SCHEMA, EvaluationMcpServer
+from scripts.evaluation import server as server_module
+from scripts.evaluation.server import API_INPUT_SCHEMA, DIRECT_RESULT_MAX_CHARS, EvaluationMcpServer
 from scripts.evaluation.world import EvaluationWorld
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -102,18 +103,21 @@ async def test_skill_pagination_reconstructs_unmodified_repository_skill() -> No
     async with EvaluationMcpServer(EvaluationWorld("dedup_existing")) as server:
         async with _client(server) as client:
             first_result, first = await _tool(client, "read_skill", {"name": "moviepilot-api"})
-            assert len(first_result["content"][0]["text"]) <= 8192
-            assert first["tool_result_truncated"] is True
-            restored = first["content_preview"]
-            cursor = first["next_offset"]
-            while cursor is not None:
-                response, page = await _tool(client, "read_tool_result", {"result_id": first["result_id"], "offset": cursor, "limit": 16000})
-                assert len(response["content"][0]["text"]) <= 16000
-                assert page["offset"] == len(restored)
-                restored += page["content"]
-                if page["next_offset"] is not None:
-                    assert page["next_offset"] > cursor
-                cursor = page["next_offset"]
+            assert len(first_result["content"][0]["text"]) <= DIRECT_RESULT_MAX_CHARS
+            if first.get("tool_result_truncated"):
+                assert len(first_result["content"][0]["text"]) <= 8192
+                restored = first["content_preview"]
+                cursor = first["next_offset"]
+                while cursor is not None:
+                    response, page = await _tool(client, "read_tool_result", {"result_id": first["result_id"], "offset": cursor, "limit": 16000})
+                    assert len(response["content"][0]["text"]) <= 16000
+                    assert page["offset"] == len(restored)
+                    restored += page["content"]
+                    if page["next_offset"] is not None:
+                        assert page["next_offset"] > cursor
+                    cursor = page["next_offset"]
+            else:
+                restored = first_result["content"][0]["text"]
             skill = json.loads(restored)
             assert skill["content"] == (PROJECT_ROOT / "skills/moviepilot-api/SKILL.md").read_text(encoding="utf-8")
             assert skill["skill"]["name"] == "moviepilot-api"
@@ -127,6 +131,49 @@ async def test_skill_pagination_reconstructs_unmodified_repository_skill() -> No
             )
             assert skill["supporting_files"] == expected_supporting_files
             assert server.stats["world_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_skill_supporting_document_uses_read_skill_without_file_tool() -> None:
+    """评测服务应通过 read_skill 加载已列出的分类合同，而不是开放任意文件读取。"""
+    async with EvaluationMcpServer(EvaluationWorld("dedup_existing")) as server:
+        async with _client(server) as client:
+            result, payload = await _tool(
+                client,
+                "read_skill",
+                {"name": "moviepilot-api", "file": "api/config.md"},
+            )
+            assert result["isError"] is False
+            if payload.get("tool_result_truncated"):
+                assert "# Configuration APIs" in payload["content_preview"]
+            else:
+                assert "# Configuration APIs" in payload["content"]
+
+            invalid_result, invalid = await _tool(
+                client,
+                "read_skill",
+                {"name": "moviepilot-api", "file": "../SKILL.md"},
+            )
+            assert invalid_result["isError"] is True
+            assert invalid["error"] == "skill_file_not_found"
+
+
+@pytest.mark.asyncio
+async def test_invalid_operation_input_returns_operation_contract() -> None:
+    """仿真工具报错时应把当前 operation 的正确输入合同交给模型。"""
+    async with EvaluationMcpServer(EvaluationWorld("dedup_existing")) as server:
+        async with _client(server) as client:
+            result, payload = await _tool(
+                client,
+                "moviepilot_api",
+                {"operation_id": "site.list", "query": {"status": "enabled"}},
+            )
+            assert result["isError"] is True
+            assert payload["operation_id"] == "site.list"
+            assert payload["input_contract"]["query"]["fields"]["status"]["enum"] == [
+                "active", "inactive", "all",
+            ]
+            assert "enabled" not in json.dumps(payload, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -235,8 +282,9 @@ async def test_unknown_tools_and_invalid_arguments_never_expose_control_state() 
 
 
 @pytest.mark.asyncio
-async def test_archive_expiry_and_cross_server_isolation() -> None:
+async def test_archive_expiry_and_cross_server_isolation(monkeypatch) -> None:
     """归档跨同次运行的会话可用，但别的 server 或过期归档不能被猜 ID 读取。"""
+    monkeypatch.setattr(server_module, "DIRECT_RESULT_MAX_CHARS", 1)
     async with EvaluationMcpServer(EvaluationWorld("dedup_existing")) as first_server, EvaluationMcpServer(EvaluationWorld("unknown_download")) as second_server:
         async with _client(first_server) as first, _client(first_server) as sibling, _client(second_server) as second:
             _, preview = await _tool(first, "read_skill", {"name": "moviepilot-api"})

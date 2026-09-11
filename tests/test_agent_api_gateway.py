@@ -30,12 +30,12 @@ from app.agent.tools.manager import MoviePilotToolsManager
 
 def test_api_operation_registry_matches_migration_batches() -> None:
     """API 操作注册表必须覆盖各迁移批次且每项具有固定路由。"""
-    assert len(API_FIRST_BATCH_OPERATION_SPECS) == 52
+    assert len(API_FIRST_BATCH_OPERATION_SPECS) == 53
     assert len(API_PARITY_OPERATION_SPECS) == 15
     assert len(API_MUSIC_OPERATION_SPECS) == 10
     assert len(API_SYSTEM_OPERATION_SPECS) == 7
-    assert len(API_EXTENDED_OPERATION_SPECS) == 127
-    assert len(API_OPERATION_SPECS) == 211
+    assert len(API_EXTENDED_OPERATION_SPECS) == 136
+    assert len(API_OPERATION_SPECS) == 221
     assert {spec.operation_id for spec in API_OPERATION_SPECS} == set(API_OPERATION_ROUTES)
     assert {
         "download.list",
@@ -420,18 +420,16 @@ def test_gateway_forwards_structured_arguments_to_api_executor() -> None:
     result = asyncio.run(
         gateway.run(
             operation_id="media.search",
-            path_params={"media_type": "movie"},
-            query={"page": 1},
-            body={"title": "示例"},
+            query={"page": 1, "title": "示例"},
         )
     )
 
     assert json.loads(result)["success"] is True
     executor.execute.assert_awaited_once_with(
         "media.search",
-        path_params={"media_type": "movie"},
-        query={"page": 1},
-        body={"title": "示例"},
+        path_params=None,
+        query={"page": 1, "title": "示例"},
+        body=None,
     )
 
 
@@ -443,6 +441,32 @@ def test_gateway_rejects_unknown_operation() -> None:
 
     assert '"success": false' in result
     assert "unknown_operation" in result
+
+
+def test_gateway_returns_operation_contract_when_input_is_invalid() -> None:
+    """单个 operation 的参数错误必须返回可直接纠正调用的精确合同。"""
+    executor = AsyncMock()
+    gateway = MoviePilotApiTool(
+        session_id="session",
+        user_id="1",
+        executor=executor,
+    )
+
+    result = asyncio.run(
+        gateway.run(
+            operation_id="site.list",
+            query={"status": "enabled"},
+        )
+    )
+    payload = json.loads(result)
+
+    assert payload["error"] == "invalid_input"
+    assert payload["operation_id"] == "site.list"
+    assert payload["input_contract"]["allowed_arguments"] == ["query"]
+    status = payload["input_contract"]["query"]["fields"]["status"]
+    assert status["enum"] == ["active", "inactive", "all"]
+    assert "enabled" not in json.dumps(payload, ensure_ascii=False)
+    executor.execute.assert_not_awaited()
 
 
 def test_gateway_rejects_admin_operation_for_non_admin_before_http() -> None:

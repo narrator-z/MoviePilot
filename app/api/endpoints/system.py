@@ -18,6 +18,7 @@ from app.api.dependencies.auth import (
     get_current_active_user_async,
 )
 from app.api.endpoints.identifier import router as system_identifiers_router
+from app.api.endpoints.module import router as module_router
 from app.api.principal import ApiPrincipal
 from app.api.response import CompatibleCountParam, CompatiblePageParam, ResponseAPIRouter
 from app.application.backup import DatabaseBackupInProgressError
@@ -28,7 +29,6 @@ from app.application.configuration import (
 from app.application.database import get_database_governance
 from app.application.image import ImageHelper
 from app.application.messaging.message import MessageHelper
-from app.application.module import get_module_manager
 from app.application.network import get_configured_network_test_service
 from app.application.rules import RuleHelper
 from app.application.scheduling import get_scheduler
@@ -61,7 +61,6 @@ from app.schemas.system import PluginMarketSyncData as _SchemaPluginMarketSyncDa
 from app.schemas.system import PluginMarketSyncRequest as _SchemaPluginMarketSyncRequest
 from app.schemas.system import RuleTestData as _SchemaRuleTestData
 from app.schemas.system import SystemEnvironmentUpdateData as _SchemaSystemEnvironmentUpdateData
-from app.schemas.system import SystemModuleListData as _SchemaSystemModuleListData
 from app.schemas.system import SystemSettingsUpdateRequest as _SchemaSystemSettingsUpdateRequest
 from app.schemas.system import SystemUpdateRequest as _SchemaSystemUpdateRequest
 from app.schemas.system import SystemUpdateStatus as _SchemaSystemUpdateStatus
@@ -71,6 +70,7 @@ from app.startup.composition.context import HostRuntime
 
 router = ResponseAPIRouter()
 router.routes.extend(system_identifiers_router.routes)
+router.routes.extend(module_router.routes)
 
 _PUBLIC_SYSTEM_CONFIG_KEYS = {
     item.value: item
@@ -86,7 +86,6 @@ _PUBLIC_SYSTEM_CONFIG_KEYS = {
     )
 }
 _PUBLIC_SETTINGS_KEYS = {"PLUGIN_MARKET"}
-
 
 def _database_backup_artifact_data(artifact: Any) -> _SchemaDatabaseBackupArtifactData:
     """将内部备份制品映射为不含宿主路径的 Web DTO。"""
@@ -969,42 +968,6 @@ async def nettest(
         message=result.message,
         data=data,
     )
-
-
-@router.get(
-    "/modulelist",
-    summary="查询已加载的模块ID列表",
-    response_model=_SchemaResponse[_SchemaSystemModuleListData],
-)
-def modulelist(_: _SchemaTokenPayload = Depends(verify_token)):
-    """
-    查询已加载的模块ID列表
-    """
-    modules = []
-    for spec in get_module_manager().list_specs():
-        module_id = spec.id
-        name = str(spec.metadata["name"])
-        modules.append(
-            {
-                "id": module_id,
-                "name": name,
-                "name_i18n": LocaleHelper.translate(
-                    f"system.modules.{module_id}.name",
-                    default=name,
-                ),
-                "name_key": f"system.modules.{module_id}.name",
-            }
-        )
-    return _SchemaResponse(success=True, data={"modules": modules})
-
-
-@router.get("/moduletest/{moduleid}", summary="模块可用性测试", response_model=_SchemaResponse[None])
-def moduletest(moduleid: str, _: _SchemaTokenPayload = Depends(verify_token)):
-    """
-    模块可用性测试接口
-    """
-    state, errmsg = get_module_manager().test(moduleid)
-    return _SchemaResponse(success=state, message=errmsg)
 
 
 @router.get("/restart", summary="重启系统", response_model=_SchemaResponse[None])

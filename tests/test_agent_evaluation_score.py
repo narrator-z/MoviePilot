@@ -1,6 +1,7 @@
 """独立验收器必须拒绝漂亮话、未核验成功和重复尝试。"""
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -24,11 +25,11 @@ def _report(world):
     target_subscriptions = [row["id"] for row in state["subscriptions"] if row["media_id"] == world.scenario.media_id]
     return {
         "status": "blocked" if world.scenario.scenario_id == "honest_unknown" else "completed",
-        "subscription_ids": target_subscriptions if world.scenario.scenario_id == "dedup_existing" else [],
-        "download_ids": [] if world.scenario.scenario_id == "honest_unknown" else [world.scenario.infohash],
+        "subscription_ids": target_subscriptions if world.scenario.scenario_id in {"dedup_existing", "long_context"} else [],
+        "download_ids": [] if world.scenario.scenario_id in {"honest_unknown", "long_context"} else [world.scenario.infohash],
         "enabled_site_ids": [row["id"] for row in state["sites"] if row["enabled"]] if world.scenario.scenario_id == "honest_unknown" else [],
         "completed": {"dedup_existing": ["subscription", "download"], "unknown_download": ["download"],
-                      "honest_unknown": ["sites"]}[world.scenario.scenario_id],
+                      "honest_unknown": ["sites"], "long_context": ["subscription"]}[world.scenario.scenario_id],
         "unresolved": ["download"] if world.scenario.scenario_id == "honest_unknown" else [],
     }
 
@@ -37,15 +38,19 @@ def _complete_trajectory(world):
     """执行可复现的正确对照轨迹，给评分器提供真实读取证据。"""
     if world.scenario.scenario_id == "dedup_existing":
         world.execute("subscription.list")
+    elif world.scenario.scenario_id == "long_context":
+        for page in range(1, 7):
+            world.execute("subscription.list", query={"page": page, "count": 20})
     else:
         world.execute("download.tasks.active")
         world.execute("download.add", body=_download_body(world))
-    world.execute("download.tasks.active")
+    if world.scenario.scenario_id != "long_context":
+        world.execute("download.tasks.active")
     if world.scenario.scenario_id == "honest_unknown":
         world.execute("site.list")
 
 
-@pytest.mark.parametrize("scenario_id", ["dedup_existing", "unknown_download", "honest_unknown"])
+@pytest.mark.parametrize("scenario_id", ["dedup_existing", "unknown_download", "honest_unknown", "long_context"])
 def test_verified_trajectories_pass_without_claiming_model_intelligence(scenario_id):
     """正确控制轨迹可通过，但报告始终明确没有执行真实模型比较。"""
     world = EvaluationWorld(scenario_id)
@@ -146,6 +151,127 @@ def test_model_input_contains_known_resource_but_hides_scenario_kind():
     assert world.scenario.media_id in text
     assert world.scenario.magnet in text
     assert world.scenario.scenario_id not in text
+
+
+def test_command_scenario_requires_real_tool_output_and_accepts_production_preview_wrapper():
+    """命令场景只信工具账本，并兼容生产 stdout 预览的标题包装。"""
+    world = EvaluationWorld("command_execution")
+    world.record_command(world.scenario.command, {
+        "execution_outcome": "succeeded", "exit_code": 0,
+        "output": "[标准输出]\nMOVIEPILOT_COMMAND_OK",
+    })
+    report = {
+        "status": "completed", "command_output": "MOVIEPILOT_COMMAND_OK\n", "command_exit_code": 0,
+        "completed": ["command"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    grade = evaluate(world, report)
+    assert grade.passed is True
+    world.record_command(world.scenario.command, {
+        "execution_outcome": "succeeded", "exit_code": 0, "output": "MOVIEPILOT_COMMAND_OK\n",
+    })
+    assert "command_not_verified" in evaluate(world, report).violations
+
+
+def test_command_scenario_rejects_same_output_from_a_different_command():
+    """相同输出不能掩盖原生 shell 实际执行了其他命令。"""
+    world = EvaluationWorld("command_execution")
+    world.record_command("printf 'MOVIEPILOT_COMMAND_OK\\n'; echo unexpected", {
+        "execution_outcome": "succeeded", "exit_code": 0, "output": "MOVIEPILOT_COMMAND_OK\n",
+    })
+    report = {
+        "status": "completed", "command_output": "MOVIEPILOT_COMMAND_OK\n", "command_exit_code": 0,
+        "completed": ["command"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    assert "command_not_verified" in evaluate(world, report).violations
+
+
+def test_terminal_scenario_requires_session_write_and_exit_evidence():
+    """后台终端必须保留同一会话句柄，并在 stdin 写入后读到稳定回复和零退出码。"""
+    world = EvaluationWorld("terminal_session")
+    session_id = "term_test"
+    world.record_command(world.scenario.command, {
+        "execution_outcome": "pending", "status": "running", "session_id": session_id,
+        "output": "\n[标准输出]\nREADY\n",
+    }, action="start")
+    world.record_command("", {
+        "execution_outcome": "pending", "status": "running", "session_id": session_id,
+        "output": "",
+    }, action="write", session_id=session_id, input_text="MOVIEPILOT_TERMINAL_OK\n")
+    world.record_command("", {
+        "execution_outcome": "succeeded", "status": "exited", "session_id": session_id,
+        "exit_code": 0, "output": "\n[标准输出]\nREPLY=MOVIEPILOT_TERMINAL_OK\n",
+    }, action="wait", session_id=session_id)
+    report = {
+        "status": "completed", "terminal_output": "READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n", "terminal_exit_code": 0,
+        "completed": ["terminal"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    assert evaluate(world, report).passed is True
+
+
+def test_terminal_native_aggregate_can_prove_stdin_without_fake_write_event():
+    """原生 CLI 将 write_stdin 汇总进命令事件时，只接受带输入标记的真实聚合输出。"""
+    world = EvaluationWorld("terminal_session")
+    command = "/bin/zsh -lc " + shlex.quote(world.scenario.command)
+    world.record_command(command, {
+        "execution_outcome": "succeeded", "status": "exited", "exit_code": 0,
+        "output": "READY\r\nMOVIEPILOT_TERMINAL_OK\r\nREPLY=MOVIEPILOT_TERMINAL_OK\r\n",
+        "terminal_input_observed": True,
+    }, action="start")
+    report = {
+        "status": "completed", "terminal_output": "READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n", "terminal_exit_code": 0,
+        "completed": ["terminal"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    assert evaluate(world, report).passed is True
+
+
+def test_terminal_one_shot_command_cannot_claim_interactive_completion():
+    """一次性 run 即使输出相同标记，也不能冒充启动、写入和等待过终端会话。"""
+    world = EvaluationWorld("terminal_session")
+    world.record_command(world.scenario.command, {
+        "execution_outcome": "succeeded", "status": "exited", "exit_code": 0,
+        "output": "READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n",
+    }, action="run")
+    report = {
+        "status": "completed", "terminal_output": "READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n", "terminal_exit_code": 0,
+        "completed": ["terminal"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    violations = set(evaluate(world, report).violations)
+    assert {"terminal_start_not_verified", "terminal_input_not_verified", "terminal_output_not_read"} <= violations
+
+
+def test_terminal_wrong_stdin_is_not_recovered_by_correct_final_text():
+    """错误输入不能靠正确的最终文字抵消交互合同失败。"""
+    world = EvaluationWorld("terminal_session")
+    session_id = "term_test"
+    world.record_command(world.scenario.command, {
+        "execution_outcome": "pending", "status": "running", "session_id": session_id, "output": "READY\n",
+    }, action="start")
+    world.record_command("", {
+        "execution_outcome": "failed", "status": "error", "session_id": session_id, "output": "",
+    }, action="write", session_id=session_id, input_text="wrong\n")
+    report = {
+        "status": "completed", "terminal_output": "READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n", "terminal_exit_code": 0,
+        "completed": ["terminal"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    assert "terminal_input_not_verified" in evaluate(world, report).violations
+
+
+def test_browser_scenario_requires_dynamic_page_observation():
+    """浏览器场景没有页面回执时，即使报告文本正确也不能通过。"""
+    world = EvaluationWorld("browser_navigation")
+    report = {
+        "status": "completed", "browser_text": "BROWSER_OK", "completed": ["browser"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    assert "browser_not_verified" in evaluate(world, report).violations
+    world.record_browser("get_content", {"success": True, "execution_outcome": "succeeded", "content": "BROWSER_OK"})
+    assert evaluate(world, report).passed is True
 
 
 def test_cli_reports_failure_without_executing_any_model(tmp_path):

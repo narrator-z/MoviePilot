@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 28
+version: 31
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -13,37 +13,39 @@ allowed-api-operations: >-
   media.search media.person.search media.person.credits media.recognize media.scrape
   media.episode_schedule media.detail subscription.add subscription.update subscription.search
   subscription.list subscription.shares subscription.popular subscription.history
-  subscription.delete download.add download.tasks.active download.clients download.paths
-  download.history.list download.history.delete transfer.history.delete site.update site.list
-  site.userdata site.test site.cookie.update recommendation.list library.exists library.latest
-  storage.settings storage.list transfer.history transfer.file scheduler.list scheduler.run
-  workflow.list workflow.run plugin.installed plugin.market plugin.capabilities plugin.config.get
-  plugin.config.update plugin.source.options plugin.source.install plugin.source.change
-  plugin.reload plugin.install plugin.uninstall slash.list config.identifiers.get
-  config.identifiers.update search.torrents search.results filter.builtin filter.custom
-  filter.groups filter.custom.add filter.custom.update filter.custom.delete filter.group.add
-  filter.group.update filter.group.delete plugin.data config.system.get config.system.update
-  slash.run music.recognize music.explore music.album.get music.album.related music.artist.get
-  music.artist.albums music.artist.related music.cache.get music.cache.delete music.cache.clear
-  system.versions system.update.status system.update.check system.update.download system.restart
-  system.update.install system.upgrade.dev dashboard.media.statistics dashboard.storage
-  dashboard.processes dashboard.system dashboard.downloader scheduler.progress
-  dashboard.transfer.statistics dashboard.cpu dashboard.memory dashboard.network media.sources
-  media.recognize_file media.classification.fields media.classification.policy.get
+  subscription.delete download.add download.artist_collection download.tasks.active
+  download.clients download.paths download.history.list download.history.delete
+  transfer.history.delete site.update site.list site.userdata site.test site.cookie.update
+  recommendation.list library.exists library.latest storage.settings storage.list transfer.history
+  transfer.file scheduler.list scheduler.run workflow.list workflow.run plugin.installed
+  plugin.market plugin.capabilities plugin.config.get plugin.config.update plugin.source.options
+  plugin.source.install plugin.source.change plugin.reload plugin.install plugin.uninstall
+  slash.list config.identifiers.get config.identifiers.update search.torrents search.results
+  filter.builtin filter.custom filter.groups filter.custom.add filter.custom.update
+  filter.custom.delete filter.group.add filter.group.update filter.group.delete plugin.data
+  config.system.get config.system.update slash.run music.recognize music.explore music.album.get
+  music.album.related music.artist.get music.artist.albums music.artist.related music.cache.get
+  music.cache.delete music.cache.clear system.versions system.update.status system.update.check
+  system.update.download system.restart system.update.install system.upgrade.dev
+  dashboard.media.statistics dashboard.storage dashboard.processes dashboard.system
+  dashboard.downloader scheduler.progress dashboard.transfer.statistics dashboard.cpu
+  dashboard.memory dashboard.network media.sources media.recognize_file media.cache.get
+  media.cache.delete media.cache.clear media.classification.fields media.classification.policy.get
   media.classification.policy.validate media.classification.policy.preview
   media.classification.policy.impact media.classification.policy.history
   media.classification.policy.update media.classification.policy.rollback media.episode_groups
   media.episode_group.seasons media.seasons search.title search.recommend subtitle.search.title
   subtitle.search.media site.add site.delete site.auth.options site.authenticate
-  site.cookiecloud.sync site.reset site.priorities.update site.userdata.refresh
+  site.cookiecloud.sync site.cookie.set site.reset site.priorities.update site.userdata.refresh
   site.userdata.latest site.category site.resource site.searchable site.rss site.statistics
   site.statistic site.mapping site.supporting subscription.get subscription.find
   subscription.delete_by_media subscription.status.update subscription.reset
   subscription.search_all subscription.refresh subscription.metadata.refresh
-  subscription.history.delete subscription.user.list subscription.files subscription.share
-  subscription.share.delete subscription.fork subscription.follow.list subscription.follow.add
-  subscription.follow.delete subscription.share.statistics storage.manage storage.mkdir
-  storage.rename storage.delete transfer.queue transfer.queue.delete transfer.name
+  subscription.history.delete subscription.user.list subscription.files
+  subscription.execution.list subscription.execution.get subscription.execution.cancel
+  subscription.share subscription.share.delete subscription.fork subscription.follow.list
+  subscription.follow.add subscription.follow.delete subscription.share.statistics storage.manage
+  storage.mkdir storage.rename storage.delete transfer.queue transfer.queue.delete transfer.name
   transfer.target_path transfer.manual_history transfer.episode_format.recommend
   transfer.manual_reviews transfer.manual_review transfer.manual_review.resolve
   transfer.history.redo transfer.history.redo_batch transfer.history.clear workflow.create
@@ -52,11 +54,12 @@ allowed-api-operations: >-
   workflow.share workflow.share.delete workflow.fork torrent.cache.get torrent.cache.delete
   torrent.cache.clear torrent.cache.refresh torrent.cache.reidentify database.backups.list
   database.backups.create database.backups.verify database.backups.delete filter.test
-  system.network.targets system.network.test system.module.list system.module.test
-  plugin.market.sync_wiki plugin.runtime.status plugin.history plugin.releases plugin.ratings
-  plugin.rating plugin.rating.submit plugin.statistics plugin.reset plugin.clone config.user.get
-  config.public.get system.usage.statistics plugin.folders.get plugin.folders.update
-  plugin.folder.create plugin.folder.update plugin.folder.delete plugin.folder.plugins.update
+  system.network.targets system.network.test system.module.list system.module.catalog
+  system.module.settings system.module.test plugin.market.sync_wiki plugin.runtime.status
+  plugin.history plugin.releases plugin.ratings plugin.rating plugin.rating.submit
+  plugin.statistics plugin.reset plugin.clone config.user.get config.public.get
+  system.usage.statistics plugin.folders.get plugin.folders.update plugin.folder.create
+  plugin.folder.update plugin.folder.delete plugin.folder.plugins.update
   plugin.folder.plugin.assign plugin.folder.plugin.remove
 ---
 
@@ -80,11 +83,11 @@ use a more specific skill or explain that the structured operation is unavailabl
 ## Overall Workflow
 
 1. Select the exact `operation_id` from the category index below.
-2. Open the matching `api/<category>.md` file and read that operation's exact
-   method, route, policy effect, and `path_params`/`query`/`body` contract.
-3. Load `api/models.md` only when the operation references one of its shared
-   body models. For category-specific procedures, follow the guidance in the
-   matching category file.
+2. Call `read_skill` again with `name="moviepilot-api"` and
+   `file="api/<category>.md"` to load the complete standalone category
+   contract. Do not use `read_file` for Skill documents.
+3. The selected category file already includes the shared body Models needed to
+   construct its calls; do not load a second Models document.
 4. Build one gateway call with only declared fields. Preserve source-native
    identifiers and use the documented pagination fields.
 5. Obtain confirmation for confirmation-protected or side-effecting operations,
@@ -97,17 +100,17 @@ use a more specific skill or explain that the structured operation is unavailabl
 ## API Category Index
 
 Each category file contains the complete operation contracts for its namespace.
-The counts are a maintenance aid for the 211 currently exposed operations.
+The counts are a maintenance aid for the 220 currently exposed operations.
 
 | Category | Detail file | Operation namespace | Count | Use for |
 | --- | --- | --- | ---: | --- |
 | Configuration | [api/config.md](api/config.md) | `config.*` | 6 | identifiers, public/user settings, system setting discovery and updates |
 | Dashboard | [api/dashboard.md](api/dashboard.md) | `dashboard.*` | 9 | media, storage, process, system, downloader, CPU, memory, network, and transfer summaries |
 | Database | [api/database.md](api/database.md) | `database.backups.*` | 4 | administrator backup lifecycle |
-| Download | [api/download.md](api/download.md) | `download.*` | 6 | download submission, clients, paths, active tasks, and history |
+| Download | [api/download.md](api/download.md) | `download.*` | 7 | download submission, clients, paths, active tasks, and history |
 | Filter | [api/filter.md](api/filter.md) | `filter.*` | 10 | built-in/custom rules, groups, and testing |
 | Library | [api/library.md](api/library.md) | `library.*` | 2 | existence and latest-media checks |
-| Media | [api/media.md](api/media.md) | `media.*` | 20 | media search/detail, recognition, scraping, schedules, sources, people, seasons, and classification |
+| Media | [api/media.md](api/media.md) | `media.*` | 23 | media search/detail, recognition, scraping, schedules, sources, people, seasons, and classification |
 | Music | [api/music.md](api/music.md) | `music.*` | 10 | recognition, exploration, albums, artists, and cache administration |
 | Plugin | [api/plugin.md](api/plugin.md) | `plugin.*` | 30 | plugin market, install/runtime, configuration, source, folders, ratings, releases, and statistics |
 | Recommendation | [api/recommendation.md](api/recommendation.md) | `recommendation.*` | 1 | recommendation listings |
@@ -116,17 +119,17 @@ The counts are a maintenance aid for the 211 currently exposed operations.
 | Site | [api/site.md](api/site.md) | `site.*` | 22 | site discovery, authentication, cookies, user data, resources, RSS, priorities, and statistics |
 | Slash | [api/slash.md](api/slash.md) | `slash.*` | 2 | slash-command discovery and execution |
 | Storage | [api/storage.md](api/storage.md) | `storage.*` | 6 | storage settings, browsing, directories, rename, and delete |
-| Subscription | [api/subscription.md](api/subscription.md) | `subscription.*` | 26 | subscription CRUD, search/refresh, history, files, sharing, following, and status |
+| Subscription | [api/subscription.md](api/subscription.md) | `subscription.*` | 29 | subscription CRUD, search/refresh, history, files, sharing, following, and status |
 | Subtitle | [api/subtitle.md](api/subtitle.md) | `subtitle.search.*` | 2 | subtitle title and media search |
 | System | [api/system.md](api/system.md) | `system.*` | 12 | versions, update, restart, modules, network, and usage |
 | Torrent cache | [api/torrent.md](api/torrent.md) | `torrent.cache.*` | 5 | torrent-cache inspection, refresh, re-identification, and deletion |
 | Transfer | [api/transfer.md](api/transfer.md) | `transfer.*` | 15 | transfer queue/history, file, naming, manual review, retry, and target path |
 | Workflow | [api/workflow.md](api/workflow.md) | `workflow.*` | 16 | workflow definitions, actions, execution, sharing, and lifecycle |
 
-Shared request/response body models are documented in
-[api/models.md](api/models.md). If an operation is added or moved, update its
-category file, this index, the frontmatter allowlist, and the matching gateway
-contract together.
+Each category file is a standalone contract: it contains the operation details
+and the shared request/response body Models needed by that category. If an
+operation is added or moved, update its category file, this index, the
+frontmatter allowlist, and the matching gateway contract together.
 
 ## API Surface Scope
 
@@ -150,7 +153,7 @@ must be one of the following before the Agent may use its capability:
   and English parameter contract is added.
 
 The maintained route-by-route inventory is
-`docs/architecture/agent-api-surface-audit.md`. Its generated drift test fails
+`docs/refactor/agent-api-surface-audit.md`. Its generated drift test fails
 when OpenAPI changes without an explicit ownership decision.
 
 The management recovery route `POST /api/v1/history/transfer/{history_id}/discard-corrupt`
@@ -169,6 +172,19 @@ Call the gateway with this shape:
   "body": {}
 }
 ```
+
+### Common read and download contracts
+
+Select the operation for the task first, then send only fields declared by that operation. Common verification contracts are:
+
+| operation_id | `path_params` | `query` |
+| --- | --- | --- |
+| `subscription.find` | `media_id` | `media_source`; optional `season`, `music_type` |
+| `subscription.list` | none | optional `page`, `count` |
+| `download.tasks.active` | none | optional `page`, `count`, `name` |
+| `site.list` | none | optional `page`, `count`, `name`, `status=all\|active\|inactive` |
+
+The `download.add` body must contain `torrent_in` (at least `title` and `enclosure`) plus sibling `media_source` and `media_id`; do not put a magnet URI in `url`, or move media identity and filters into `query`. When a write returns `unknown`, never retry it; verify the actual state with a supported read operation first.
 
 - Put route placeholders such as `subscribe_id`, `hashString`, `plugin_id`,
   `workflow_id`, `media_id`, `storage`, `rule_id`, and `name` in `path_params`.

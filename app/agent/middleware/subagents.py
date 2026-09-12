@@ -68,7 +68,7 @@ Delegation modes:
 - Use `task` for one blocking subtask when you need the result immediately.
 - Use `subagent_task` for two or more independent subtasks. Start them first
   with `action=start` and a `tasks` array, then use `action=status`,
-  `action=wait`, or `action=cancel` with the returned task IDs.
+  `action=wait`, `action=update`, or `action=cancel` with the returned task IDs.
 - Use `subagent_task` with `action=run` when you want to launch a bounded
   batch and wait for the batch in one tool call.
 - Use `subagent_task` with `action=pipeline` when later subtasks must use
@@ -95,7 +95,8 @@ SUBAGENT_CONTROL_DESCRIPTION = (
     "Start and manage multiple MoviePilot subagent tasks asynchronously. "
     "Use action=start with tasks=[{description}] to launch a batch "
     "and get task IDs immediately. Use action=status to inspect tasks, action=wait "
-    "to wait for all or any task result, action=cancel to stop running tasks, and "
+    "to wait for all or any task result, action=update with task_id and a new description "
+    "to replace a running task after bounded cancellation, action=cancel to stop running tasks, and "
     "action=run to launch a bounded batch and wait in one call. Use action=pipeline "
     "to run tasks sequentially while passing each result as private context to the "
     "next task."
@@ -177,9 +178,9 @@ class _SubAgentTaskSpec(BaseModel):
 class _SubAgentControlInput(BaseModel):
     """异步子代理管控工具输入。"""
 
-    action: Literal["start", "status", "wait", "cancel", "run", "pipeline"] = Field(
+    action: Literal["start", "status", "wait", "cancel", "update", "run", "pipeline"] = Field(
         default="start",
-        description="Task action: start, status, wait, cancel, run, or pipeline.",
+        description="Task action: start, status, wait, cancel, update, run, or pipeline.",
     )
     description: Optional[str] = Field(
         default=None,
@@ -199,7 +200,7 @@ class _SubAgentControlInput(BaseModel):
     )
     task_id: Optional[str] = Field(
         default=None,
-        description="Single task ID for status, wait, or cancel.",
+        description="Single task ID for status, wait, cancel, or update.",
     )
     wait_mode: Literal["all", "any"] = Field(
         default="all",
@@ -404,10 +405,10 @@ def _record_subagent_tool_call(
     stream_handler: Any,
     tool_name: str,
     tool_args: dict[str, Any],
-) -> None:
+) -> str:
     """按当前详细模式展示或汇总子代理工具调用。"""
     if not stream_handler or not getattr(stream_handler, "is_streaming", False):
-        return
+        return ""
     safe_args = sanitize_for_host(tool_args)
     if not isinstance(safe_args, dict):
         safe_args = {}
@@ -415,11 +416,11 @@ def _record_subagent_tool_call(
         tool_message = "调用子代理：general-purpose"
     else:
         tool_message = f"管理子代理任务：action={safe_args.get('action') or 'start'}"
-    stream_handler.report_tool_call(
+    return str(stream_handler.report_tool_call(
         tool_name=tool_name,
         tool_message=tool_message,
         tool_kwargs=tool_args,
-    )
+    ) or "")
 
 
 class _SubAgentAgentProvider:
@@ -618,7 +619,7 @@ class MoviePilotSubAgentMiddleware(AgentMiddleware):
             f"开始执行子代理工具: tool_name={tool_name}, "
             "subagent_type=general-purpose"
         )
-        _record_subagent_tool_call(
+        tool_call_id = _record_subagent_tool_call(
             stream_handler=self.stream_handler,
             tool_name=SUBAGENT_TASK_TOOL_NAME,
             tool_args=tool_args,
@@ -626,11 +627,19 @@ class MoviePilotSubAgentMiddleware(AgentMiddleware):
         try:
             result = await handler(request)
         except Exception as err:
+            if tool_call_id:
+                finish_tool_call = getattr(self.stream_handler, "tool_call_finished", None)
+                if callable(finish_tool_call):
+                    finish_tool_call(tool_call_id, "error")
             logger.error(
                 f"子代理工具执行失败: tool_name={tool_name}, "
                 f"error={summarize_error(err)}"
             )
             raise
+        if tool_call_id:
+            finish_tool_call = getattr(self.stream_handler, "tool_call_finished", None)
+            if callable(finish_tool_call):
+                finish_tool_call(tool_call_id, "done")
         logger.info(f"子代理工具执行完成: tool_name={tool_name}")
         return result
 
@@ -678,8 +687,15 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
 
     @staticmethod
     def _json_response(payload: dict[str, Any]) -> str:
-        """将工具响应序列化为稳定 JSON。"""
-        return json.dumps(payload, ensure_ascii=False, indent=2)
+        """将工具响应序列化为稳定 JSON，并为失败提供模型恢复路径。"""
+        normalized = dict(payload)
+        if normalized.get("success") is False:
+            normalized.setdefault("execution_outcome", "failed")
+            normalized.setdefault(
+                "recovery",
+                "根据 error 或 tasks 中的状态修正任务描述或参数；不要重复启动已在途的子代理。",
+            )
+        return json.dumps(normalized, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _normalize_timeout_ms(timeout_ms: Optional[int]) -> int:
@@ -718,13 +734,19 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
             "finished_at": _format_datetime(record.finished_at),
         }
         if not record.task.done():
+            payload["execution_outcome"] = "pending"
+            payload["recovery"] = "使用 action=wait 或 action=status 继续观察，不要重复启动同一任务。"
             return payload
         if record.task.cancelled():
+            payload["execution_outcome"] = "failed"
+            payload["recovery"] = "任务已取消；检查其他任务结果，只有在需要时用新的 task_id 重新派发。"
             return payload
 
         error = record.task.exception()
         if error:
             payload["error"] = summarize_error(error)
+            payload["execution_outcome"] = "failed"
+            payload["recovery"] = "根据子代理错误修正任务描述或参数后重试；不要重复启动仍在途的任务。"
             return payload
 
         result, result_truncated = _clip_text(
@@ -961,6 +983,34 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
             logger.info(f"子代理任务取消完成: tasks={len(cancellable_tasks)}")
         return [record for record in records if record.task in pending]
 
+    async def _update_record(
+        self,
+        record: _SubAgentRuntimeTask,
+        *,
+        description: str,
+        terminal_sessions: Optional[list[SubAgentTerminalGrant]],
+    ) -> tuple[bool, Optional[str]]:
+        """有界取消旧任务后复用 task_id 启动更新后的子代理任务。"""
+        if not record.task.done():
+            pending = await self._cancel_records([record])
+            if pending:
+                return False, "旧子代理任务未能在取消窗口内收敛，更新被拒绝。"
+        record.description = description.strip()
+        record.terminal_sessions = terminal_sessions or []
+        record.started_at = None
+        record.finished_at = None
+        record.task = asyncio.create_task(
+            self._execute_managed_task(record), name=record.task_id,
+        )
+        record.task.add_done_callback(self._task_finished_callback(record.task_id))
+        return True, None
+
+    def _task_finished_callback(
+        self, task_id: str,
+    ) -> Callable[[asyncio.Task[Any]], None]:
+        """返回带稳定 task_id 的完成回调，供任务更新复用。"""
+        return lambda finished_task: self._mark_task_finished(task_id, finished_task)
+
     def seal(self) -> None:
         """封住新的 detached 子代理提交，既有任务继续由记录表持有。"""
         self._accepting_tasks = False
@@ -1174,6 +1224,24 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
     ) -> str:
         """管理异步子代理任务。"""
         logger.info(f"收到子代理管控操作: action={action}")
+        if action == "update":
+            if not task_id or not description or not description.strip():
+                return self._json_response({
+                    "success": False, "error": "update 必须提供 task_id 和新的 description。",
+                })
+            record = self._tasks.get(task_id)
+            if record is None:
+                return self._json_response({
+                    "success": False, "error": f"未知子代理任务: {task_id}",
+                })
+            updated, error = await self._update_record(
+                record, description=description, terminal_sessions=terminal_sessions,
+            )
+            return self._json_response({
+                "success": updated, "action": action, "task_id": task_id,
+                "error": error, "tasks": [self._task_output(record)],
+            })
+
         if action in {"start", "run", "pipeline"}:
             if not self._accepting_tasks:
                 error = "子代理任务控制器正在关闭，不能再启动新任务。"
@@ -1285,7 +1353,7 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
             f"action={logged_args.get('action') or '-'}, "
             "subagent_type=general-purpose"
         )
-        _record_subagent_tool_call(
+        tool_call_id = _record_subagent_tool_call(
             stream_handler=self.stream_handler,
             tool_name=SUBAGENT_CONTROL_TOOL_NAME,
             tool_args=tool_args,
@@ -1293,11 +1361,19 @@ class SubAgentTaskControlMiddleware(AgentMiddleware):
         try:
             result = await handler(request)
         except Exception as err:
+            if tool_call_id:
+                finish_tool_call = getattr(self.stream_handler, "tool_call_finished", None)
+                if callable(finish_tool_call):
+                    finish_tool_call(tool_call_id, "error")
             logger.error(
                 f"子代理工具执行失败: tool_name={tool_name}, "
                 f"error={summarize_error(err)}"
             )
             raise
+        if tool_call_id:
+            finish_tool_call = getattr(self.stream_handler, "tool_call_finished", None)
+            if callable(finish_tool_call):
+                finish_tool_call(tool_call_id, "done")
         logger.info(f"子代理工具执行完成: tool_name={tool_name}")
         return result
 

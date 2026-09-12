@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.adapters.network.browser import BrowserSessionHelper
 from app.agent.policy.contracts import ExecutionOutcome
+from app.agent.policy.sanitizer import summarize_error
 from app.agent.terminal.ownership import current_terminal_scope
 from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.result import inspect_tool_result
@@ -22,6 +23,7 @@ from app.runtime.log import logger
 MAX_CONTENT_LENGTH = 12_000
 # 默认超时时间（秒）
 DEFAULT_TIMEOUT = 30
+MAX_TIMEOUT = 300
 # 截图最大宽度
 SCREENSHOT_MAX_WIDTH = 1280
 # 截图最大高度
@@ -52,6 +54,10 @@ class BrowserAction(str, Enum):
     FOCUS_TAB = "focus_tab"
     CLOSE_TAB = "close_tab"
     CLOSE_SESSION = "close_session"
+
+
+class BrowserNavigationUncertainError(RuntimeError):
+    """页面动作后地址校验失败，动作可能已发生但当前页面状态不能确认。"""
 
 
 class BrowseWebpageInput(BaseModel):
@@ -107,7 +113,8 @@ class BrowseWebpageInput(BaseModel):
         description="Content type for 'get_content' action: 'text' for readable text, 'html' for raw HTML",
     )
     timeout: Optional[int] = Field(
-        DEFAULT_TIMEOUT, description="Timeout in seconds for the action (default: 30)"
+        DEFAULT_TIMEOUT,
+        description="Timeout in seconds for the action (default: 30, range: 1-300)"
     )
     cookies: Optional[str] = Field(
         None,
@@ -255,18 +262,26 @@ class BrowseWebpageTool(MoviePilotTool):
         )
 
         try:
+            if timeout is None or type(timeout) is not int or not 1 <= timeout <= MAX_TIMEOUT:
+                return self._error_response(
+                    "invalid_timeout", f"timeout 必须是 1 到 {MAX_TIMEOUT} 秒的整数。",
+                    "修正 timeout 后重试，不要重复已经执行的浏览器动作。",
+                )
             # 验证操作类型
             try:
                 browser_action = BrowserAction(action)
             except ValueError:
                 valid_actions = ", ".join([a.value for a in BrowserAction])
-                return f"错误: 不支持的操作类型 '{action}'，支持的操作: {valid_actions}"
+                return self._error_response(
+                    "invalid_action", f"不支持的操作类型 '{action}'，支持的操作: {valid_actions}",
+                    "从支持的 action 中选择后重试。",
+                )
 
             # 参数校验
             if browser_action == BrowserAction.GOTO and not url:
-                return "错误: 'goto' 操作需要提供 url 参数"
+                return self._error_response("missing_url", "'goto' 操作需要提供 url 参数", "补充 url 后重试。")
             if browser_action == BrowserAction.OPEN_TAB and not url:
-                return "错误: 'open_tab' 操作需要提供 url 参数"
+                return self._error_response("missing_url", "'open_tab' 操作需要提供 url 参数", "补充 url 后重试。")
             if (
                 browser_action
                 in (
@@ -277,7 +292,7 @@ class BrowseWebpageTool(MoviePilotTool):
                 )
                 and not selector
             ):
-                return f"错误: '{action}' 操作需要提供 selector 参数"
+                return self._error_response("missing_selector", f"'{action}' 操作需要提供 selector 参数", "补充 selector 后重试。")
             if (
                 browser_action
                 in (
@@ -287,28 +302,28 @@ class BrowseWebpageTool(MoviePilotTool):
                 )
                 and not ref
             ):
-                return f"错误: '{action}' 操作需要提供 ref 参数"
+                return self._error_response("missing_ref", f"'{action}' 操作需要提供 ref 参数", "先获取最新 snapshot，再补充 ref 后重试。")
             if browser_action == BrowserAction.FILL and value is None:
-                return "错误: 'fill' 操作需要提供 value 参数"
+                return self._error_response("missing_value", "'fill' 操作需要提供 value 参数", "补充 value 后重试。")
             if browser_action == BrowserAction.FILL_REF and value is None:
-                return "错误: 'fill_ref' 操作需要提供 value 参数"
+                return self._error_response("missing_value", "'fill_ref' 操作需要提供 value 参数", "补充 value 后重试。")
             if browser_action == BrowserAction.EVALUATE and not script:
-                return "错误: 'evaluate' 操作需要提供 script 参数"
+                return self._error_response("missing_script", "'evaluate' 操作需要提供 script 参数", "补充 script 后重试。")
             if (
                 browser_action == BrowserAction.EVALUATE
                 and not await self.is_admin_user()
             ):
-                return "错误: 'evaluate' 操作仅允许管理员使用"
+                return self._error_response("admin_required", "'evaluate' 操作仅允许管理员使用", "改用只读浏览器 action 或请求管理员授权。")
             if (
                 browser_action == BrowserAction.GET_COOKIES
                 and not await self.is_admin_user()
             ):
-                return "错误: 'get_cookies' 操作仅允许管理员使用"
+                return self._error_response("admin_required", "'get_cookies' 操作仅允许管理员使用", "改用非敏感浏览器 action 或请求管理员授权。")
             if (
                 browser_action in (BrowserAction.FOCUS_TAB, BrowserAction.CLOSE_TAB)
                 and tab_index is None
             ):
-                return f"错误: '{action}' 操作需要提供 tab_index 参数"
+                return self._error_response("missing_tab_index", f"'{action}' 操作需要提供 tab_index 参数", "补充 tab_index 后重试。")
 
             effective_session_key = session_key or self._session_id
 
@@ -332,10 +347,11 @@ class BrowseWebpageTool(MoviePilotTool):
             return result
 
         except Exception as e:
-            logger.error(f"浏览器操作失败: {e}", exc_info=True)
+            error_summary = summarize_error(e)
+            logger.error(f"浏览器操作失败: {error_summary}", exc_info=True)
             if action == BrowserAction.SCREENSHOT:
                 return self._screenshot_failure("screenshot_failed", "浏览器截图执行失败")
-            return f"浏览器操作失败: {str(e)}"
+            return self._error_response("browser_operation_failed", f"浏览器操作失败: {error_summary}", "检查当前会话和页面状态后再重试。")
 
     def _execute_browser_action(
         self,
@@ -402,10 +418,25 @@ class BrowseWebpageTool(MoviePilotTool):
             )
 
         except Exception as e:
-            logger.error(f"CloakBrowser 执行失败: {e}", exc_info=True)
+            error_summary = summarize_error(e)
+            logger.error(f"CloakBrowser 执行失败: {error_summary}", exc_info=True)
+            if isinstance(e, BrowserNavigationUncertainError):
+                return self._json_response({
+                    "success": False,
+                    "execution_outcome": "unknown",
+                    "error": "浏览器动作后页面地址未通过安全校验。",
+                    "recovery": "先使用 list_tabs 或 snapshot 核验当前页面；不要直接重试可能已经发生的点击或脚本动作。",
+                })
+            if str(e) == "关闭浏览器标签页失败":
+                return self._json_response({
+                    "success": False,
+                    "execution_outcome": "unknown",
+                    "error": "关闭浏览器标签页的实际状态未知。",
+                    "recovery": "先使用 list_tabs 或 snapshot 核验当前页面，再决定是否继续操作；不要直接重试关闭动作。",
+                })
             if browser_action == BrowserAction.SCREENSHOT:
                 return self._screenshot_failure("screenshot_failed", "浏览器截图执行失败")
-            return f"CloakBrowser 执行失败: {str(e)}"
+            return self._error_response("browser_operation_failed", f"CloakBrowser 执行失败: {error_summary}", "检查当前会话和页面状态后再重试。")
 
     def _do_action(
         self,
@@ -425,6 +456,15 @@ class BrowseWebpageTool(MoviePilotTool):
         """执行具体的浏览器操作"""
         page = session.active_page
 
+        def validate_after_action() -> None:
+            """检查动作可能触发的重定向，失败时保留不确定状态。"""
+            try:
+                BrowserSessionHelper.validate_current_url(
+                    page, allow_private_network=allow_private_network,
+                )
+            except ValueError as error:
+                raise BrowserNavigationUncertainError from error
+
         if browser_action == BrowserAction.GOTO:
             return self._action_goto(
                 helper,
@@ -435,15 +475,19 @@ class BrowseWebpageTool(MoviePilotTool):
             )
 
         elif browser_action == BrowserAction.SNAPSHOT:
+            snapshot = BrowserSessionHelper.build_snapshot(
+                page,
+                max_text_chars=MAX_CONTENT_LENGTH,
+            )
+            validate_after_action()
             return self._json_response(
-                BrowserSessionHelper.build_snapshot(
-                    page,
-                    max_text_chars=MAX_CONTENT_LENGTH,
-                )
+                {"success": True, **snapshot}
             )
 
         elif browser_action == BrowserAction.GET_CONTENT:
-            return self._action_get_content(page, content_type)
+            result = self._action_get_content(page, content_type)
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.SCREENSHOT:
             return self._action_screenshot(page)
@@ -452,42 +496,56 @@ class BrowseWebpageTool(MoviePilotTool):
             return self._action_get_cookies(session, page)
 
         elif browser_action == BrowserAction.CLICK:
-            return self._action_click(page, selector, timeout)
+            result = self._action_click(page, selector, timeout)
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.CLICK_REF:
-            return self._action_click(
+            result = self._action_click(
                 page,
                 BrowserSessionHelper.ref_to_selector(ref),
                 timeout,
                 ref=ref,
             )
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.FILL:
-            return self._action_fill(page, selector, value, timeout)
+            result = self._action_fill(page, selector, value, timeout)
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.FILL_REF:
-            return self._action_fill(
+            result = self._action_fill(
                 page,
                 BrowserSessionHelper.ref_to_selector(ref),
                 value,
                 timeout,
                 ref=ref,
             )
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.SELECT:
-            return self._action_select(page, selector, value, timeout)
+            result = self._action_select(page, selector, value, timeout)
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.SELECT_REF:
-            return self._action_select(
+            result = self._action_select(
                 page,
                 BrowserSessionHelper.ref_to_selector(ref),
                 value,
                 timeout,
                 ref=ref,
             )
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.EVALUATE:
-            return self._action_evaluate(page, script)
+            result = self._action_evaluate(page, script)
+            validate_after_action()
+            return result
 
         elif browser_action == BrowserAction.WAIT:
             return self._action_wait(page, selector, timeout)
@@ -516,6 +574,7 @@ class BrowseWebpageTool(MoviePilotTool):
 
         elif browser_action == BrowserAction.FOCUS_TAB:
             page = BrowserSessionHelper.focus_tab(session, tab_index)
+            validate_after_action()
             return self._json_response(
                 {
                     "success": True,
@@ -536,8 +595,21 @@ class BrowseWebpageTool(MoviePilotTool):
 
     @staticmethod
     def _json_response(payload: dict[str, Any]) -> str:
-        """返回格式化 JSON 字符串"""
-        return json.dumps(payload, ensure_ascii=False, indent=2)
+        """返回带明确执行状态的格式化 JSON 字符串。"""
+        normalized = dict(payload)
+        if isinstance(normalized.get("success"), bool):
+            normalized.setdefault(
+                "execution_outcome", "succeeded" if normalized["success"] else "failed"
+            )
+        return json.dumps(normalized, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _error_response(code: str, message: str, recovery: str) -> str:
+        """返回不含敏感细节的结构化浏览器失败回执。"""
+        return BrowseWebpageTool._json_response({
+            "success": False, "execution_outcome": "failed", "error": code,
+            "message": message, "recovery": recovery,
+        })
 
     @staticmethod
     def _action_goto(
@@ -560,6 +632,7 @@ class BrowseWebpageTool(MoviePilotTool):
             status=status,
             max_text_chars=MAX_CONTENT_LENGTH,
         )
+        result["success"] = True
         return BrowseWebpageTool._json_response(result)
 
     @staticmethod
@@ -577,6 +650,7 @@ class BrowseWebpageTool(MoviePilotTool):
             content = content[:MAX_CONTENT_LENGTH] + "\n\n...(内容已截断)"
 
         result = {
+            "success": True,
             "url": page_url,
             "title": title,
             "content_type": content_type,
@@ -647,7 +721,7 @@ class BrowseWebpageTool(MoviePilotTool):
 
         # 等待可能的页面变化
         try:
-            page.wait_for_load_state("networkidle", timeout=5000)
+            page.wait_for_load_state("networkidle", timeout=min(timeout * 1000, 5000))
         except Exception:
             pass
 

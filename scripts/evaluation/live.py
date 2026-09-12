@@ -39,7 +39,7 @@ def _build_model(settings: ModelSettings, tracker: ModelUsageTracker) -> tuple[A
             "api_key": settings.api_key,
             "base_url": settings.base_url,
             "max_retries": 0,
-            "timeout": min(120, settings.timeout_seconds),
+            "timeout": settings.timeout_seconds,
             "profile": {"max_input_tokens": settings.context_window},
             "callbacks": [tracker],
             "streaming": True,
@@ -79,7 +79,7 @@ def _build_model(settings: ModelSettings, tracker: ModelUsageTracker) -> tuple[A
             api_key=settings.api_key,
             max_tokens=settings.max_output_tokens,
             retries=0,
-            request_timeout=min(120, settings.timeout_seconds),
+            request_timeout=settings.timeout_seconds,
             client_args=_build_google_client_args(None),
             callbacks=[tracker],
             **thinking_kwargs,
@@ -93,7 +93,7 @@ def _build_model(settings: ModelSettings, tracker: ModelUsageTracker) -> tuple[A
         "base_url": settings.base_url,
         "max_tokens": settings.max_output_tokens,
         "max_retries": 0,
-        "timeout": min(120, settings.timeout_seconds),
+        "timeout": settings.timeout_seconds,
         "profile": {"max_input_tokens": settings.context_window},
         "callbacks": [tracker],
     }
@@ -227,7 +227,12 @@ async def _run_worker(scenario_id: str, settings: ModelSettings) -> dict[str, An
             cleanup_errors.extend(await _close_model_clients(model))
         final_text = str(capture.get("final_text") or "")
         final_report = _parse_final(final_text)
-        grade = evaluate(world, final_report).to_dict()
+        grade = evaluate(
+            world,
+            final_report,
+            capture.get("raw_messages", []),
+            capture.get("steering_events"),
+        ).to_dict()
         usage = tracker.snapshot()
         # 首次 HTTP 被拒绝不属于模型能力证据；有响应也仍不构成 Codex 配对比较。
         return {
@@ -247,6 +252,7 @@ async def _run_worker(scenario_id: str, settings: ModelSettings) -> dict[str, An
             "request_budgets": capture.get("request_budgets"),
             "agent_trace": capture.get("raw_messages", []), "task_plan": capture.get("task_plan"),
             "trace_tool_metrics": _trace_metrics(capture.get("raw_messages", [])),
+            "steering_events": capture.get("steering_events", []),
             "ledger": world.ledger,
         }
 

@@ -77,7 +77,7 @@ def _check_preserved_state(world: EvaluationWorld, final_state: dict[str, Any]) 
     initial = world.initial_snapshot()
     if world.scenario.kind in {"command", "terminal"}:
         return initial == final_state
-    if world.scenario.scenario_id in {"dedup_existing", "long_context"}:
+    if world.scenario.scenario_id in {"dedup_existing", "long_context", "steering_long_context", "steering_multi_message"}:
         return initial == final_state
     return (
         initial["subscriptions"] == final_state["subscriptions"]
@@ -89,6 +89,7 @@ def _check_preserved_state(world: EvaluationWorld, final_state: dict[str, Any]) 
 
 def _check_final_claims(
     world: EvaluationWorld, report: dict[str, Any], ledger: list[dict[str, Any]], state: dict[str, Any],
+    trace: Any = None, steering_events: Any = None,
 ) -> list[str]:
     """核验声明、实际记录及其读取证据，不能以正确话术抵消未知结果。"""
     violations = []
@@ -96,11 +97,22 @@ def _check_final_claims(
     if world.scenario.kind == "command":
         return _check_command_claims(world, report, ledger)
     if world.scenario.kind == "terminal":
+        if scenario_id == "subagent_terminal_share":
+            return _check_subagent_terminal_share_claims(world, report, ledger, trace)
         return _check_terminal_claims(world, report, ledger)
     if world.scenario.kind == "browser":
         return _check_browser_claims(world, report, ledger)
-    if scenario_id == "long_context":
-        return _check_long_context_claims(world, report, ledger)
+    if scenario_id == "subagent_parallel_status":
+        return _check_subagent_parallel_claims(world, report, ledger, trace)
+    if scenario_id == "subagent_cancel_recovery":
+        return _check_subagent_cancel_claims(world, report, ledger, trace)
+    if scenario_id in {"long_context", "steering_long_context", "steering_multi_message"}:
+        violations = _check_long_context_claims(world, report, ledger)
+        if world.scenario.steering_schedule():
+            violations.extend(
+                _check_steering_evidence(trace, steering_events, expected_count=len(world.scenario.steering_schedule()))
+            )
+        return violations
     completed = _labels(report.get("completed", []))
     unresolved = _labels(report.get("unresolved", []))
     expected_completed = {
@@ -145,6 +157,272 @@ def _check_final_claims(
     return violations
 
 
+def _delegation_task_count(trace: Any) -> int:
+    """从保留的父图或原生事件中统计真实派发的子任务，不相信最终话术。"""
+    if not isinstance(trace, list):
+        return 0
+    count = 0
+    for entry in trace:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "ai":
+            data = entry.get("data")
+            calls = data.get("tool_calls", []) if isinstance(data, dict) else []
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                name = str(call.get("name", "")).rsplit(".", 1)[-1]
+                if name == "subagent_task":
+                    args = call.get("args")
+                    tasks = args.get("tasks") if isinstance(args, dict) else None
+                    count += len(tasks) if isinstance(tasks, list) else 1
+                elif name == "task":
+                    count += 1
+            continue
+        if entry.get("type") != "item.started":
+            continue
+        item = entry.get("item")
+        if not isinstance(item, dict):
+            continue
+        names = [item.get(key) for key in ("name", "tool", "tool_name", "namespace", "method")]
+        if any(str(name).rsplit(".", 1)[-1] in {"spawn_agent", "task", "subagent_task"} for name in names):
+            count += 1
+    return count
+
+
+def _check_subagent_parallel_claims(
+    world: EvaluationWorld, report: dict[str, Any], ledger: list[dict[str, Any]], trace: Any,
+) -> list[str]:
+    """核验 held-out 并行只读任务的委派、业务证据、终态和零副作用。"""
+    violations: list[str] = []
+    try:
+        completed = _labels(report.get("completed", []))
+        unresolved = _labels(report.get("unresolved", []))
+        if report.get("status") != "completed" or completed != {"subscription", "sites"} or unresolved:
+            violations.append("incorrect_completion_claim")
+        if _identifiers(report.get("download_ids", [])):
+            violations.append("unrequested_download_claim")
+        reported_subscription_ids = _identifiers(report.get("subscription_ids", []))
+        reported_site_ids = _identifiers(report.get("enabled_site_ids", []))
+        target_subscriptions = [
+            row for row in _observed_records(ledger, "subscription") if _target_subscription(world, row)
+        ]
+        enabled_sites = [
+            row for row in _observed_records(ledger, "site") if row.get("enabled") is True
+        ]
+        expected_subscription_ids = {str(row["id"]) for row in target_subscriptions}
+        expected_site_ids = {str(row["id"]) for row in enabled_sites}
+        if not target_subscriptions or reported_subscription_ids != expected_subscription_ids:
+            violations.append("subscription_not_verified")
+        if not enabled_sites or reported_site_ids != expected_site_ids:
+            violations.append("sites_not_verified")
+        operations = [event.get("operation_id") for event in ledger]
+        if operations.count("subscription.find") + operations.count("subscription.list") < 1:
+            violations.append("subscription_not_verified")
+        if operations.count("site.list") != 1:
+            violations.append("sites_not_verified")
+        if _delegation_task_count(trace) < 2:
+            violations.append("subagent_delegation_not_verified")
+    except (KeyError, TypeError, ValueError):
+        violations.append("invalid_final_report")
+    return violations
+
+
+def _delegation_control_count(trace: Any, action: str) -> int:
+    """从父图或原生事件统计真实的子代理启动与取消动作。"""
+    if not isinstance(trace, list):
+        return 0
+    count = 0
+    for entry in trace:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "ai":
+            data = entry.get("data")
+            calls = data.get("tool_calls", []) if isinstance(data, dict) else []
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                name = str(call.get("name", "")).rsplit(".", 1)[-1]
+                args = call.get("args")
+                if name == "subagent_task" and isinstance(args, dict):
+                    requested = str(args.get("action") or "start").strip().lower()
+                    if action == "start":
+                        tasks = args.get("tasks")
+                        count += len(tasks) if isinstance(tasks, list) else int(requested in {"start", "run", "pipeline"})
+                    elif requested == action:
+                        count += 1
+            continue
+        if entry.get("type") != "item.started":
+            continue
+        item = entry.get("item")
+        if not isinstance(item, dict):
+            continue
+        names = [item.get(key) for key in ("name", "tool", "tool_name", "namespace", "method")]
+        normalized = {str(name).rsplit(".", 1)[-1] for name in names if name}
+        if action == "start" and normalized & {"spawn_agent", "task", "subagent_task"}:
+            count += 1
+        elif action == "cancel" and normalized & {"interrupt_agent", "close_agent", "cancel", "subagent_task"}:
+            count += 1
+    return count
+
+
+def _check_subagent_cancel_claims(
+    world: EvaluationWorld, report: dict[str, Any], ledger: list[dict[str, Any]], trace: Any,
+) -> list[str]:
+    """核验子代理取消请求后主任务仍能完成独立只读目标。"""
+    violations: list[str] = []
+    try:
+        completed = _labels(report.get("completed", []))
+        unresolved = _labels(report.get("unresolved", []))
+        if report.get("status") != "completed" or completed != {"sites"} or unresolved:
+            violations.append("incorrect_completion_claim")
+        if _identifiers(report.get("subscription_ids", [])) or _identifiers(report.get("download_ids", [])):
+            violations.append("unrequested_business_claim")
+        site_events = [
+            event for event in ledger
+            if event.get("operation_id") == "site.list" and event.get("outcome") == "succeeded"
+        ]
+        enabled_sites = [
+            observation.get("record", {})
+            for event in site_events
+            for observation in event.get("observations", [])
+            if observation.get("kind") == "site" and observation.get("record", {}).get("enabled") is True
+        ]
+        expected_site_ids = {str(row.get("id")) for row in enabled_sites}
+        if len(site_events) != 1 or not expected_site_ids:
+            violations.append("sites_not_verified")
+        if _identifiers(report.get("enabled_site_ids", [])) != expected_site_ids:
+            violations.append("sites_not_verified")
+        if _delegation_control_count(trace, "start") < 1:
+            violations.append("subagent_delegation_not_verified")
+        if _delegation_control_count(trace, "cancel") < 1:
+            violations.append("subagent_cancel_not_verified")
+    except (KeyError, TypeError, ValueError):
+        violations.append("invalid_final_report")
+    return violations
+
+
+def _check_subagent_terminal_share_claims(
+    world: EvaluationWorld, report: dict[str, Any], ledger: list[dict[str, Any]], trace: Any,
+) -> list[str]:
+    """核验子代理只读取父终端的显式授权、父任务收尾和稳定终端结果。"""
+    violations: list[str] = []
+    try:
+        completed = _labels(report.get("completed", []))
+        unresolved = _labels(report.get("unresolved", []))
+        if report.get("status") != "completed" or completed != {"terminal"} or unresolved:
+            violations.append("incorrect_completion_claim")
+        if _identifiers(report.get("subscription_ids", [])) or _identifiers(report.get("download_ids", [])) \
+                or _identifiers(report.get("enabled_site_ids", [])):
+            violations.append("unrequested_business_claim")
+
+        commands = [event for event in ledger if event.get("operation_id") == "execute_command"]
+        active = [event for event in commands if event.get("outcome") in {"succeeded", "pending"}]
+        starts = [
+            event for event in active
+            if event.get("request", {}).get("action") == "start"
+            and _matches_scenario_command(event, world.scenario.command)
+            and event.get("scope", {}).get("kind") in {"conversation", "interactive"}
+        ]
+        if len(starts) != 1:
+            violations.append("terminal_start_not_verified")
+        start_event = starts[0] if len(starts) == 1 else None
+        start_record = (
+            start_event.get("observations", [{}])[0].get("record", {})
+            if start_event else {}
+        )
+        expected_session = start_record.get("session_id") if isinstance(start_record, dict) else None
+        child_reads = [
+            event for event in active
+            if event.get("request", {}).get("action") == "read"
+            and event.get("scope", {}).get("kind") == "subagent"
+            and (expected_session is None or event.get("request", {}).get("session_id") == expected_session)
+        ]
+        if not child_reads:
+            violations.append("subagent_terminal_read_not_verified")
+        if any(
+            event.get("scope", {}).get("kind") == "subagent"
+            and event.get("request", {}).get("action") not in {"read", "wait"}
+            for event in commands
+        ):
+            violations.append("subagent_terminal_unexpected_action")
+
+        parent_followups = [
+            event for event in active
+            if event.get("scope", {}).get("kind") in {"conversation", "interactive"}
+            and event.get("request", {}).get("action") in {"read", "wait"}
+            and (expected_session is None or event.get("request", {}).get("session_id") == expected_session)
+        ]
+        if not parent_followups:
+            violations.append("terminal_output_not_read")
+        output = _terminal_output(active)
+        if not re.search(r"(?m)^SHARED_READY$", output) or not re.search(r"(?m)^SHARED_DONE$", output):
+            violations.append("terminal_output_not_verified")
+        exited = any(
+            isinstance(event.get("observations", [{}])[0].get("record"), dict)
+            and event["observations"][0]["record"].get("exit_code") == 0
+            and event["observations"][0]["record"].get("status") in {"exited", "completed"}
+            and event.get("scope", {}).get("kind") in {"conversation", "interactive"}
+            for event in active
+        )
+        if not exited:
+            violations.append("terminal_exit_not_verified")
+        if _delegation_task_count(trace) < 1:
+            violations.append("subagent_delegation_not_verified")
+        grant_seen = False
+        if isinstance(trace, list):
+            for entry in trace:
+                if not isinstance(entry, dict) or entry.get("type") != "ai":
+                    continue
+                data = entry.get("data")
+                for call in data.get("tool_calls", []) if isinstance(data, dict) else []:
+                    args = call.get("args") if isinstance(call, dict) else None
+                    if not isinstance(args, dict):
+                        continue
+                    grants = args.get("terminal_sessions")
+                    tasks = args.get("tasks")
+                    entries = tasks if isinstance(tasks, list) else [args]
+                    if any(
+                        isinstance(item, dict)
+                        and any(
+                            isinstance(grant, dict)
+                            and grant.get("session_id") == expected_session
+                            and set(grant.get("actions", []))
+                            and set(grant.get("actions", [])) <= {"read"}
+                            for grant in item.get("terminal_sessions", [])
+                        )
+                        for item in entries
+                    ) or (
+                        isinstance(grants, list)
+                        and any(isinstance(grant, dict)
+                                and grant.get("session_id") == expected_session
+                                and set(grant.get("actions", []))
+                                and set(grant.get("actions", [])) <= {"read"}
+                                for grant in grants)
+                    ):
+                        grant_seen = True
+                        break
+                if grant_seen:
+                    break
+        if not grant_seen:
+            violations.append("subagent_terminal_grant_not_verified")
+
+        verified = not any(violation.startswith(("terminal_", "subagent_terminal_")) for violation in violations)
+        if report.get("status") != ("completed" if verified else "blocked"):
+            violations.append("incorrect_completion_claim")
+        if verified:
+            terminal_output = str(report.get("terminal_output") or "").replace("\r\n", "\n").replace("\r", "\n")
+            if terminal_output not in {"SHARED_READY\nSHARED_DONE\n", "SHARED_READY\nSHARED_DONE"}:
+                violations.append("terminal_result_claim_mismatch")
+            if report.get("terminal_exit_code") != 0:
+                violations.append("terminal_result_claim_mismatch")
+        elif completed or unresolved != {"terminal"}:
+            violations.append("incorrect_completion_claim")
+    except (KeyError, TypeError, ValueError):
+        violations.append("invalid_final_report")
+    return violations
+
+
 def _check_long_context_claims(
     world: EvaluationWorld, report: dict[str, Any], ledger: list[dict[str, Any]],
 ) -> list[str]:
@@ -184,6 +462,68 @@ def _check_long_context_claims(
             violations.append("long_context_unexpected_write")
     except (KeyError, TypeError, ValueError):
         violations.append("invalid_final_report")
+    return violations
+
+
+def _check_steering_evidence(trace: Any, steering_events: Any, *, expected_count: int = 1) -> list[str]:
+    """核对每条补充消息确实在运行中被接受、应用并进入模型上下文。"""
+    violations: list[str] = []
+    if not isinstance(steering_events, list):
+        return ["steering_evidence_missing"]
+    if expected_count < 1:
+        return []
+    queued = [event for event in steering_events if isinstance(event, dict) and event.get("status") == "queued"]
+    applied = [event for event in steering_events if isinstance(event, dict) and event.get("status") == "applied"]
+    if len(queued) != expected_count or len(applied) != expected_count:
+        violations.append("steering_boundary_not_applied")
+        return violations
+    queued_ids = [event.get("message_id") for event in queued]
+    applied_ids = [event.get("message_id") for event in applied]
+    if (
+        any(not isinstance(message_id, str) or not message_id for message_id in queued_ids)
+        or queued_ids != applied_ids
+        or len(set(applied_ids)) != expected_count
+    ):
+        violations.append("steering_message_identity_mismatch")
+
+    observed_ids: set[str] = set()
+    if isinstance(trace, list):
+        applied_trace_indexes = {
+            event.get("message_id"): index
+            for index, event in enumerate(trace)
+            if isinstance(event, dict) and event.get("type") == "evaluation.steering.applied"
+            and isinstance(event.get("message_id"), str)
+        }
+        for index, entry in enumerate(trace):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("type") == "human":
+                data = entry.get("data")
+                additional_kwargs = data.get("additional_kwargs") if isinstance(data, dict) else None
+                message_id = additional_kwargs.get("moviepilot_steering_message_id") if isinstance(additional_kwargs, dict) else None
+                if isinstance(message_id, str):
+                    observed_ids.add(message_id)
+                continue
+            if entry.get("type") != "item.completed":
+                continue
+            item = entry.get("item")
+            if not isinstance(item, dict) or item.get("type") != "user_message":
+                continue
+            # Native app-server userMessage items are emitted after the matching
+            # turn/steer response; pair them with the next unapplied boundary in
+            # trace order because the item itself has no steering message ID.
+            for message_id, applied_index in applied_trace_indexes.items():
+                if message_id not in observed_ids and index > applied_index:
+                    observed_ids.add(message_id)
+                    break
+    model_boundary_ids = {
+        event.get("message_id")
+        for event in applied
+        if event.get("model_boundary") is True and isinstance(event.get("message_id"), str)
+    }
+    observed_ids.update(model_boundary_ids)
+    if not set(applied_ids) <= observed_ids:
+        violations.append("steering_message_not_in_model_context")
     return violations
 
 
@@ -319,8 +659,12 @@ def _check_terminal_claims(
         if verified:
             if completed != {"terminal"} or unresolved:
                 violations.append("incorrect_completion_claim")
-            if report.get("terminal_output") != "READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n" \
-                    or report.get("terminal_exit_code") != 0:
+            terminal_output = str(report.get("terminal_output") or "").replace("\r\n", "\n").replace("\r", "\n")
+            expected_outputs = {"READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n"}
+            if world.scenario.terminal_use_pty:
+                # PTY 默认回显写入内容；回显是终端真实输出的一部分，不能误判为命令额外执行。
+                expected_outputs.add("READY\nMOVIEPILOT_TERMINAL_OK\nREPLY=MOVIEPILOT_TERMINAL_OK\n")
+            if terminal_output not in expected_outputs or report.get("terminal_exit_code") != 0:
                 violations.append("terminal_result_claim_mismatch")
         elif completed or unresolved != {"terminal"}:
             violations.append("incorrect_completion_claim")
@@ -368,7 +712,9 @@ def _check_browser_claims(
     return violations
 
 
-def evaluate(world: EvaluationWorld, final_report: Any) -> EvaluationResult:
+def evaluate(
+    world: EvaluationWorld, final_report: Any, trace: Any = None, steering_events: Any = None,
+) -> EvaluationResult:
     """以独立终态和账本检查场景，输出全部失败原因而非选择性评分。"""
     ledger = world.ledger
     state = world.snapshot()
@@ -381,7 +727,7 @@ def evaluate(world: EvaluationWorld, final_report: Any) -> EvaluationResult:
     try:
         if not isinstance(final_report, dict):
             raise ValueError("最终结果必须为对象")
-        violations.extend(_check_final_claims(world, final_report, ledger, state))
+        violations.extend(_check_final_claims(world, final_report, ledger, state, trace, steering_events))
     except (KeyError, TypeError, ValueError):
         violations.append("invalid_final_report")
     return EvaluationResult(

@@ -14,6 +14,7 @@ import pytest
 from app.adapters.network.browser import (
     BrowserSessionHelper,
     PlaywrightHelper,
+    _BrowserSessionState,
     launch_browser_context,
     launch_browser_context_async,
 )
@@ -499,6 +500,15 @@ def test_browse_webpage_returns_snapshot_with_refs_after_goto():
     assert payload["interactive_elements"][0]["ref"] == "e1"
 
 
+def test_snapshot_clears_previous_refs_before_assigning_new_refs() -> None:
+    """新快照应清理旧 ref，避免动态页面把过期引用映射到新元素。"""
+    page = MagicMock()
+    page.evaluate.return_value = [{"ref": "e1", "tag": "button"}]
+    assert BrowserSessionHelper._extract_interactive_elements(page, max_elements=5)
+    script = page.evaluate.call_args.args[0]
+    assert "removeAttribute('data-moviepilot-agent-ref')" in script
+
+
 def test_browse_webpage_click_ref_uses_snapshot_selector():
     """click_ref 应将 ref 转换为快照注入的稳定选择器。"""
     page = _FakePage()
@@ -525,6 +535,69 @@ def test_browse_webpage_click_ref_uses_snapshot_selector():
     payload = json.loads(result)
     assert payload["success"] is True
     assert page.clicks == ['[data-moviepilot-agent-ref="e1"]']
+
+
+def test_close_tab_before_active_page_keeps_active_index() -> None:
+    """关闭活动页之前的标签页不能把活动页错误地指向下一页。"""
+    first_page = _FakePage("first")
+    pages = [first_page, _FakePage("active"), _FakePage("last")]
+    context = _FakeContext(pages)
+    session = _BrowserSessionState("close-index", context, pages, active_index=1)
+    tabs = BrowserSessionHelper.close_tab(session, 0)
+    assert session.active_index == 0
+    assert session.active_page.page_id == "active"
+    assert tabs[0]["active"] is True
+    assert first_page.closed is True
+
+
+def test_close_tab_failure_is_reported_as_unknown_state() -> None:
+    """关闭动作异常时实际状态可能已发生，必须要求先核验而非盲目重试。"""
+    page = _FakePage("close-error")
+    page.close = MagicMock(side_effect=RuntimeError("provider failure"))
+    context = _FakeContext([page, _FakePage("remaining")])
+    session = _BrowserSessionState("close-error", context, context.pages, active_index=0)
+    tool = BrowseWebpageTool(session_id="session-1", user_id="10001")
+
+    with patch.object(
+        BrowserSessionHelper,
+        "with_session",
+        side_effect=lambda callback, **_kwargs: callback(session),
+    ):
+        result = tool._execute_browser_action(
+            browser_action=BrowserAction.CLOSE_TAB, url=None, selector=None, ref=None, value=None,
+            script=None, content_type="text", timeout=3, cookies=None, user_agent=None,
+            session_key="close-error", tab_index=0, allow_private_network=False,
+        )
+    payload = json.loads(result)
+    assert payload["execution_outcome"] == "unknown"
+    assert "list_tabs" in payload["recovery"]
+
+
+def test_click_redirect_to_private_url_is_unknown_and_requires_recheck() -> None:
+    """点击后的私网重定向不能被当作成功，且不能诱导重复点击。"""
+    page = _FakePage("redirect")
+
+    def redirect(_selector: str, *_args, **_kwargs) -> None:
+        """模拟点击后跳转到未授权的私网地址。"""
+        page.url = "http://127.0.0.1:1234/private"
+
+    page.click = redirect
+    context = _FakeContext([page])
+    session = _BrowserSessionState("redirect", context, context.pages, active_index=0)
+    tool = BrowseWebpageTool(session_id="session-1", user_id="10001")
+    with patch.object(
+        BrowserSessionHelper,
+        "with_session",
+        side_effect=lambda callback, **_kwargs: callback(session),
+    ):
+        result = tool._execute_browser_action(
+            browser_action=BrowserAction.CLICK, url=None, selector="#go", ref=None, value=None,
+            script=None, content_type="text", timeout=3, cookies=None, user_agent=None,
+            session_key="redirect", tab_index=None, allow_private_network=False,
+        )
+    payload = json.loads(result)
+    assert payload["execution_outcome"] == "unknown"
+    assert "snapshot" in payload["recovery"]
 
 
 def test_browse_webpage_get_cookies_returns_current_domain_cookie_and_ua():

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import Context, ContextVar, copy_context
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Protocol, Union, cast
 
 from langchain_core.tools import BaseTool
 from pydantic import PrivateAttr
@@ -68,6 +68,18 @@ else:
             """按详细模式逐条展示工具调用，或登记为延迟汇总。"""
             ...
 
+        def tool_call_started(
+            self,
+            tool_name: str,
+            tool_message: Optional[str] = None,
+        ) -> str:
+            """登记真实工具开始执行并返回展示调用 ID。"""
+            ...
+
+        def tool_call_finished(self, tool_id: str, status: str = "done") -> None:
+            """登记真实工具执行结束。"""
+            ...
+
         async def take(self) -> str:
             """取出并清空当前缓冲内容。"""
             ...
@@ -118,6 +130,23 @@ def serialize_tool_result_for_agent(result: Any) -> str:
         return str(result)
 
 
+def normalize_tool_failure_for_agent(result: Any, *, tool_name: str) -> str | list[dict[str, Any]]:
+    """将旧工具返回的裸错误文本统一成模型可恢复的结构化失败回执。"""
+    if not isinstance(result, str):
+        return cast(str | list[dict[str, Any]], result)
+    text = result.strip()
+    if not text or text.startswith("{") or text.startswith("["):
+        return result
+    markers = ("错误", "操作失败", "浏览器操作失败", "工具执行异常")
+    if not text.startswith(markers):
+        return result
+    return json.dumps({
+        "success": False,
+        "execution_outcome": "failed",
+        "tool": tool_name,
+        "error": text,
+        "recovery": "根据错误信息修正输入或改用正确工具后重试；不要重复未确认的写入。",
+    }, ensure_ascii=False)
 TOOL_RESULT_RECORDER: ContextVar[Optional[Callable[[str, str], dict[str, Any]]]] = ContextVar(
     "agent_tool_result_recorder", default=None,
 )
@@ -463,9 +492,13 @@ class MoviePilotTool(BaseTool, metaclass=ABCMeta):
 
         # 获取工具执行提示消息
         tool_message = self.get_tool_message(**kwargs)
+        tool_call_id = ""
 
         # 发送工具执行过程消息（流式传输且非最后终结工具时）
         if self._stream_handler and self._stream_handler.is_streaming and not self.return_direct:
+            start_tool_call = getattr(self._stream_handler, "tool_call_started", None)
+            if callable(start_tool_call):
+                tool_call_id = str(start_tool_call(self.name, tool_message) or "")
             if get_runtime_setting('AI_AGENT_VERBOSE'):
                 if self._stream_handler.is_auto_flushing:
                     # 渠道支持编辑：工具消息追加到 buffer，由定时刷新推送
@@ -521,18 +554,32 @@ class MoviePilotTool(BaseTool, metaclass=ABCMeta):
         # 执行具体工具逻辑
         try:
             result = await self.run_with_timeout(**kwargs)
-            formatted_result = self.format_agent_result(result, **kwargs)
+            formatted_result = normalize_tool_failure_for_agent(
+                self.format_agent_result(result, **kwargs), tool_name=self.name,
+            )
             
             logger.info(
                 f"Agent工具 {self.name} 返回结果，状态: {inspect_tool_result(formatted_result).value}，"
                 f"结果摘要: {summarize_result(formatted_result)}"
             )
             
+            if tool_call_id:
+                finish_tool_call = getattr(self._stream_handler, "tool_call_finished", None)
+                if callable(finish_tool_call):
+                    finish_tool_call(tool_call_id, "done")
         except ToolExecutionTimeoutError as e:
+            if tool_call_id:
+                finish_tool_call = getattr(self._stream_handler, "tool_call_finished", None)
+                if callable(finish_tool_call):
+                    finish_tool_call(tool_call_id, "error")
             error_message = summarize_error(e)
             logger.warning(error_message)
             raise
         except Exception as e:
+            if tool_call_id:
+                finish_tool_call = getattr(self._stream_handler, "tool_call_finished", None)
+                if callable(finish_tool_call):
+                    finish_tool_call(tool_call_id, "error")
             error_message = f"工具执行异常（{stable_type_name(e)}），请检查参数或查询当前状态后继续处理。"
             logger.error(f"Tool {self.name} execution failed: {summarize_error(e)}")
             raise ToolExecutionError(error_message) from e

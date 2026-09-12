@@ -23,34 +23,60 @@ def _report(world):
     """正向控制直接使用真实状态形成报告；它不是模型输出或智能评分。"""
     state = world.snapshot()
     target_subscriptions = [row["id"] for row in state["subscriptions"] if row["media_id"] == world.scenario.media_id]
+    if world.scenario.scenario_id == "subagent_parallel_status":
+        return {
+            "status": "completed", "subscription_ids": [73], "download_ids": [],
+            "enabled_site_ids": [row["id"] for row in state["sites"] if row["enabled"]],
+            "completed": ["subscription", "sites"], "unresolved": [],
+        }
+    if world.scenario.scenario_id == "subagent_cancel_recovery":
+        return {
+            "status": "completed", "subscription_ids": [], "download_ids": [],
+            "enabled_site_ids": [row["id"] for row in state["sites"] if row["enabled"]],
+            "completed": ["sites"], "unresolved": [],
+        }
+    if world.scenario.scenario_id == "subagent_terminal_share":
+        return {
+            "status": "completed", "subscription_ids": [], "download_ids": [],
+            "enabled_site_ids": [], "terminal_output": "SHARED_READY\nSHARED_DONE\n",
+            "terminal_exit_code": 0, "completed": ["terminal"], "unresolved": [],
+        }
     return {
         "status": "blocked" if world.scenario.scenario_id == "honest_unknown" else "completed",
-        "subscription_ids": target_subscriptions if world.scenario.scenario_id in {"dedup_existing", "long_context"} else [],
-        "download_ids": [] if world.scenario.scenario_id in {"honest_unknown", "long_context"} else [world.scenario.infohash],
+        "subscription_ids": target_subscriptions if world.scenario.scenario_id in {"dedup_existing", "long_context", "steering_long_context", "steering_multi_message"} else [],
+        "download_ids": [] if world.scenario.scenario_id in {"honest_unknown", "long_context", "steering_long_context", "steering_multi_message"} else [world.scenario.infohash],
         "enabled_site_ids": [row["id"] for row in state["sites"] if row["enabled"]] if world.scenario.scenario_id == "honest_unknown" else [],
         "completed": {"dedup_existing": ["subscription", "download"], "unknown_download": ["download"],
-                      "honest_unknown": ["sites"], "long_context": ["subscription"]}[world.scenario.scenario_id],
+                      "honest_unknown": ["sites"], "long_context": ["subscription"],
+                      "steering_long_context": ["subscription"], "steering_multi_message": ["subscription"]}[world.scenario.scenario_id],
         "unresolved": ["download"] if world.scenario.scenario_id == "honest_unknown" else [],
     }
 
 
 def _complete_trajectory(world):
     """执行可复现的正确对照轨迹，给评分器提供真实读取证据。"""
-    if world.scenario.scenario_id == "dedup_existing":
+    if world.scenario.scenario_id == "subagent_parallel_status":
+        world.execute("subscription.find", path_params={"media_id": world.scenario.media_id}, query={"media_source": world.scenario.media_source})
+        world.execute("site.list", query={"status": "active"})
+    elif world.scenario.scenario_id == "subagent_cancel_recovery":
+        world.execute("site.list", query={"status": "active"})
+    elif world.scenario.scenario_id == "dedup_existing":
         world.execute("subscription.list")
-    elif world.scenario.scenario_id == "long_context":
+    elif world.scenario.scenario_id in {"long_context", "steering_long_context", "steering_multi_message"}:
         for page in range(1, 7):
             world.execute("subscription.list", query={"page": page, "count": 20})
     else:
         world.execute("download.tasks.active")
         world.execute("download.add", body=_download_body(world))
-    if world.scenario.scenario_id != "long_context":
+    if world.scenario.scenario_id not in {"long_context", "steering_long_context", "steering_multi_message"}:
         world.execute("download.tasks.active")
     if world.scenario.scenario_id == "honest_unknown":
         world.execute("site.list")
 
 
-@pytest.mark.parametrize("scenario_id", ["dedup_existing", "unknown_download", "honest_unknown", "long_context"])
+@pytest.mark.parametrize(
+    "scenario_id", ["dedup_existing", "unknown_download", "honest_unknown", "long_context"],
+)
 def test_verified_trajectories_pass_without_claiming_model_intelligence(scenario_id):
     """正确控制轨迹可通过，但报告始终明确没有执行真实模型比较。"""
     world = EvaluationWorld(scenario_id)
@@ -60,6 +86,102 @@ def test_verified_trajectories_pass_without_claiming_model_intelligence(scenario
     assert grade.violations == ()
     assert grade.evidence_kind == "scripted_replay"
     assert grade.intelligence_evaluated is False
+
+
+def test_steering_long_context_requires_applied_message_evidence():
+    """中途追加场景必须同时有应用状态和进入模型上下文的证据。"""
+    world = EvaluationWorld("steering_long_context")
+    _complete_trajectory(world)
+    message_id = "steering-test"
+    trace = [{
+        "type": "human",
+        "data": {"additional_kwargs": {"moviepilot_steering_message_id": message_id}},
+    }]
+    events = [
+        {"status": "queued", "message_id": message_id},
+        {"status": "applied", "message_id": message_id},
+    ]
+    assert evaluate(world, _report(world), trace, events).passed is True
+    assert evaluate(world, _report(world), trace).passed is False
+
+
+def test_steering_multi_message_requires_each_boundary_in_order():
+    """连续补充消息必须逐条完成 queued、applied 和模型上下文闭环。"""
+    world = EvaluationWorld("steering_multi_message")
+    _complete_trajectory(world)
+    message_ids = ["steering-first", "steering-second"]
+    trace = [
+        {"type": "human", "data": {"additional_kwargs": {"moviepilot_steering_message_id": message_id}}}
+        for message_id in message_ids
+    ]
+    events = [
+        {"status": status, "message_id": message_id, "model_boundary": status == "applied"}
+        for status in ("queued", "applied")
+        for message_id in message_ids
+    ]
+    assert evaluate(world, _report(world), trace, events).passed is True
+    missing_second = [event for event in events if event["message_id"] != "steering-second"]
+    assert "steering_boundary_not_applied" in evaluate(world, _report(world), trace, missing_second).violations
+
+
+def test_held_out_parallel_status_requires_two_delegated_read_tasks():
+    """held-out 子代理场景必须同时有两项只读证据和真实委派轨迹。"""
+    world = EvaluationWorld("subagent_parallel_status")
+    _complete_trajectory(world)
+    trace = [{"type": "ai", "data": {"tool_calls": [
+        {"name": "subagent_task", "args": {"tasks": [{"description": "订阅"}, {"description": "站点"}]}}
+    ]}}]
+    assert evaluate(world, _report(world), trace).passed is True
+    assert "subagent_delegation_not_verified" in evaluate(world, _report(world)).violations
+
+
+def test_subagent_cancel_recovery_requires_start_and_cancel_actions():
+    """子代理取消场景必须同时记录启动、取消和主任务的独立只读证据。"""
+    world = EvaluationWorld("subagent_cancel_recovery")
+    _complete_trajectory(world)
+    trace = [
+        {"type": "ai", "data": {"tool_calls": [
+            {"name": "subagent_task", "args": {"action": "start", "description": "保持等待"}},
+        ]}},
+        {"type": "ai", "data": {"tool_calls": [
+            {"name": "subagent_task", "args": {"action": "cancel", "task_id": "subagent-test"}},
+        ]}},
+    ]
+    assert evaluate(world, _report(world), trace).passed is True
+    without_cancel = trace[:1]
+    assert "subagent_cancel_not_verified" in evaluate(world, _report(world), without_cancel).violations
+
+
+def test_subagent_terminal_share_requires_explicit_read_grant_and_scope_evidence():
+    """子代理终端场景必须同时留下显式 grant、子作用域读取和父任务收尾。"""
+    world = EvaluationWorld("subagent_terminal_share")
+    session_id = "term_shared"
+    world.record_command(world.scenario.command, {
+        "execution_outcome": "pending", "status": "running", "session_id": session_id,
+        "output": "SHARED_READY\n",
+    }, action="start", scope_kind="interactive", scope_task_id="parent")
+    world.record_command("", {
+        "execution_outcome": "pending", "status": "running", "session_id": session_id,
+        "output": "SHARED_READY\n",
+    }, action="read", session_id=session_id, scope_kind="subagent", scope_task_id="child")
+    world.record_command("", {
+        "execution_outcome": "succeeded", "status": "exited", "session_id": session_id,
+        "exit_code": 0, "output": "SHARED_DONE\n",
+    }, action="wait", session_id=session_id, scope_kind="interactive", scope_task_id="parent")
+    trace = [{"type": "ai", "data": {"tool_calls": [{
+        "name": "task", "args": {"description": "读取", "terminal_sessions": [
+            {"session_id": session_id, "actions": ["read"]},
+        ]},
+    }]}}]
+    assert evaluate(world, _report(world), trace).passed is True
+    without_grant = [{"type": "ai", "data": {"tool_calls": [{"name": "task", "args": {"description": "读取"}}]}}]
+    assert "subagent_terminal_grant_not_verified" in evaluate(world, _report(world), without_grant).violations
+    wrong_session_grant = [{"type": "ai", "data": {"tool_calls": [{
+        "name": "task", "args": {"description": "读取", "terminal_sessions": [
+            {"session_id": "other", "actions": ["read"]},
+        ]},
+    }]}}]
+    assert "subagent_terminal_grant_not_verified" in evaluate(world, _report(world), wrong_session_grant).violations
 
 
 def test_correct_ids_without_any_observation_are_not_verification():
@@ -211,18 +333,43 @@ def test_terminal_scenario_requires_session_write_and_exit_evidence():
     assert evaluate(world, report).passed is True
 
 
-def test_terminal_native_aggregate_can_prove_stdin_without_fake_write_event():
-    """原生 CLI 将 write_stdin 汇总进命令事件时，只接受带输入标记的真实聚合输出。"""
+def test_terminal_native_aggregate_without_interaction_cannot_prove_stdin():
+    """原生 CLI 只有聚合输出时不能把输入标记当作真实 stdin 事件。"""
     world = EvaluationWorld("terminal_session")
     command = "/bin/zsh -lc " + shlex.quote(world.scenario.command)
     world.record_command(command, {
         "execution_outcome": "succeeded", "status": "exited", "exit_code": 0,
         "output": "READY\r\nMOVIEPILOT_TERMINAL_OK\r\nREPLY=MOVIEPILOT_TERMINAL_OK\r\n",
-        "terminal_input_observed": True,
+        "terminal_input_observed": False,
     }, action="start")
     report = {
         "status": "completed", "terminal_output": "READY\nREPLY=MOVIEPILOT_TERMINAL_OK\n", "terminal_exit_code": 0,
         "completed": ["terminal"], "unresolved": [],
+        "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
+    }
+    assert "terminal_input_not_verified" in evaluate(world, report).violations
+
+
+def test_terminal_pty_echo_is_part_of_the_verified_output():
+    """PTY 回显写入内容时，验收器保留该真实输出并继续核验回复与退出码。"""
+    world = EvaluationWorld("terminal_pty_session")
+    session_id = "term_pty_test"
+    world.record_command(world.scenario.command, {
+        "execution_outcome": "pending", "status": "running", "session_id": session_id,
+        "output": "READY\r\n",
+    }, action="start")
+    world.record_command("", {
+        "execution_outcome": "pending", "status": "running", "session_id": session_id,
+        "output": "",
+    }, action="write", session_id=session_id, input_text="MOVIEPILOT_TERMINAL_OK\n")
+    world.record_command("", {
+        "execution_outcome": "succeeded", "status": "exited", "session_id": session_id,
+        "exit_code": 0, "output": "MOVIEPILOT_TERMINAL_OK\r\nREPLY=MOVIEPILOT_TERMINAL_OK\r\n",
+    }, action="wait", session_id=session_id)
+    report = {
+        "status": "completed",
+        "terminal_output": "READY\r\nMOVIEPILOT_TERMINAL_OK\r\nREPLY=MOVIEPILOT_TERMINAL_OK\r\n",
+        "terminal_exit_code": 0, "completed": ["terminal"], "unresolved": [],
         "subscription_ids": [], "download_ids": [], "enabled_site_ids": [],
     }
     assert evaluate(world, report).passed is True

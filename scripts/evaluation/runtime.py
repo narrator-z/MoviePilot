@@ -1,5 +1,6 @@
 """用完整生产 Agent 驱动隔离业务世界；工具目录受控，不代表真实部署配置。"""
 
+import asyncio
 import json
 import os
 import re
@@ -10,13 +11,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock, Thread
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator, Optional
 from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from pydantic import PrivateAttr
 
+from app.agent.terminal.ownership import current_terminal_scope
 from app.agent.tools.impl.browse_webpage import BrowseWebpageTool
 from app.agent.tools.impl.execute_command import ExecuteCommandTool
 from app.agent.tools.impl.read_file import ReadFileTool
@@ -69,11 +71,18 @@ class _Response:
 class _Transport:
     """按生产固定路由反向匹配 operation，无法向任意主机发送请求。"""
 
-    def __init__(self, world: EvaluationWorld, **_kwargs: Any) -> None:
+    def __init__(
+        self,
+        world: EvaluationWorld,
+        *,
+        after_operation: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None,
+        **_kwargs: Any,
+    ) -> None:
         """绑定当前世界；执行器传来的认证头不记录、不使用。"""
         from app.agent.policy.api import resolve_api_route
 
         self._world = world
+        self._after_operation = after_operation
         self._routes = []
         for operation in _OPERATIONS:
             route = resolve_api_route(operation)
@@ -101,7 +110,20 @@ class _Transport:
                     path_params["subscribe_id"] = int(path_params["subscribe_id"])
                 except ValueError:
                     pass
-            return _Response(self._world.execute(operation, path_params=path_params, query=params, body=json))
+            # 取消场景只让子代理的只读请求保持在途，确保 action=cancel
+            # 真正打断一个运行中的调用，而不是仅取消已经完成的空任务。
+            scope = current_terminal_scope()
+            if (
+                self._world.scenario.scenario_id == "subagent_cancel_recovery"
+                and operation == "subscription.list"
+                and scope is not None
+                and scope.kind == "subagent"
+            ):
+                await asyncio.sleep(30)
+            response = self._world.execute(operation, path_params=path_params, query=params, body=json)
+            if self._after_operation is not None:
+                await self._after_operation(operation, response)
+            return _Response(response)
         return _Response({"success": False, "execution_outcome": "failed", "message": "该 API 不属于受控评测目录"})
 
 
@@ -147,6 +169,27 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
         super().__init__(**kwargs)
         self._evaluation_world = world
         self._evaluation_allowed_root = allowed_root.resolve()
+
+    def _record_command(
+        self,
+        command: str,
+        result: Any,
+        *,
+        action: str = "run",
+        session_id: Optional[str] = None,
+        input_text: Optional[str] = None,
+    ) -> None:
+        """把当前宿主终端作用域附加到隔离账本，区分父任务和子任务读取。"""
+        scope = current_terminal_scope()
+        self._evaluation_world.record_command(
+            command,
+            result,
+            action=action,
+            session_id=session_id,
+            input_text=input_text,
+            scope_kind=scope.kind if scope is not None else None,
+            scope_task_id=scope.task_id if scope is not None else None,
+        )
 
     @staticmethod
     def _failure(
@@ -197,40 +240,48 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
                 "终端场景只接受 action=start、read、wait、write；不要使用 action=run",
                 command_text, action=action, session_id=session_id,
             )
-            self._evaluation_world.record_command(command_text, self._payload(result), action=action, session_id=session_id)
+            self._record_command(command_text, self._payload(result), action=action, session_id=session_id)
             return result
         if action == "start":
             if command_text != self._evaluation_world.scenario.command:
                 result = self._failure("终端命令必须与任务中给定命令完全一致，不要执行其他命令", command_text, action=action)
-                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                self._record_command(command_text, self._payload(result), action=action)
                 return result
             if env:
                 result = self._failure("终端启动不接受 env；请删除 env 后重试", command_text, action=action)
-                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                self._record_command(command_text, self._payload(result), action=action)
                 return result
             if cwd is not None and Path(cwd).expanduser().resolve() != self._evaluation_allowed_root:
                 result = self._failure("cwd 必须省略或使用当前评测工作目录", command_text, action=action)
-                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                self._record_command(command_text, self._payload(result), action=action)
                 return result
-            if kwargs.get("use_pty", True) is not False:
-                result = self._failure("终端场景必须使用 use_pty=false 的 pipe 模式", command_text, action=action)
-                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+            expected_use_pty = self._evaluation_world.scenario.terminal_use_pty
+            if expected_use_pty is None:
+                expected_use_pty = False
+            if kwargs.get("use_pty", True) is not expected_use_pty:
+                mode = "PTY" if expected_use_pty else "pipe"
+                result = self._failure(
+                    f"终端场景必须使用 use_pty={str(expected_use_pty).lower()} 的 {mode} 模式",
+                    command_text, action=action,
+                )
+                self._record_command(command_text, self._payload(result), action=action)
                 return result
             if session_id:
                 result = self._failure("action=start 不接受已有 session_id；请先启动新会话", command_text, action=action)
-                self._evaluation_world.record_command(command_text, self._payload(result), action=action)
+                self._record_command(command_text, self._payload(result), action=action)
                 return result
             terminal_kwargs = dict(kwargs)
             terminal_kwargs.update({
                 "action": "start", "command": command_text, "session_id": None, "input_text": None,
-                "close_stdin": False, "cwd": str(self._evaluation_allowed_root), "env": None, "use_pty": False,
+                "close_stdin": False, "cwd": str(self._evaluation_allowed_root), "env": None,
+                "use_pty": expected_use_pty,
             })
             result = await super().run(**terminal_kwargs)
             payload = self._payload(result)
             returned_session = payload.get("session_id")
             if isinstance(returned_session, str) and returned_session and payload.get("execution_outcome") in {"pending", "succeeded"}:
                 self._evaluation_terminal_session_id = returned_session
-            self._evaluation_world.record_command(command_text, payload, action=action)
+            self._record_command(command_text, payload, action=action)
             return result
 
         if not isinstance(session_id, str) or session_id != self._evaluation_terminal_session_id:
@@ -238,7 +289,7 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
                 "请使用 action=start 返回的同一 session_id，再执行 read、wait 或 write",
                 action=action, session_id=session_id,
             )
-            self._evaluation_world.record_command("", self._payload(result), action=action, session_id=session_id)
+            self._record_command("", self._payload(result), action=action, session_id=session_id)
             return result
         if action == "write":
             if input_text != "MOVIEPILOT_TERMINAL_OK\n":
@@ -246,7 +297,7 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
                     "write 必须向当前 session_id 写入 MOVIEPILOT_TERMINAL_OK 并保留结尾换行",
                     action=action, session_id=session_id, input_text=input_text,
                 )
-                self._evaluation_world.record_command(
+                self._record_command(
                     "", self._payload(result), action=action, session_id=session_id, input_text=input_text,
                 )
                 return result
@@ -255,7 +306,7 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
                     "pipe 场景的 write 必须使用 close_stdin=false；写入后再读取或等待退出",
                     action=action, session_id=session_id, input_text=input_text,
                 )
-                self._evaluation_world.record_command(
+                self._record_command(
                     "", self._payload(result), action=action, session_id=session_id, input_text=input_text,
                 )
                 return result
@@ -269,7 +320,7 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
             terminal_kwargs["input_text"] = None
         result = await super().run(**terminal_kwargs)
         payload = self._payload(result)
-        self._evaluation_world.record_command(
+        self._record_command(
             "", payload, action=action, session_id=session_id,
             input_text=input_text if action == "write" else None,
         )
@@ -287,19 +338,19 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
         command_text = (command or "").strip()
         if normalized_action != "run":
             result = self._failure("命令场景只接受 action=run；请直接提交给定命令", command_text)
-            self._evaluation_world.record_command(command_text, json.loads(result))
+            self._record_command(command_text, json.loads(result))
             return result
         if command_text != self._evaluation_world.scenario.command:
             result = self._failure("命令必须与任务中给定命令完全一致，不要执行其他命令", command_text)
-            self._evaluation_world.record_command(command_text, json.loads(result))
+            self._record_command(command_text, json.loads(result))
             return result
         if env:
             result = self._failure("命令场景不接受 env；请删除 env 后重试", command_text)
-            self._evaluation_world.record_command(command_text, json.loads(result))
+            self._record_command(command_text, json.loads(result))
             return result
         if cwd is not None and Path(cwd).expanduser().resolve() != self._evaluation_allowed_root:
             result = self._failure("cwd 必须省略或使用当前评测工作目录", command_text)
-            self._evaluation_world.record_command(command_text, json.loads(result))
+            self._record_command(command_text, json.loads(result))
             return result
         result = await super().run(
             action="run", command=command_text, cwd=str(self._evaluation_allowed_root), env=None, **kwargs,
@@ -308,7 +359,7 @@ class _EvaluationExecuteCommandTool(ExecuteCommandTool):
             payload = json.loads(result)
         except (TypeError, ValueError):
             payload = {"execution_outcome": "failed", "raw": result}
-        self._evaluation_world.record_command(command_text, payload)
+        self._record_command(command_text, payload)
         return result
 
 
@@ -526,7 +577,12 @@ def _agent_type() -> type:
 
 
 @contextmanager
-def _runtime_scope(directory: Path, world: EvaluationWorld) -> Iterator[Any]:
+def _runtime_scope(
+    directory: Path,
+    world: EvaluationWorld,
+    *,
+    after_operation: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None,
+) -> Iterator[Any]:
     """在独立 worker 中临时替换明确的外部边界，退出时恢复全部全局引用。"""
     from app.agent.api.executor import MoviePilotApiExecutor
     from app.agent.runtime import AgentRuntimeManager
@@ -541,7 +597,7 @@ def _runtime_scope(directory: Path, world: EvaluationWorld) -> Iterator[Any]:
         stack.enter_context(patch("app.agent.orchestrator.agent_mcp_manager", _McpDirectory()))
         stack.enter_context(patch.object(MoviePilotApiExecutor, "_resolve_base_url", return_value="http://evaluation.invalid"))
         stack.enter_context(patch.object(MoviePilotApiExecutor, "_build_headers", return_value={"Accept": "application/json"}))
-        yield lambda **kwargs: _Transport(world, **kwargs)
+        yield lambda **kwargs: _Transport(world, after_operation=after_operation, **kwargs)
 
 
 async def run_moviepilot(
@@ -576,6 +632,7 @@ async def _run_isolated(
     from app.agent.api.executor import ApiExecutionContext, MoviePilotApiExecutor
     from app.agent.contracts import ReplyMode
     from app.agent.memory import MemoryManager
+    from app.agent.steering import SteeringInbox
     from app.agent.tools.impl.api import MoviePilotApiTool
     from app.db.adapters.invocation import TransactionalInvocationRepository
     from app.db.models.agentinvocation import AgentInvocation
@@ -590,7 +647,47 @@ async def _run_isolated(
             stack.callback(engine.dispose)
             AgentInvocation.__table__.create(engine)
             invocation_repository = TransactionalInvocationRepository(sessionmaker(bind=engine))
-        factory = stack.enter_context(_runtime_scope(directory, world))
+        session_id = uuid4().hex
+        steering_inbox = SteeringInbox(session_id, "1")
+        steering_events: list[dict[str, Any]] = []
+        steering_schedule = world.scenario.steering_schedule()
+        steering_operation_count = 0
+        steering_sent: set[int] = set()
+
+        async def after_operation(operation_id: str, response: dict[str, Any]) -> None:
+            """在计划的真实业务回执边界注入运行中补充消息。"""
+            nonlocal steering_operation_count
+            if not steering_schedule:
+                return
+            if operation_id != "subscription.list" or response.get("outcome") != "succeeded":
+                return
+            steering_operation_count += 1
+            for trigger_count, text in steering_schedule:
+                if trigger_count != steering_operation_count or trigger_count in steering_sent:
+                    continue
+                message = await steering_inbox.enqueue(user_id="1", text=text)
+                if message is None:
+                    continue
+                steering_sent.add(trigger_count)
+                steering_events.append({
+                    "status": "queued",
+                    "message_id": message.message_id,
+                    "after_operation": operation_id,
+                    "operation_count": steering_operation_count,
+                })
+
+        def steering_status_callback(message: Any, status: str) -> None:
+            """记录 inbox 在模型边界真正消费补充消息的状态。"""
+            steering_events.append({
+                "status": status,
+                "message_id": message.message_id,
+                # SteeringMiddleware consumes the message immediately before the
+                # model handler; this marks a real model-boundary injection even
+                # when later context compaction removes the HumanMessage snapshot.
+                "model_boundary": status == "applied",
+            })
+
+        factory = stack.enter_context(_runtime_scope(directory, world, after_operation=after_operation))
         if world.scenario.kind == "browser":
             world.configure_browser_url(stack.enter_context(_browser_fixture()))
         memory_port = _MemoryPort()
@@ -598,12 +695,13 @@ async def _run_isolated(
         command_root = directory / "command-workspace"
         command_root.mkdir()
         agent = _agent_type()(
-            session_id=uuid4().hex, user_id="1", username="evaluation", channel=NotificationChannel.WebAgent.value,
+            session_id=session_id, user_id="1", username="evaluation", channel=NotificationChannel.WebAgent.value,
             source="evaluation", is_channel_admin=True, replay_mode=ReplyMode.CAPTURE_ONLY, allow_message_tools=False,
             output_callback=output.append, data=SimpleNamespace(invocations=invocation_repository),
             memory=MemoryManager(chat=memory_port, persistence=memory_port), model=model, model_name=model_name,
             context_window=context_window, max_iterations=max_iterations,
         )
+        agent.configure_steering_inbox(steering_inbox)
         for child in (False, True):
             executor = MoviePilotApiExecutor(
                 context=ApiExecutionContext(user_id="1", username="evaluation", is_admin=True, session_id=agent.session_id),
@@ -634,6 +732,10 @@ async def _run_isolated(
             command_tool.set_message_attr(agent.channel, agent.source, agent.username)
             command_tool.set_agent_context(agent._tool_context)
             agent.evaluation_tools.append(command_tool)
+            if world.scenario.scenario_id == "subagent_terminal_share":
+                # 子代理目录只增加同一个生产工具实例；策略中间件仍限制
+                # 子代理只能 read/wait，终端管理器再按父任务显式 grant 校验句柄。
+                agent.evaluation_child_tools.append(command_tool)
         elif world.scenario.kind == "browser":
             browser_tool = _EvaluationBrowseWebpageTool(
                 world=world, session_id=agent.session_id, user_id="1",
@@ -641,8 +743,23 @@ async def _run_isolated(
             browser_tool.set_message_attr(agent.channel, agent.source, agent.username)
             browser_tool.set_agent_context(agent._tool_context)
             agent.evaluation_tools.append(browser_tool)
+        await steering_inbox.begin_run(steering_status_callback)
         try:
             result = await agent.process(world.model_input())
+            # 模型可能在收到首个工具回执后直接结束；仍把已确认的补充消息
+            # 交给同一 Agent 图，不能让“已排队”变成无展示的孤立输入。
+            while True:
+                pending = await steering_inbox.consume()
+                if not pending:
+                    break
+                for message in pending:
+                    result = await agent.process(message.text, images=list(message.images) or None,
+                                                 files=list(message.files) or None)
+            pending = await steering_inbox.finish_run()
+            for message in pending:
+                steering_status_callback(message, "applied")
+                result = await agent.process(message.text, images=list(message.images) or None,
+                                             files=list(message.files) or None)
             bundle = agent.evaluation_bundle
             state = bundle.agent.get_state({"configurable": {"thread_id": agent.session_id}}).values if bundle else {}
             tool_catalog = bundle.tool_catalog.audit_payload() if bundle and bundle.tool_catalog else None
@@ -658,7 +775,10 @@ async def _run_isolated(
                 "tool_catalog": tool_catalog,
                 "child_tool_catalog": child_tool_catalog,
                 "graph_nodes": sorted(bundle.agent.get_graph().nodes) if bundle else [],
+                "steering_events": steering_events,
             }
         finally:
+            if steering_inbox.running:
+                await steering_inbox.finish_run()
             if not await agent.cleanup():
                 raise RuntimeError("评测 Agent 子任务尚未完成清理")

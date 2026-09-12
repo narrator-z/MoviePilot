@@ -168,6 +168,43 @@ def test_backup_name_uses_application_release_version(
     assert _service(tmp_path).create().name == "moviepilot_v4.2.1_sqlite_20260819_134526.db"
 
 
+def test_backup_name_uses_plugin_target_and_version(tmp_path: Path) -> None:
+    """插件备份文件名应记录插件 ID 与插件版本，而不是宿主版本。"""
+    service = DatabaseBackupService(
+        backend=_Backend(),
+        artifact_store_factory=BackupFiles,
+        policy_reader=lambda: BackupPolicy(tmp_path),
+        clock=lambda: datetime(2026, 8, 19, 13, 45, 26),
+        target="DemoPlugin",
+        version="1.2.3",
+    )
+
+    artifact = service.create()
+
+    assert artifact.name == "DemoPlugin_v1.2.3_sqlite_20260819_134526.db"
+    assert artifact.target == "DemoPlugin"
+
+
+def test_plugin_backup_without_version_uses_target_without_version_segment(
+    tmp_path: Path,
+) -> None:
+    """插件版本元数据缺失时仍应备份，并使用可解析的无版本文件名。"""
+    service = DatabaseBackupService(
+        backend=_Backend(),
+        artifact_store_factory=BackupFiles,
+        policy_reader=lambda: BackupPolicy(tmp_path),
+        clock=lambda: datetime(2026, 8, 19, 13, 45, 26),
+        target="DemoPlugin",
+        version=None,
+    )
+
+    artifact = service.create()
+
+    assert artifact.name == "DemoPlugin_sqlite_20260819_134526.db"
+    assert artifact.target == "DemoPlugin"
+    assert BackupFiles.target(artifact.name) == "DemoPlugin"
+
+
 def test_retention_applies_after_new_artifact_is_available(tmp_path: Path) -> None:
     old = _service(tmp_path, now=datetime(2026, 8, 1, 3, 0, 0)).create()
     current = _service(

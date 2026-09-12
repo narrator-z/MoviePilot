@@ -16,7 +16,7 @@ from app.agent.api.executor import ApiExecutionContext, MoviePilotApiExecutor
 from app.agent.middleware.policy import AgentPolicyMiddleware
 from app.agent.policy.contracts import AuthSource, ExecutionOutcome, PrincipalType, ToolOrigin, ToolPolicyContext
 from app.agent.policy.orchestrator import AgentToolPolicyOrchestrator
-from app.agent.tools.base import MoviePilotTool
+from app.agent.tools.base import MoviePilotTool, normalize_tool_failure_for_agent
 from app.agent.tools.impl.api import MoviePilotApiTool
 from app.agent.tools.impl.mcp import McpExternalTool
 from app.agent.tools.manager import MoviePilotToolsManager
@@ -160,6 +160,19 @@ async def test_command_receipt_and_direct_manager_keep_original_payload():
     assert json.loads(await manager.call_tool(tool.name, {})) == {"success": False, "message": "目标记录不存在"}
 
 
+@pytest.mark.asyncio
+async def test_direct_manager_failure_exposes_recovery_contract(monkeypatch):
+    """直调工具异常必须把失败状态和下一步纠正提示交给模型。"""
+    tool = _ResultTool(session_id="outcome-error-test", user_id="owner")
+    monkeypatch.setattr(type(tool), "run_with_timeout", AsyncMock(side_effect=ValueError("bad argument")))
+    manager = MoviePilotToolsManager(is_admin=True)
+    manager.tools = [tool]
+    payload = json.loads(await manager.call_tool(tool.name, {}))
+    assert payload["execution_outcome"] == "failed"
+    assert "修正输入" in payload["recovery"]
+    assert payload["error"].startswith("调用工具")
+
+
 def test_mcp_error_with_text_content_does_not_lose_error_flag():
     """外部 MCP 的文本内容不能覆盖 isError 标识，正常文本格式保持兼容。"""
     payload = {"isError": True, "content": [{"type": "text", "text": "operation rejected"}]}
@@ -167,6 +180,14 @@ def test_mcp_error_with_text_content_does_not_lose_error_flag():
     assert json.loads(result) == payload
     assert inspect_tool_result(result) is ExecutionOutcome.FAILED
     assert McpExternalTool._format_mcp_result({"content": payload["content"]}) == "operation rejected"
+
+
+def test_legacy_tool_error_text_gets_structured_recovery_contract():
+    """旧浏览器、文件和命令工具的裸错误在 Agent 入口统一可恢复。"""
+    payload = json.loads(normalize_tool_failure_for_agent("错误：文件不存在", tool_name="read_file"))
+    assert payload["execution_outcome"] == "failed"
+    assert payload["tool"] == "read_file"
+    assert "修正输入" in payload["recovery"]
 
 
 def _api_tool(request: AsyncMock) -> MoviePilotApiTool:

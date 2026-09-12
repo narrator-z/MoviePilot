@@ -16,7 +16,11 @@
 | `command_execution` | 在临时目录运行一次性只读命令 | 只执行精确命令，核验真实 stdout 与退出码 |
 | `browser_navigation` | 打开回环动态页并按快照 ref 点击 | 由真实浏览器状态核验导航、点击和动态正文 |
 | `terminal_session` | 启动 pipe 后台会话，写入 stdin，再等待退出 | 核验 session_id、动作顺序、输入、增量输出和退出码 |
+| `terminal_pty_session` | 启动 PTY 后台会话，写入 stdin，再等待退出 | 核验 PTY 输入事件、增量输出和真实退出码 |
 | `long_context` | 在长订阅列表中按固定分页读取并定位第 6 页目标 | 核验上下文压缩、首条任务约束保留、page1–6 证据和无副作用终态 |
+| `steering_multi_message` | 在第 1、3 次业务读取后分别追加两条补充要求 | 核验每条消息按 queued → applied 顺序进入真实模型边界，并保持分页、停止条件和 JSON 输出约束 |
+| `subagent_parallel_status` | 两个相互独立的只读检查必须由通用子代理并行完成 | 核验子代理授权、真实委派轨迹、订阅与启用站点证据和零副作用 |
+| `subagent_cancel_recovery` | 派发一个会保持只读请求在途的通用子代理，主 Agent 取消后继续读取启用站点 | 核验真实启动/取消动作、取消收口、主任务恢复和零副作用 |
 
 这些代号只供控制器和人使用。模型输入必须通过 `Scenario.model_input()` 生成，不能传入场景 ID、业务初态、故障布置、账本或验收器。下载查询在第三种场景的首次提交前仍然可用，避免错误惩罚合理的重复检查策略。
 
@@ -73,6 +77,35 @@ uv run --locked --no-sync python -m scripts.evaluation --live \
 
 `0f8aa4dfa` 将 `moviepilot_api` 的公共描述收敛为通用边界，并把操作细节放进分类 Skill、生成 schema 和失败回执。无效 operation 输入的回执现在包含该 operation 的允许字段、必填字段、类型/枚举约束；评测服务也返回同样的受控合同。真实报告 `/tmp/moviepilot-agent-round-13b4fe112-gemini-dedup.json` 使用 `gemini-2.5-pro + high`，模型第一次把 `subscription.find` 的媒体字段放错位置，随后根据回执修正为 `path_params.media_id` 与 `query.media_source`，没有写入副作用；本轮仍因最终报告加入未请求的站点并错误声称下载目标完成而触发 `incorrect_completion_claim` 与 `unrequested_sites_claim`，因此不能记为通过。
 
+### 2026-09-11 通用子代理 held-out 成对实测
+
+新增 `subagent_parallel_status` 场景，要求主 Agent 将订阅核对与启用站点核对分别委派给两个 `general-purpose` 子代理，主 Agent 等待结果后综合，子代理不能直接写入。首轮真实运行暴露了一个实际权限与纠错缺口：订阅子任务的 `subscription.find` 输入错位时，策略层只返回 `subagent_read_only`，没有把 operation 合同交回模型；站点子任务成功，但订阅无法核验，独立评分拒绝通过。
+
+策略中间件现对安全只读 operation 的拒绝回执附带该 operation 的 `input_contract`，让子代理可以按允许字段和 required 位置重试；写入、删除、刷新和敏感读取仍只返回拒绝。相关权限与评测测试通过。相同未提交工作树、`gpt-5.6-luna + max`、32 次模型调用上限、8192 输出上限、300 秒超时和 `harness_sha256=471c2910242d322455c2b7a825876aef10965a51bf7472ea2a7f93f25adaf04d` 下：
+
+| 侧 | 结果 | 真实运行摘要 |
+| --- | --- | --- |
+| MoviePilot 生产 Agent | 通过 | `/tmp/moviepilot-agent-round-luna-oauth-subagent-live-32-20260911.json`；13 次模型调用、2 次业务读取、真实派发两个独立子任务、0 失败/重复/副作用。 |
+| 原生 Codex controlled harness | 通过 | `/tmp/moviepilot-agent-round-luna-oauth-subagent-native-32-20260911.json`；23 次模型调用、2 次业务读取、两个子任务均返回可核验证据、0 重复/副作用。 |
+
+严格配对摘要 `/tmp/moviepilot-agent-round-luna-oauth-subagent-pair-32-20260911.json` 为 `pair_valid=true`、`both_passed=true`。MoviePilot 比原生 Codex 少 10 次模型调用、少 243194 个已知 token、少约 62.412 秒；这是该 held-out 轨迹的成本差，不能外推成整体智能优势。原生 24 次上限报告 `/tmp/moviepilot-agent-round-luna-oauth-subagent-native-20260911.json` 在最终 JSON 前耗尽预算，保留为失败样本；还记录一次关闭协作任务的参数警告，未造成业务副作用。
+
+按相同提交内容和 Harness 追加第二轮 32 次预算复测：MoviePilot `/tmp/moviepilot-agent-round-luna-oauth-subagent-live-32-repeat2-20260911.json` 通过，11 次模型调用、63425 个已知 token、2 次业务读取；原生 Codex `/tmp/moviepilot-agent-round-luna-oauth-subagent-native-32-repeat2-20260911.json` 通过，28 次模型调用、534320 个已知 token、2 次业务读取。两侧均 0 失败/重复/副作用，原生进程正常退出且第二轮无 stderr 警告；配对摘要 `/tmp/moviepilot-agent-round-luna-oauth-subagent-pair-32-repeat2-20260911.json` 为 `pair_valid=true`、`both_passed=true`。
+
+第三轮在相同提交内容、模型、推理档位、预算和 Harness 下继续通过：MoviePilot `/tmp/moviepilot-agent-round-luna-oauth-subagent-live-32-repeat3-20260911.json` 使用 11 次模型调用、54388 个已知 token、2 次业务读取；原生 Codex `/tmp/moviepilot-agent-round-luna-oauth-subagent-native-32-repeat3-20260911.json` 使用 24 次模型调用、473296 个已知 token、2 次业务读取。两侧均 0 失败/重复/副作用，原生进程正常退出且无 stderr 警告；配对摘要 `/tmp/moviepilot-agent-round-luna-oauth-subagent-pair-32-repeat3-20260911.json` 为 `pair_valid=true`、`both_passed=true`。三轮均通过说明该 held-out 子代理合同已有重复证据，但 S3.1 仍需终端分享和取消场景，不能据此宣称整体智能与 Codex 等价。
+
+### 2026-09-12 子代理取消恢复实测
+
+新增 `subagent_cancel_recovery` held-out 场景，让子代理真正发起一个保持在途的只读 `subscription.list`，主 Agent 取得 `task_id` 后立即取消，再由主 Agent 读取启用站点。MoviePilot 侧通过 `/tmp/moviepilot-agent-round-luna-oauth-subagent-cancel-live-final-20260912.json`，原生 Codex 侧通过 `/tmp/moviepilot-agent-round-luna-oauth-subagent-cancel-native-final-20260912.json`；两侧均 `passed=true`，原生报告的独立 `task_passed=true` 且 MoviePilot 的独立评分同样通过，0 业务失败、0 重复、0 副作用，并确认启用站点 `[11, 13]`。原生事件确认 `spawn_agent` 返回运行中任务，`close_agent` 后状态收口为 `shutdown`；MoviePilot 事件确认 `subagent_task` 的 `start`/`cancel` 以及取消后的 `site.list`。
+
+配对摘要 `/tmp/moviepilot-agent-round-luna-oauth-subagent-cancel-pair-final-20260912.json` 为 `pair_valid=true`、`both_passed=true`，模型条件为 `gpt-5.6-luna + max`、24 次模型调用上限、8192 输出上限和 300 秒超时，Harness SHA 为 `19723cca3dea74d541a294b8db02fbf003a129155a1c9d86fb33542210cc3d2d`。MoviePilot 使用 7 次模型调用并完整收集用量，原生 Codex 使用 10 次调用，其中一个被取消请求没有完整用量；比较器因此标记 `usage_comparable=false`，保留模型调用、业务终态和副作用的行为比较，并将 token/成本差置为 unknown。其他场景仍要求两侧 `usage_complete=true`，防止部分失败被误算为成本优势。该轮证明取消后恢复的生命周期合同，不代表已经完成终端共享收益或整体 Codex 智能等价。
+
+### 2026-09-12 子代理终端共享实测
+
+新增 `subagent_terminal_share` held-out 场景，要求主 Agent 在真实后台 pipe 会话中启动固定命令，把同一 `session_id` 以 `terminal_sessions=[{session_id, actions:[read]}]` 显式授权给通用子代理，子代理只能读取，主 Agent 再读取最终输出并确认退出码。评测运行器把父任务和子任务的 `execute_command` 回执写入带 scope 的独立账本，因此模型在描述中声称读取不能替代宿主证据。
+
+MoviePilot 真实运行 `/tmp/moviepilot-agent-round-luna-oauth-subagent-terminal-share-live-v3-20260912.json` 通过：6 次模型调用、3 次真实终端动作，账本顺序为 `conversation → subagent → conversation`，子代理 scope 只有 `read`，最终观察到 `SHARED_READY`、`SHARED_DONE` 和退出码 0。相同 `gpt-5.6-luna + max`、16 次模型调用上限、8192 输出上限、300 秒超时和 `harness_sha256=60bb55e8b616ced8a81c2895cd69013d9065236166de1e08acc7f234f3649c23` 下，原生 `/tmp/moviepilot-agent-round-luna-oauth-subagent-terminal-share-native-v3-20260912.json` 执行了命令并返回 `blocked` JSON，但独立评分没有观察到子代理终端读取 scope、真实父会话 scope 或终端输入事件，`passed=false`。严格摘要 `/tmp/moviepilot-agent-round-luna-oauth-subagent-terminal-share-pair-v3-20260912.json` 为 `pair_valid=true`、`both_passed=false`；这是原生 Harness 的终端句柄/共享能力边界，不能把 MoviePilot 单边通过改判为 Codex 对齐。
+
 本轮将后续真实测评模型切换为 Google Gemini `gemini-3.1-pro-preview`，推理档位保持 `high`。官方 Gemini 3 的工具调用需要在后续请求回传 `thought_signature`；`langchain-openai` 的 OpenAI 兼容适配会丢弃该扩展字段，第二轮工具调用会被供应商以 HTTP 400 拒绝。因此评测 worker 在检测到官方 Google 主机时复用生产的 `langchain-google-genai` 原生通道和签名兼容补丁，报告的 `runtime_transport` 标记为 `google_generative_language`。这只改变模型连接适配，不放宽 MoviePilot 工具目录、隔离世界或独立验收器。切换后的完整场景报告以实际模型调用结果和对应提交内容为准，不能把此前 2.5 Pro 的结果冒充 3.1 Pro 证据。
 
 切换后的三场景实测均通过独立验收器，报告仍保存在本机 `/tmp`，没有提交模型签名或私有响应：
@@ -89,17 +122,37 @@ uv run --locked --no-sync python -m scripts.evaluation --live \
 
 `command_execution` 场景按场景显式开启原生 CLI 的 `shell_tool`、`unified_exec` 和 `shell_snapshot`，代理保留 `functions.exec_command` 与 `functions.write_stdin`；MoviePilot 侧注入生产 `ExecuteCommandTool`，仅允许任务给定的固定命令和临时工作目录。配对报告 `/tmp/moviepilot-agent-round-luna-oauth-command-pair-final.json` 的 `pair_valid=true`、`both_passed=true`，harness 指纹为 `c409ee1ca7899ccfcefd38832d6a343f024f8fc67fb65f14c3eec08552203257`：两侧均以退出码 0 得到 `MOVIEPILOT_COMMAND_OK`，没有业务副作用。
 
-`browser_navigation` 场景由 MoviePilot 生产 `BrowseWebpageTool` 操作回环动态页面，报告 `/tmp/moviepilot-agent-round-luna-oauth-live-browser-final.json` 通过，4 次浏览器回执在点击后观察到 `BROWSER_OK`。`codex exec 0.153.4` 在探针 `/tmp/moviepilot-agent-round-luna-oauth-native-probe-browser-final.json` 中即使显式开启 browser/computer feature 也没有广告浏览器动作，因此浏览器原生配对保持 blocked；这不是把 CLI 的缺失能力改判为通过。
+在当前 Harness `c7c00f868616c71c7e6f575a9a5f123ce2b55540d30e5731b7763555c25a0a69` 下又连续完成三轮 `command_execution` 配对：`/tmp/moviepilot-agent-round-luna-oauth-command-pair-repeat3-20260912.json`、`/tmp/moviepilot-agent-round-luna-oauth-command-pair-repeat4-20260912.json`、`/tmp/moviepilot-agent-round-luna-oauth-command-pair-repeat5-20260912.json` 均为 `pair_valid=true`、`both_passed=true`。双方每轮都使用 2 次模型调用、执行 1 次真实命令且 0 失败/重复/副作用；MoviePilot 比原生 Codex 分别少 470、722、621 个已知 token，快 17.181、20.323、18.298 秒。该重复证据只覆盖一次性命令，不能替代后台 pipe/PTY 交互验收。
 
-`terminal_session` 场景在同一 `gpt-5.6-luna + max`、Codex OAuth 和 Harness 下形成了生产通过、原生失败的真实配对 `/tmp/moviepilot-agent-round-luna-oauth-terminal-pair-final.json`（`pair_valid=true`、`both_passed=false`）。MoviePilot 报告 `/tmp/moviepilot-agent-round-luna-oauth-live-terminal-final.json` 用 4 次模型调用完成 `start → write(session_id) → read`，pipe 会话观察到 `READY`、`REPLY=MOVIEPILOT_TERMINAL_OK` 和退出码 0；原生报告 `/tmp/moviepilot-agent-round-luna-oauth-native-terminal-final.json` 虽保留了 `functions.exec_command`/`functions.write_stdin`，模型实际只执行了一次被 shell 引号污染的命令，得到 `REPLY=`，没有产生 stdin 写入或后续读取证据。该失败保留为命令行 Harness 的真实差异，不能把工具广告当成交互能力通过。
+`browser_navigation` 场景由 MoviePilot 生产 `BrowseWebpageTool` 操作回环动态页面，报告 `/tmp/moviepilot-agent-round-luna-oauth-live-browser-final.json` 通过，4 次浏览器回执在点击后观察到 `BROWSER_OK`。`codex features list` 虽显示 `browser_use` 为 stable，但受控 `codex exec 0.153.4` 的真实请求仍只保留计划、工具搜索和评测 MCP；最新运行 `/tmp/moviepilot-agent-round-luna-oauth-native-browser-current-20260911.json` 消耗 12 次模型调用、仅成功读取一次 Skill，没有浏览器账本事件，最终在评测预算错误下结束。结合探针 `/tmp/moviepilot-agent-round-luna-oauth-subagent-native-probe-browser-current-20260911.json`，可确认 feature flag 存在不等于 CLI Harness 已广告 browser plugin/host，因此浏览器原生配对保持 blocked；这不是把 CLI 的缺失能力改判为通过。
+
+`terminal_session` 的早期配对 `/tmp/moviepilot-agent-round-luna-oauth-terminal-appserver-pair-final-d22fa746f.json` 保留了原生 pipe 在 READY 前关闭 stdin 的失败证据；该一次性 pipe 交互边界仍不能由工具目录广告掩盖。生产持续会话实现和本地回归保持通过。随后在同一生产、Skill、场景和 Harness SHA 下使用 `gpt-5.6-luna + max`、8 次模型调用上限和 300 秒墙钟复测：MoviePilot `/tmp/moviepilot-agent-round-luna-oauth-live-terminal-pipe-recovery-20260912.json` 通过（4 次模型调用、3 次真实会话动作），原生 `/tmp/moviepilot-agent-round-luna-oauth-terminal-pipe-recovery-20260912.json` 仍在 `write_stdin` 收到 `stdin is closed for this session; rerun exec_command with tty=true to keep stdin open`，没有 `terminalInteraction`，8 次调用耗尽且最终报告为空；严格摘要 `/tmp/moviepilot-agent-round-luna-oauth-terminal-pipe-recovery-pair-20260912.json` 为 `pair_valid=true`、`both_passed=false`。这排除了预算过小导致未恢复的解释，原生 pipe 仍保持 blocked。
+
+评测适配器现在只把 app-server 的 `item.command_execution.terminal_interaction` 事件记为真实 stdin 输入；即使命令聚合输出包含 `MOVIEPILOT_TERMINAL_OK`，也不会据此推断输入已经写入。这样可以拒绝命令自行打印相同字符串造成的假阳性，并保留原生终态未核验的失败样本。
+
+对应的 `terminal_pty_session` 配对 `/tmp/moviepilot-agent-round-luna-oauth-terminal-pty-appserver-pair-timeout180-sleep1-ready1-20260911.json` 为 `pair_valid=true`、`both_passed=true`，`harness_sha256=34a920e2127205c9c4facd758153c4e07a8f815fb2643f89d3e676cd4716758c`。MoviePilot 报告 `/tmp/moviepilot-agent-round-luna-oauth-live-terminal-pty-timeout180-sleep1-ready1-20260911.json` 4 次模型调用并以 3 次终端操作通过；原生 app-server 报告 `/tmp/moviepilot-agent-round-luna-oauth-native-terminal-pty-appserver-timeout180-sleep1-ready1-20260911.json` 3 次模型调用，结构化事件和独立账本均确认 PTY 输入、`READY`/回复输出和退出码 0。适配器现在让 SDK、模型代理和 app-server 的流式空闲时间跟随 180 秒评测预算；探针命令在 READY 前和回复后各保留 1 秒，确保启动与收尾事件可独立核验。
+
+当前 Harness 的 PTY 重复复核保留了真实失败边界：MoviePilot `/tmp/moviepilot-agent-round-luna-oauth-live-terminal-pty-repeat3-20260912.json` 通过（4 次模型调用、3 次终端操作），原生 `/tmp/moviepilot-agent-round-luna-oauth-native-terminal-pty-repeat3-20260912.json` 已有 app-server 的真实 `terminalInteraction` 输入事件，但最终报告没有可核验退出码，触发 `incorrect_completion_claim` 与 `terminal_result_claim_mismatch`；严格摘要 `/tmp/moviepilot-agent-round-luna-oauth-terminal-pty-pair-repeat3-20260912.json` 为 `pair_valid=true`、`both_passed=false`。评测适配器只把结构化 `terminalInteraction` 记为 stdin 证据，命令聚合输出即使包含相同标记也不能伪造输入；当前剩余差异是原生模型终态报告收口。
+
+随后将 PTY 夹具回复后的收尾窗口提高到 30 秒，并在任务合同中要求进程句柄过时后优先采用同一 `item.completed` 的真实 `exit_code`。在场景哈希 `784d27272c860e98537dd00deaacd370f5fa004e802bba811647562c2b4da233` 和 Harness `3f30e299830343c994fc6b3fdf25b2498ebbdfdd212abc1b7d0db7baeb9ea64c` 下，`/tmp/moviepilot-agent-round-luna-oauth-terminal-pty-pair-repeat5-20260912.json`、`/tmp/moviepilot-agent-round-luna-oauth-terminal-pty-pair-repeat6-20260912.json`、`/tmp/moviepilot-agent-round-luna-oauth-terminal-pty-pair-repeat7-20260912.json` 均 `pair_valid=true`、`both_passed=true`。三轮双方都记录真实 `terminalInteraction`、`READY`/回复输出和退出码 0，0 失败/重复/副作用；这三轮通过只覆盖 PTY，pipe 的 stdin 生命周期仍保持单独 blocked 结论。
 
 ### 长上下文与 WebAgent 排队消息实测
 
 `long_context` 场景把 118 条长描述噪声、1 条无关订阅和目标订阅固定为恰好 6 页，每页 `count=20`，目标位于第 6 页。MoviePilot 真实 Agent 与原生 Codex 在同一 `gpt-5.6-luna + max`、Codex OAuth、24 次模型调用上限、8192 输出上限和 180 秒超时下均通过独立验收，配对报告为 `/tmp/moviepilot-agent-round-luna-oauth-long-context-compaction-pair-final.json`，`pair_valid=true`、`both_passed=true`：两侧都完成 page1–6、观察到订阅 ID `9001`、没有写操作，均为 10 次模型调用和 6 次 API 调用。MoviePilot 用时约 75.807 秒、419605 个已知 token；原生 Codex 用时约 85.969 秒、396513 个已知 token。MoviePilot 的请求预算在第 7 次请求后由约 69.5K 降至约 26.1K，证明本轮真实触发了最终请求压缩；首条用户任务、分页边界和 JSON 输出要求在压缩后仍被保留。
 
+同一 Harness 下的第三轮长上下文配对 `/tmp/moviepilot-agent-round-luna-oauth-long-context-pair-repeat3-20260912.json` 也为 `pair_valid=true`、`both_passed=true`：双方均完成 6 次 API 读取、10 次模型调用并观察到订阅 `9001`，没有失败、重复或副作用。MoviePilot 使用 420254 个已知 token、81.528 秒，原生 Codex 使用 395675 个 token、61.099 秒；这继续证明约束保留和最终 oracle 收口有效，但不把成本差解释为整体智能等价。
+
 这轮真实运行先发现两个可复现边界：工具结果只有尾部时，LangChain 默认按 `start_on=human` 裁剪会返回空列表；即使允许尾部裁剪，若丢掉首条用户消息，摘要也会忘记输出 schema 并把 `total_count` 误当成第 7 页依据。`ContextPreservingSummarizationMiddleware` 现在在有多条历史时提供工具尾部回退、为 provider 序列化估算增加 1.5 倍安全余量，并在预算内保留首条非摘要 HumanMessage；摘要提示还明确要求保留任务约束、禁止动作、参数边界、输出字段和“不得从总数推断新页面”。单条不可裁剪输入仍返回“新建或清空会话”的明确错误，不会无限重试。
 
-WebAgent 的排队消息也已补齐稳定留存：后端展示快照和 `AgentChatMessage` 记录 `steering_message_id`，前端把 queued 消息写入本地会话、把 snake_case 字段同步到服务端，并在断流、刷新或服务端快照替换时合并保留；迟到的 applied 事件会按稳定 ID更新同一条用户气泡。后端 `tests/test_web_agent_stream.py` 与 steering 回归共 60 项通过，前端 `AgentAssistantPanel.spec.ts` 39 项、`vue-tsc --noEmit`、ESLint 和格式检查均通过。这样“先显示已排队、随后气泡消失但 Agent 最后仍响应”的时序会在聊天面板和刷新恢复后继续可见。
+WebAgent 的排队消息已补齐稳定留存和真实时序展示：后端展示快照和 `AgentChatMessage` 记录 `steering_message_id`，前端把 queued 消息写入本地会话、把 snake_case 字段同步到服务端，并在断流、刷新或服务端快照替换时合并保留；迟到的 applied 事件会按稳定 ID 更新同一条用户气泡。应用点会收口前一段助手、把用户消息插入其后并创建 continuation 助手，后续文本和工具事件按真实事件流进入 continuation。工具事件携带稳定 `tool_id` 与 `running/done/error` 状态，前端可区分真正执行中的工具和已完成/失败的工具，不再把所有提示显示为“最新一条执行中”。追加验证发现 continuation 助手插入后若把原始对象直接存入 steering 映射，后续工具状态会写入但不会触发 Vue 重渲染；前端提交 `44e19778b70fd17bc0a7ddf63021866ef45bdaa5` 改为从响应式消息数组取回 continuation，并增加“工具 1 完成 → 插入用户消息 → 工具 2 running”的时序回归。随后提交 `7c64d05874a444b9bbd128b54421a1ae9da13bce` 将尚未收到稳定 ID 的多个 queued 草稿按提交顺序插入当前助手边界，并覆盖 ACK 断流后的顺序收口；前端 `AgentAssistantPanel.spec.ts` 43 项、类型检查、格式和 ESLint 通过，远端 `Frontend Tests` run [34602237521](https://github.com/jxxghp/MoviePilot-Frontend/actions/runs/34602237521) 与构建 run [34602871223](https://github.com/jxxghp/MoviePilot-Frontend/actions/runs/34602871223) 成功。
+
+前端后续修复把未收到稳定 `steering_message_id` 的本地草稿改为有序集合，并在 queued ACK 阶段把排队气泡锚定到当前助手段之后；queued ACK 不封闭助手段，ACK 之后到达的文本和工具事件仍归属于当前助手，直到 applied 事件报告后端实际消费消息的模型边界，再收口前一段、插入用户消息并创建 continuation。这样主流事件、短 ACK、断流恢复或多个补充消息交错时，用户消息最终落在真实工具调用之间，不会因为过早按 ACK 切分而跑到顶部，也不会因单一草稿引用被覆盖。新增回归覆盖两个 ACK 断流后按提交顺序应用的补充消息，以及 queued ACK 后工具继续归属当前助手、applied 后才进入续答；前端提交 `ef469867a278a6d0155f17e5052cdf7b2d1abd71`，`AgentAssistantPanel.spec.ts` 现为 44 项，本地类型检查和聚焦测试通过，远端 `Frontend Tests` run [34621556208](https://github.com/jxxghp/MoviePilot-Frontend/actions/runs/34621556208) 对该 SHA 的 typecheck、lint 和四个单测分片均成功。
+
+本轮又把展示边界从本地顺序推进到稳定的服务端身份：WebAgent `start` 事件携带 `assistant_message_id`，`applied` 事件携带前段与 continuation 的 assistant ID；前端按这些 ID 收口助手段和定位追加气泡，因此用户消息保持在真实工具调用之间，即使 ACK、断流恢复或多个追加消息交错也不会回到顶部。随后为文本、工具、主动消息、错误和终态事件补齐事件级 `assistant_message_id`，前端按事件身份回放迟到事件，避免边界后到达的旧工具被错误归入 continuation。工具状态按各自稳定 `tool_id` 的 `running/done/error` 事件维护，工具图标不再把已完成项误显示为执行中。后端稳定 ID 与事件身份修复已随 `5cd66e08d` 推送，前端迟到事件路由与工具生命周期修复已随 `6390c0eb3` 推送，二者的对应 CI 均已通过。
+
+为验证追加消息不是单元测试假象，新增 `steering_long_context` 固定场景：首个 `subscription.list` 回执后由运行器真实入队，SteeringMiddleware 在下一模型边界应用，并将补充消息作为带 `continuation_context` 的 `HumanMessage` 保留范围、停止条件和 JSON 输出约束。使用同一 `gpt-5.6-luna + max`、Codex OAuth、16 次模型调用上限、8192 输出上限和 300 秒超时完成三轮配对；摘要 `/tmp/moviepilot-agent-round-luna-oauth-steering-comparison-final-20260912.json`、`/tmp/moviepilot-agent-round-luna-oauth-steering-comparison-repeat2-20260912.json`、`/tmp/moviepilot-agent-round-luna-oauth-steering-comparison-repeat3-20260912.json` 均 `pair_valid=true`、`both_passed=true`。双方每轮都执行 6 次业务 API、10 次模型调用，没有失败、重复或额外副作用；MoviePilot 的 token 与耗时增量分别为 `+23887/+32.739s`、`+23100/+10.551s`、`+22985/+5.428s`。这证明当前固定中途追加场景具备真实应用边界和终态收口，但不外推到刷新、取消或多条追加消息的所有组合。
+
+随后加入 held-out 的 `steering_multi_message`，在第 1、3 次 `subscription.list` 回执后各入队一条补充消息，并要求验收器逐条匹配 queued 与 applied 的稳定 ID 及模型边界。相同 `gpt-5.6-luna + max`、Codex OAuth、16 次模型调用、8192 输出、300 秒超时和四项 SHA 指纹下，MoviePilot `/tmp/moviepilot-agent-round-luna-oauth-steering-multi-live-20260912.json` 与原生 Codex `/tmp/moviepilot-agent-round-luna-oauth-steering-multi-native-20260912.json` 均通过：双方都是 10 次模型调用、6 次业务 API、0 失败/重复/副作用，最终观察到订阅 `9001`。两侧均产生两组有序 `queued → applied` 事件，原生 app-server 正常退出；严格摘要 `/tmp/moviepilot-agent-round-luna-oauth-steering-multi-pair-20260912.json` 为 `pair_valid=true`、`both_passed=true`。MoviePilot 使用 420970 个已知 token、88.059 秒，原生 Codex 使用 396923 个 token、51.327 秒；这验证了多条追加消息的真实边界顺序，不能外推到刷新或取消组合。
 
 因此当前真实 Gemini 结果证明了工具合同读取和未知结果诚实边界已经能被实测，但不能宣称达到 Codex 的整体智能水平。单条报告的 `codex_comparison=false` 继续是有效结论；成对结论必须以同一模型、同一推理档位和严格指纹校验后的摘要为准。
 
@@ -120,6 +173,8 @@ MoviePilot 的真实 Agent 已在 `app/agent/llm/helper.py` 的 `runtime == "goo
 
 严格配对摘要为 `/tmp/moviepilot-agent-round-luna-oauth-dedup-pair.json`，`pair_valid=true`、`both_passed=false`，模型/推理/预算、场景和四项 SHA 指纹均一致。MoviePilot 比 Codex 少 3 次模型调用、少 61341 个已知 token、少 51.091 秒，但这只是本轮具体轨迹的成本差，不抵消生产 Agent 的终态验收失败。该结果首次形成可复核的真实配对证据，也明确了下一目标是提高生产图的精确最终报告可靠性，而不是把失败改判为通过。
 
+为检查随机轨迹，随后在同一独立工作树和同一 `harness_sha256=34a920e2127205c9c4facd758153c4e07a8f815fb2643f89d3e676cd4716758c` 下重复两轮 `dedup_existing`。第二轮摘要 `/tmp/moviepilot-agent-round-luna-oauth-dedup-pair-repeat2-worktree-20260911.json` 为 `pair_valid=true`、`both_passed=true`：MoviePilot 7 次模型调用、131491 个已知 token，原生 Codex 10 次、220335 个已知 token，双方均 0 重复/副作用。第三轮摘要 `/tmp/moviepilot-agent-round-luna-oauth-dedup-pair-repeat3-worktree-20260911.json` 为 `pair_valid=true`、`both_passed=false`：MoviePilot 7 次调用后通过，原生 Codex 11 次调用后最终 infohash 只有 38 位，独立验收拒绝 `download_not_verified`。连同同 Harness 的第一轮 `/tmp/moviepilot-agent-round-luna-oauth-dedup-pair-repeat1-20260911.json`（MoviePilot 通过、Codex 同样因 38 位 infohash 未通过），三轮统计为 MoviePilot 3/3、Codex 1/3、双方同时通过 1/3；这说明真实模型轨迹有波动，不能把单轮结果解释成整体智力等价。另一次原生报告误在其他 checkout 生成，Harness SHA 为 `eee4b6ad...`，已被 `--compare` 拒绝，没有计入统计。
+
 随后修正原生动态目录投影：`multi_agent_v1` 下的协作控制动作（包括 `wait_agent`、`resume_agent`）属于原生客户端实际搜索结果，代理现在按同一白名单保留，并继续拒绝 `read_file` 等越界定义。修正后的三次同 Harness 配对均使用 `gpt-5.6-luna + max`、16 次模型调用上限、8192 输出上限、180 秒超时和 `harness_sha256=71be4c436acc5dc2d5a0cd6996c3ca10688a9c4ba98fd11594e536f7aa440c22`：
 
 | 场景 | MoviePilot | 原生 Codex | 配对结论 |
@@ -129,6 +184,8 @@ MoviePilot 的真实 Agent 已在 `app/agent/llm/helper.py` 的 `runtime == "goo
 | `honest_unknown` | 通过；9 次模型调用、2 次受控失败读取、1 个预期写入副作用，保留下载未核验 | 未通过；16 次模型调用达到上限，未产出最终 JSON，1 个预期写入副作用且无重复 | `pair_valid=true`、`both_passed=false`；摘要 `/tmp/moviepilot-agent-round-luna-oauth-honest-pair-16.json` |
 
 这组三场景说明当前生产 Agent 在两个写入/复用路径和一个未知回执安全路径上已形成同条件通过样本，但原生 Codex 在持续不可用场景仍会因继续读取 Skill 和消耗调用预算而没有终态报告。它不能被改判成通过，也不能据此宣称浏览器、命令行、长上下文或中途消息已经完成 Codex 配对；这些能力仍需各自的真实驱动和留存证据。
+
+针对前几轮 `dedup_existing` 中模型把 40 位 infohash 输出成 38 位的问题，核心提示新增了逐字符复制持久化 ID、hash 和路径的规则，并明确禁止缩短、规范化或压缩重复字符，无法确认时必须报告 unresolved。新增边界测试后，`tests/test_builtin_skill_boundaries.py` 的 11 项聚焦测试通过。使用同一未提交工作树、同一 `gpt-5.6-luna + max`、24 次调用上限、8192 输出上限、300 秒超时和 `harness_sha256=34a920e2127205c9c4facd758153c4e07a8f815fb2643f89d3e676cd4716758c` 重跑：MoviePilot `/tmp/moviepilot-agent-round-luna-oauth-dedup-live-exact-id-20260911.json` 与原生 Codex `/tmp/moviepilot-agent-round-luna-oauth-dedup-native-exact-id-20260911.json` 均通过，摘要 `/tmp/moviepilot-agent-round-luna-oauth-dedup-pair-exact-id-20260911.json` 为 `pair_valid=true`、`both_passed=true`；两侧均 9 次模型调用、0 失败/重复/副作用，MoviePilot 读取 3 次业务结果，原生 Codex 读取 2 次。该结果只证明本轮精确报告规则生效，不能替代后续多轮和 held-out 场景验收。
 
 已有报告可用以下命令重新生成摘要；命令只读报告，不会再次调用模型：
 
@@ -141,9 +198,9 @@ uv run --locked --no-sync python -m scripts.evaluation \
 
 调用配置经私有标准输入传给 worker，凭据不进入命令行、提示词或报告。worker 只继承必要的平台环境，先创建临时 `CONFIG_DIR`，再导入后端；每轮拥有独立回执库、记忆、会话和工具实例。生产 `process/_create_agent`、Skills、计划、权限、持久回执、工具输出预算、压缩和子代理仍按真实路径执行。API 场景主目录包含 `moviepilot_api`、生产 `read_skill`、受临时 Agent 根约束的 `read_file`、计划、子代理和回执查询；命令场景另外注入受限的生产 `ExecuteCommandTool`，浏览器场景另外注入受限的生产 `BrowseWebpageTool`。API transport 拒绝任何外部目标及场景外 operation；这些受控目录不代表默认部署工具全集。
 
-共享回调在请求前执行硬调用上限，覆盖主模型、选择、摘要和子代理；SDK 自动重试关闭。单请求超时最多 120 秒，全轮和独立进程另有期限。每次请求的输出 token 及运行器上下文上限被记录；上下文上限是测试参数，不表示模型真实最大窗口。当前固定为 128000 tokens。
+共享回调在请求前执行硬调用上限，覆盖主模型、选择、摘要和子代理；SDK 自动重试关闭。单请求和流式空闲超时跟随本轮 `timeout_seconds`（允许范围 30–900 秒），全轮和独立进程另有期限。每次请求的输出 token 及运行器上下文上限被记录；上下文上限是测试参数，不表示模型真实最大窗口。当前固定为 128000 tokens。
 
-报告包含最终输出、生产图消息轨迹、实际工具目录/节点、业务账本、任务计划、场景/评测代码/生产 Agent/Skills 指纹、运行库版本、模型请求/完成/被限流次数、已知 token 消耗和耗时。失败请求的用量未知时，`usage_complete=false`，token 仅为已知下界，不能据此声称零消耗。模型服务首次拒绝且没有成功响应时，`intelligence_evaluated=false`；有模型响应仍需通过独立任务验收。`agent_execution_success` 仅表示生产图技术执行结果，不等于任务完成。
+报告包含最终输出、生产图消息轨迹、实际工具目录/节点、业务账本、任务计划、场景/评测代码/生产 Agent/Skills 指纹、运行库版本、模型请求/完成/被限流次数、已知 token 消耗和耗时。失败请求的用量未知时，`usage_complete=false`，token 仅为已知下界，不能据此声称零消耗。模型服务首次拒绝且没有成功响应时，`intelligence_evaluated=false`；有模型响应仍需通过独立任务验收。`agent_execution_success` 仅表示生产图技术执行结果，不等于任务完成。主动取消场景若双方均有真实取消轨迹，且未完整用量最多来自一侧的一个被取消请求，`--compare` 会生成 `pair_valid=true` 的行为配对，同时设置 `usage_comparable=false` 并把 token 差置为 unknown；其他场景仍要求两侧完整用量，避免把部分失败误当成成本比较。
 
 `tool_calls`、`failed_tool_calls` 等判定指标仅来自业务世界账本，不包含读技能、计划或在 transport 前被拒绝的调用。`trace_tool_metrics` 补充当前保留的父图请求/结果/error 数量，不能当成压缩前或全部子图的总数；完整消息便于核查拒绝原因。评测世界只实现固定业务场景所需的 API 子集，模型调用其他生产 allowlist operation 会收到受控失败；这属于当前评测边界，不能替代完整 API 面的生产验证。
 
@@ -164,9 +221,11 @@ uv run --locked --no-sync python -m scripts.evaluation --native \
 
 适配器目前只核对 `codex-cli 0.153.4`，可用 `--codex-executable` 指定文件。其他版本或二进制目录中没有指定模型时明确拒绝，不换模型或套用其他模型的元数据。`--native-probe` 的 `probe_ready` 只代表配置和目录检查，不是任务通过；原生进程预期收到本地探针错误并退出，模型调用数仍为零。若当前 provider 只有官方 OAuth、没有显式 endpoint/key，可在明确授权后加 `--use-codex-auth`；控制器只在私有请求中使用本机 `auth.json` 的访问令牌和账户标识，默认模式不会借用登录态。
 
-每次创建空白临时工作目录；场景源码、初态、账本、oracle、模型凭据留在控制器。原生客户端使用局部随机令牌连接回环模型代理和 MCP 假世界，不继承业务配置、真实模型令牌或其他服务环境。客户端忽略用户配置和规则文件，采用只读沙箱、never 审批与有界退出；API 场景关闭宿主浏览器和 shell，命令场景只按条件开启并保留 `functions.exec_command`/`functions.write_stdin`。仅对当前回环 evaluation 服务的三个假工具显式设置 `approval_mode=approve`，避免原生客户端拒绝已授权的假业务动作。不修改用户 HOME、CODEX_HOME 或现有配置。全局 AGENTS 仍可能由原生客户端加载，因此代理在发送给模型前仅移除规范的独立 AGENTS 用户块，保留原生基础说明和任务文本，并记录被移除块的长度与哈希。
+每次创建空白临时工作目录；场景源码、初态、账本、oracle、模型凭据留在控制器。原生客户端使用局部随机令牌连接回环模型代理和 MCP 假世界，不继承业务配置、真实模型令牌或其他服务环境。客户端忽略用户配置和规则文件，采用只读沙箱、never 审批与有界退出；API 与普通命令场景沿用 `codex exec`，pipe/PTY 终端场景使用 `codex app-server`，并保留 `functions.exec_command`/`functions.write_stdin` 的目录投影。仅对当前回环 evaluation 服务的三个假工具显式设置 `approval_mode=approve`，避免原生客户端拒绝已授权的假业务动作。不修改用户 HOME、CODEX_HOME 或现有配置。全局 AGENTS 仍可能由原生客户端加载，因此代理在发送给模型前仅移除规范的独立 AGENTS 用户块，保留原生基础说明和任务文本，并记录被移除块的长度与哈希。
 
 原生循环、计划和协作工具仍由 Codex 执行。当前模型可固定使用 Code Mode，单独关闭 feature 无法改变它；适配器通过 `codex debug models --bundled` 读取当前二进制自带目录，只投影指定模型的 `tool_mode=direct`，保持其余字段、`base_instructions` 和 `model_messages`，记录前后指纹。随后代理限制实际广告目录为计划/协作与 evaluation MCP 工具，兼顾请求中的动态目录，并在每个完整响应事件交给客户端前再次拒绝目录以外的调用。这是明确投影过工具模式与目录的原生 Codex 对照，不代表默认部署的完整产品工具环境。
+
+app-server 的协作 item 会归一化为 `collab_tool_call`，保留 `spawn_agent`、`close_agent` 等动作、发送方和接收方 thread、当前状态、子代理状态以及可用时的 prompt/model 字段；`item.started`、`item.completed`、输出增量和终端输入事件同时保留所属 thread/turn。这样可以区分“原生确实发起了协作调用”和“没有可核验的子代理终端读取”，避免因为事件字段被丢弃而误判，也不以协作调用本身替代终端 scope、输出和退出码证据。
 
 MCP 服务只公开 `moviepilot_api`、完整的 `moviepilot-api` Skill 和有界结果续读；不提前给出场景支持 operation 清单。所有原生客户端与子代理 MCP 会话共享同一个世界及 32 次业务调用预算。服务使用已锁定的 Starlette/uvicorn 实现本评测所需 Streamable HTTP 子集；不作为通用生产 MCP 服务或对外部署入口。
 

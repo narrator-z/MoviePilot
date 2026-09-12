@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
+import urllib.request
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ import pytest
 from scripts.evaluation import codex
 from scripts.evaluation.models import ModelSettings
 from scripts.evaluation.proxy import NATIVE_SHELL_TOOLS, project_tools
+from scripts.evaluation.score import _delegation_task_count
 from scripts.evaluation.world import EvaluationWorld
 
 
@@ -59,6 +61,59 @@ def test_invalid_jsonl_preserves_valid_events_without_claiming_completion() -> N
     assert "private-broken-event" not in json.dumps(events)
 
 
+def test_normalize_app_server_preserves_collaboration_scope_and_action() -> None:
+    """原生协作事件要保留动作、线程和授权提示，便于独立验收子代理行为。"""
+    item = codex._normalize_app_server_item({
+        "type": "collabAgentToolCall", "id": "collab-1", "tool": "spawnAgent",
+        "status": "inProgress", "prompt": '{"terminal_sessions":[{"session_id":"123","actions":["read"]}]}',
+        "model": "gpt-test", "reasoningEffort": "high", "senderThreadId": "parent",
+        "receiverThreadIds": ["child"], "agentsStates": {
+            "child": {"status": "running", "message": "读取父终端"},
+        },
+    })
+    assert item == {
+        "type": "collab_tool_call", "id": "collab-1", "tool": "spawn_agent", "status": "inProgress",
+        "prompt": '{"terminal_sessions":[{"session_id":"123","actions":["read"]}]}',
+        "model": "gpt-test", "reasoning_effort": "high", "sender_thread_id": "parent",
+        "receiver_thread_ids": ["child"], "agents_states": {
+            "child": {"status": "running", "message": "读取父终端"},
+        },
+    }
+    event = codex._normalize_app_server_notification(
+        "item/started", {"threadId": "parent", "turnId": "turn-1", "item": {
+            "type": "collabAgentToolCall", "id": "collab-1", "tool": "spawnAgent",
+            "status": "inProgress", "agentsStates": {}, "receiverThreadIds": [], "senderThreadId": "parent",
+        }},
+    )
+    assert event == {
+        "type": "item.started", "thread_id": "parent", "turn_id": "turn-1", "item": {
+            "type": "collab_tool_call", "id": "collab-1", "tool": "spawn_agent", "status": "inProgress",
+            "prompt": None, "model": None, "reasoning_effort": None, "sender_thread_id": "parent",
+            "receiver_thread_ids": [], "agents_states": {},
+        },
+    }
+    assert _delegation_task_count([event]) == 1
+
+
+def test_append_thread_history_events_preserves_child_scope() -> None:
+    """thread/read 的历史命令应保留子代理线程和轮次身份。"""
+    events: list[dict[str, Any]] = []
+    codex._append_thread_history_events(events, {
+        "id": "child", "turns": [{"id": "turn-child", "items": [{
+            "type": "commandExecution", "id": "command-child", "command": "printf READY",
+            "status": "completed", "aggregatedOutput": "READY\\n", "exitCode": 0,
+        }]}],
+    })
+    assert events == [{
+        "type": "item.completed", "thread_id": "child", "turn_id": "turn-child",
+        "item": {
+            "type": "command_execution", "id": "command-child", "command": "printf READY",
+            "cwd": None, "process_id": None, "status": "completed", "aggregated_output": "READY\\n",
+            "exit_code": 0, "command_actions": None,
+        }, "thread_history": True,
+    }]
+
+
 @pytest.mark.asyncio
 async def test_execute_sends_exact_prompt_and_preserves_nonzero_exit_output(tmp_path: Path) -> None:
     """真实假程序从 stdin 接收公开输入，非零退出与两路输出不得被丢弃。"""
@@ -68,6 +123,194 @@ async def test_execute_sends_exact_prompt_and_preserves_nonzero_exit_output(tmp_
     assert result["error_type"] is None
     assert result["stdout"].strip() == "公开任务：保持原样 $HOME `echo no`"
     assert "stderr-marker" in result["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_execute_app_server_preserves_streamed_terminal_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """app-server 的终端增量和同一进程输入事件应归一化为可评分的原生轨迹。"""
+    async def hold_stderr_reader(stream: asyncio.StreamReader, result: bytearray) -> None:
+        """让测试覆盖正常收尾时主动取消 stderr 读取任务的路径。"""
+        del stream, result
+        await asyncio.Future()
+
+    monkeypatch.setattr(codex, "_read_output", hold_stderr_reader)
+    command = _program(tmp_path, """
+import json
+import sys
+
+def emit(value):
+    print(json.dumps(value), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+    elif method == 'thread/start':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {'thread': {'id': 'thread-1'}}})
+    elif method == 'turn/start':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+        emit({'jsonrpc': '2.0', 'method': 'turn/started', 'params': {'threadId': 'thread-1', 'turn': {'id': 'turn-1'}}})
+        item = {
+            'type': 'commandExecution', 'id': 'command-1', 'command': 'printf READY',
+            'processId': 'process-1', 'status': 'inProgress',
+        }
+        emit({'jsonrpc': '2.0', 'method': 'item/started', 'params': {'item': item}})
+        emit({'jsonrpc': '2.0', 'method': 'item/commandExecution/outputDelta',
+              'params': {'itemId': 'command-1', 'processId': 'process-1', 'delta': 'READY\\n'}})
+        emit({'jsonrpc': '2.0', 'method': 'item/commandExecution/terminalInteraction',
+              'params': {'itemId': 'command-1', 'processId': 'process-1', 'stdin': 'MOVIEPILOT_TERMINAL_OK\\n'}})
+        item.update(status='completed', aggregatedOutput=None, exitCode=0)
+        emit({'jsonrpc': '2.0', 'method': 'item/completed', 'params': {'item': item}})
+        final = {'status': 'completed', 'terminal_output': 'READY\\nMOVIEPILOT_TERMINAL_OK',
+                 'terminal_exit_code': 0, 'completed': ['terminal'], 'unresolved': [],
+                 'subscription_ids': [], 'download_ids': [], 'enabled_site_ids': []}
+        emit({'jsonrpc': '2.0', 'method': 'item/completed', 'params': {
+            'item': {'type': 'agentMessage', 'id': 'message-1', 'phase': 'final_answer',
+                     'text': json.dumps(final)}}})
+        emit({'jsonrpc': '2.0', 'method': 'turn/completed', 'params': {'threadId': 'thread-1'}})
+""")
+    result = await codex._execute_app_server(
+        command, "公开终端任务", codex._worker_environment(), tmp_path, 5,
+        model="gpt-test", reasoning_effort="high",
+    )
+
+    assert result["returncode"] == 0
+    assert result["error_type"] is None
+    events, final_text, completed = codex._events(result["stdout"])
+    assert completed is True
+    assert json.loads(final_text)["terminal_exit_code"] == 0
+    assert any(event["type"] == "item.command_execution.terminal_interaction" for event in events)
+
+    world = EvaluationWorld("terminal_session")
+    codex._record_native_command_events(world, events)
+    assert world.ledger[0]["observations"][0]["record"]["terminal_input_observed"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_app_server_steers_after_business_tool_boundary(tmp_path: Path) -> None:
+    """中途追加必须在业务工具完成后携带当前轮次 ID 注入，并保留排队到应用的顺序。"""
+    command = _program(tmp_path, """
+import json
+import sys
+
+def emit(value):
+    print(json.dumps(value), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+    elif method == 'thread/start':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {'thread': {'id': 'thread-1'}}})
+    elif method == 'turn/start':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+        emit({'jsonrpc': '2.0', 'method': 'turn/started',
+              'params': {'threadId': 'thread-1', 'turn': {'id': 'turn-1'}}})
+        emit({'jsonrpc': '2.0', 'method': 'item/completed', 'params': {'item': {
+            'type': 'mcpToolCall', 'id': 'call-1', 'server': 'evaluation',
+            'tool': 'moviepilot_api', 'status': 'completed', 'arguments': {}, 'result': {},
+        }}})
+    elif method == 'turn/steer':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+        emit({'jsonrpc': '2.0', 'method': 'item/completed', 'params': {'item': {
+            'type': 'userMessage', 'id': 'steering-1', 'text': request['params']['input'][0]['text'],
+        }}})
+        emit({'jsonrpc': '2.0', 'method': 'turn/completed',
+              'params': {'threadId': 'thread-1', 'turn': {'id': 'turn-1'}}})
+""")
+    result = await codex._execute_app_server(
+        command, "公开任务", codex._worker_environment(), tmp_path, 5,
+        model="gpt-test", reasoning_effort="high", steering_message="补充要求",
+    )
+
+    assert result["returncode"] == 0
+    assert result["error_type"] is None
+    events, _final_text, completed = codex._events(result["stdout"])
+    assert completed is True
+    queued_index = next(i for i, event in enumerate(events)
+                         if event["type"] == "evaluation.steering.queued")
+    applied_index = next(i for i, event in enumerate(events)
+                         if event["type"] == "evaluation.steering.applied")
+    user_index = next(i for i, event in enumerate(events)
+                      if event.get("type") == "item.completed"
+                      and event.get("item", {}).get("type") == "user_message")
+    assert queued_index < applied_index < user_index
+    assert events[queued_index]["message_id"] == codex.NATIVE_STEERING_MESSAGE_ID
+    assert events[applied_index]["message_id"] == codex.NATIVE_STEERING_MESSAGE_ID
+
+
+@pytest.mark.asyncio
+async def test_execute_app_server_preserves_multiple_steering_boundaries(tmp_path: Path) -> None:
+    """原生 app-server 的多条 steering 应按业务回执次数逐条排队和应用。"""
+    command = _program(tmp_path, """
+import json
+import sys
+
+def emit(value):
+    print(json.dumps(value), flush=True)
+
+steer_count = 0
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+    elif method == 'thread/start':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {'thread': {'id': 'thread-1'}}})
+    elif method == 'turn/start':
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+        emit({'jsonrpc': '2.0', 'method': 'turn/started',
+              'params': {'threadId': 'thread-1', 'turn': {'id': 'turn-1'}}})
+        emit({'jsonrpc': '2.0', 'method': 'item/completed', 'params': {'item': {
+            'type': 'mcpToolCall', 'id': 'call-1', 'server': 'evaluation',
+            'tool': 'moviepilot_api', 'status': 'completed', 'arguments': {}, 'result': {},
+        }}})
+    elif method == 'turn/steer':
+        steer_count += 1
+        emit({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
+        emit({'jsonrpc': '2.0', 'method': 'item/completed', 'params': {'item': {
+            'type': 'userMessage', 'id': 'steering-%d' % steer_count,
+            'text': request['params']['input'][0]['text'],
+        }}})
+        if steer_count == 1:
+            for call_id in ('call-2', 'call-3'):
+                emit({'jsonrpc': '2.0', 'method': 'item/completed', 'params': {'item': {
+                    'type': 'mcpToolCall', 'id': call_id, 'server': 'evaluation',
+                    'tool': 'moviepilot_api', 'status': 'completed', 'arguments': {}, 'result': {},
+                }}})
+        else:
+            emit({'jsonrpc': '2.0', 'method': 'turn/completed',
+                  'params': {'threadId': 'thread-1', 'turn': {'id': 'turn-1'}}})
+""")
+    result = await codex._execute_app_server(
+        command,
+        "公开任务",
+        codex._worker_environment(),
+        tmp_path,
+        5,
+        model="gpt-test",
+        reasoning_effort="high",
+        steering_plan=((1, "第一条"), (3, "第二条")),
+    )
+
+    assert result["returncode"] == 0
+    assert result["error_type"] is None
+    events, _final_text, completed = codex._events(result["stdout"])
+    assert completed is True
+    assert [event["message_id"] for event in events if event.get("type") == "evaluation.steering.queued"] == [
+        "moviepilot-evaluation-steering-1", "moviepilot-evaluation-steering-2",
+    ]
+    assert [event["message_id"] for event in events if event.get("type") == "evaluation.steering.applied"] == [
+        "moviepilot-evaluation-steering-1", "moviepilot-evaluation-steering-2",
+    ]
+    assert [
+        event["item"]["text"] for event in events
+        if event.get("type") == "item.completed" and event.get("item", {}).get("type") == "user_message"
+    ] == ["第一条", "第二条"]
 
 
 @pytest.mark.asyncio
@@ -186,6 +429,66 @@ def test_catalog_projection_changes_only_selected_tool_mode_and_is_independent()
     assert metadata["original_model_sha256"] != metadata["projected_model_sha256"]
     projected["models"][0]["model_messages"]["instructions_template"] = "changed copy"
     assert original == before
+
+
+def test_native_app_server_stream_timeout_follows_evaluation_budget() -> None:
+    """原生 app-server 的流式空闲上限必须与真实评测墙钟预算一致。"""
+    settings = ModelSettings(
+        "gpt-test",
+        "https://provider.invalid/v1",
+        "private-provider-test-key",
+        timeout_seconds=180,
+    )
+    proxy = SimpleNamespace(endpoint="http://127.0.0.1:1/v1")
+    server = SimpleNamespace(endpoint="http://127.0.0.1:2/mcp")
+    configuration = codex._configuration(
+        settings,
+        proxy,
+        server,
+        Path("/tmp/moviepilot-evaluation-test"),
+        scenario_id="terminal_pty_session",
+    )
+    assert configuration["model_providers.evaluation"]["stream_idle_timeout_ms"] == 180_000
+
+
+def test_browser_runtime_expands_portable_skill_root_in_private_instruction_copy(tmp_path: Path,
+                                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    """独立 CLI 没有桌面插件上下文时，浏览器 Skill 的根路径仍必须可执行且不改写安装文件。"""
+    codex_home = tmp_path / "codex-home"
+    plugin_root = codex_home / ".tmp" / "bundled-marketplaces" / "openai-bundled" / "plugins" / "browser"
+    node_repl = tmp_path / "node" / "node_repl"
+    node_repl.parent.mkdir(parents=True)
+    node_repl.write_text("", encoding="utf-8")
+    (node_repl.parent / "node").write_text("", encoding="utf-8")
+    (node_repl.parent.parent / "lib" / "node_modules").mkdir(parents=True)
+    (plugin_root / "scripts").mkdir(parents=True)
+    (plugin_root / "scripts" / "browser-client.mjs").write_text("client", encoding="utf-8")
+    skill = plugin_root / "skills" / "control-in-app-browser" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("import('<plugin root>/scripts/browser-client.mjs')", encoding="utf-8")
+    service = codex_home / "plugins" / "cache" / "openai-bundled" / "browser" / "26.903.71938" / "scripts" / "browser-service.mjs"
+    service.parent.mkdir(parents=True)
+    service.write_text("service", encoding="utf-8")
+    instruction_dir = tmp_path / "control"
+    instruction_dir.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("MOVIEPILOT_EVAL_NODE_REPL", str(node_repl))
+    runtime = codex._browser_runtime_configuration("/bin/codex", instruction_dir)
+    assert runtime is not None
+    expanded = Path(runtime["skill"])
+    assert expanded != skill and expanded.is_file()
+    assert str(plugin_root) in expanded.read_text(encoding="utf-8")
+    assert "<plugin root>" not in expanded.read_text(encoding="utf-8")
+    assert runtime["node_repl"]["env"]["NODE_REPL_TRUSTED_SERVICES"]
+
+
+def test_native_browser_fixture_records_only_loopback_click_callback() -> None:
+    """原生浏览器插件绕过评测 MCP 时，回环页面回调仍能作为独立点击证据。"""
+    with codex._native_browser_fixture() as (url, state):
+        page = urllib.request.urlopen(url, timeout=2).read().decode("utf-8")
+        assert "BROWSER_OK" in page and state["clicked"] is False
+        urllib.request.urlopen(url.replace("/fixture", "/clicked"), timeout=2).read()
+        assert state["clicked"] is True
 
 
 @pytest.mark.parametrize("catalog", [{}, {"models": []}, {"models": [{"slug": "gpt-test"}, {"slug": "gpt-test"}]}])
@@ -365,9 +668,13 @@ def test_command_scenario_enables_only_native_shell_controls() -> None:
     api_config = codex._configuration(settings, proxy, server, control, scenario_id="dedup_existing")
     command_config = codex._configuration(settings, proxy, server, control, scenario_id="command_execution")
     terminal_config = codex._configuration(settings, proxy, server, control, scenario_id="terminal_session")
+    shared_terminal_config = codex._configuration(
+        settings, proxy, server, control, scenario_id="subagent_terminal_share",
+    )
     assert all(api_config[f"features.{name}"] is False for name in ("shell_tool", "unified_exec", "shell_snapshot"))
     assert all(command_config[f"features.{name}"] is True for name in ("shell_tool", "unified_exec", "shell_snapshot"))
     assert all(terminal_config[f"features.{name}"] is True for name in ("shell_tool", "unified_exec", "shell_snapshot"))
+    assert all(shared_terminal_config[f"features.{name}"] is True for name in ("shell_tool", "unified_exec", "shell_snapshot"))
     tools = [{"type": "namespace", "name": "functions", "tools": [
         {"type": "function", "name": "exec_command", "parameters": {}},
         {"type": "function", "name": "write_stdin", "parameters": {}},
@@ -376,8 +683,8 @@ def test_command_scenario_enables_only_native_shell_controls() -> None:
     assert retained == ["functions.exec_command", "functions.write_stdin"] and removed == []
 
 
-def test_native_terminal_event_preserves_aggregated_stdin_evidence() -> None:
-    """原生 command_execution 事件的聚合输出可证明 stdin 标记，但账本动作仍保持 start。"""
+def test_native_terminal_output_cannot_fake_stdin_evidence() -> None:
+    """原生 command_execution 聚合输出即使包含输入标记，也不能伪造 stdin 证据。"""
     world = EvaluationWorld("terminal_session")
     codex._record_native_command_events(world, [{"type": "item.completed", "item": {
         "id": "cmd-1", "type": "command_execution", "command": "/bin/zsh -lc " + shlex.quote(world.scenario.command),
@@ -385,4 +692,21 @@ def test_native_terminal_event_preserves_aggregated_stdin_evidence() -> None:
     }}])
     event = world.ledger[0]
     assert event["request"]["action"] == "start"
-    assert event["observations"][0]["record"]["terminal_input_observed"] is True
+    assert event["observations"][0]["record"]["terminal_input_observed"] is False
+
+
+def test_native_command_events_infer_subagent_scope_from_spawn_thread() -> None:
+    """子代理线程中的原生命令回执应进入独立 scope，不能冒充父任务操作。"""
+    world = EvaluationWorld("subagent_terminal_share")
+    command = world.scenario.command
+    events = [
+        {"type": "item.started", "thread_id": "parent", "item": {
+            "type": "collab_tool_call", "tool": "spawn_agent", "receiver_thread_ids": ["child"],
+        }},
+        {"type": "item.completed", "thread_id": "child", "item": {
+            "id": "child-command", "type": "command_execution", "command": command,
+            "aggregated_output": "SHARED_READY\n", "exit_code": 0,
+        }},
+    ]
+    codex._record_native_command_events(world, events)
+    assert world.ledger[0]["scope"] == {"kind": "subagent", "task_id": "child"}

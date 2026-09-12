@@ -187,7 +187,6 @@
   },
   "app/agent/middleware/subagents.py": {
     "arg-type": 2,
-    "assignment": 1,
     "attr-defined": 2,
     "misc": 7,
     "type-arg": 5,
@@ -522,8 +521,7 @@
     "misc": 26,
     "no-untyped-def": 2,
     "return-value": 2,
-    "type-arg": 6,
-    "var-annotated": 1
+    "type-arg": 6
   },
   "app/api/endpoints/storage.py": {
     "assignment": 1,
@@ -630,7 +628,7 @@
   },
   "app/application/formatting.py": {
     "arg-type": 4,
-    "assignment": 9,
+    "assignment": 4,
     "attr-defined": 1,
     "no-untyped-def": 7,
     "operator": 3,

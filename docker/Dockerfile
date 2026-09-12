@@ -93,6 +93,7 @@ RUN apt-get update \
     supervisor \
     postgresql-client-18 \
     libchromaprint-tools \
+    libevent-2.1-7t64 \
     libjemalloc2 \
     && dpkg-reconfigure --frontend noninteractive tzdata \
     && ln -s /usr/lib/*-linux-gnu/libjemalloc.so.2 /usr/local/lib/libjemalloc.so \
@@ -304,7 +305,15 @@ COPY --from=uv /uv /usr/local/bin/uv
 # 浏览器运行依赖
 RUN playwright install-deps chromium \
     && apt-get update \
-    && apt-get install -y --no-install-recommends libde265-0 \
+    && apt-get install -y --no-install-recommends \
+    gzip \
+    libde265-0 \
+    libpcre2-8-0 \
+    libsqlite3-0 \
+    nginx \
+    nginx-common \
+    xserver-common \
+    xvfb \
     && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf \

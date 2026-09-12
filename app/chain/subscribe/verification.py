@@ -6,12 +6,12 @@
 
 from typing import TYPE_CHECKING, Dict, Tuple, Union
 
+from app.application.subscription.contract import SubscriptionSnapshot
 from app.chain.download import DownloadChain
 from app.domain.context import MediaInfo
 from app.domain.meta.metabase import MetaBase
 from app.runtime.log import logger
 from app.schemas.mediaserver import NotExistMediaInfo as _SchemaNotExistMediaInfo
-from app.schemas.subscribe import Subscribe as _SchemaSubscribe
 from app.schemas.types import MediaType
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover
 NotExistMap = Dict[Union[str, int], Dict[int, _SchemaNotExistMediaInfo]]
 
 
-def resolve_effective_total_episode(subscribe: _SchemaSubscribe, mediainfo: MediaInfo) -> int:
+def resolve_effective_total_episode(subscribe: SubscriptionSnapshot, mediainfo: MediaInfo) -> int:
     """
     只读计算完成前有效总集数，不触发事件、不写回订阅。
 
@@ -41,7 +41,7 @@ def resolve_effective_total_episode(subscribe: _SchemaSubscribe, mediainfo: Medi
     return current_total
 
 
-def media_library_satisfies_subscription(subscribe: _SchemaSubscribe, mediainfo: MediaInfo) -> bool:
+def media_library_satisfies_subscription(subscribe: SubscriptionSnapshot, mediainfo: MediaInfo) -> bool:
     """
     force 完成前的保守守卫：二次核验媒体库实际返回的集号集合是否真正覆盖订阅预期。
 
@@ -94,7 +94,7 @@ def media_library_satisfies_subscription(subscribe: _SchemaSubscribe, mediainfo:
 
 def finish_or_continue_subscription(
     owner: "SubscribeQueryOwner",
-    subscribe: _SchemaSubscribe,
+    subscribe: SubscriptionSnapshot,
     meta: MetaBase,
     mediainfo: MediaInfo,
     no_exists: NotExistMap,

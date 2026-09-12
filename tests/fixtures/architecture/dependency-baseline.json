@@ -1077,8 +1077,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 8603,
-  "edge_sha256": "471b1dd0fee413c7860e5954e07e824bf8bcc5adbe5fd1885f70b927bf7ea0fa",
+  "edge_count": 8605,
+  "edge_sha256": "bc2d1c3fa4dba0e184e0837b55a151e3bea1a2e51545e914bebb5ec902ed7652",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -5138,6 +5138,9 @@
     "app.chain.subscribe.searchtask -> app.runtime",
     "app.chain.subscribe.searchtask -> app.runtime.log",
     "app.chain.subscribe.searchtask -> app.runtime.stop",
+    "app.chain.subscribe.verification -> app.application",
+    "app.chain.subscribe.verification -> app.application.subscription",
+    "app.chain.subscribe.verification -> app.application.subscription.contract",
     "app.chain.subscribe.verification -> app.chain",
     "app.chain.subscribe.verification -> app.chain.download",
     "app.chain.subscribe.verification -> app.domain",
@@ -5148,7 +5151,6 @@
     "app.chain.subscribe.verification -> app.runtime.log",
     "app.chain.subscribe.verification -> app.schemas",
     "app.chain.subscribe.verification -> app.schemas.mediaserver",
-    "app.chain.subscribe.verification -> app.schemas.subscribe",
     "app.chain.subscribe.verification -> app.schemas.types",
     "app.chain.system -> app.application",
     "app.chain.system -> app.application.configuration",

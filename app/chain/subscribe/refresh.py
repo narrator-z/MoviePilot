@@ -16,6 +16,7 @@ from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
 from app.chain.subscribe.identity import subscribe_recognize_kwargs
 from app.chain.subscribe.metadata import SubscribeMetadataOwner
+from app.chain.subscribe.verification import resolve_effective_total_episode
 from app.chain.tmdb import TmdbChain
 from app.chain.torrents import TorrentsChain
 from app.domain.context import (
@@ -405,24 +406,7 @@ class SubscribeRefreshOwner(SubscribeMetadataOwner):
 
     @staticmethod
     def _SubscribeChain__resolve_effective_total_episode(subscribe: SubscriptionSnapshot, mediainfo: MediaInfo) -> int:
-        """
-        只读计算完成前有效总集数，不触发事件、不写回订阅。
-
-        主流程会通过 ``__refresh_total_episode_before_completion`` 持久化增长后的总集数；
-        该查询接口只需要同样避免旧 total 造成误判，因此仅使用当前 mediainfo 中更大的
-        季集数作为临时目标范围。
-        """
-        current_total = subscribe.total_episode or 0
-        if subscribe.type != MediaType.TV.value:
-            return current_total
-        if subscribe.manual_total_episode:
-            return current_total
-        if subscribe.season is None:
-            return current_total
-        media_total = len((mediainfo.seasons or {}).get(subscribe.season) or [])
-        if media_total > current_total:
-            return media_total
-        return current_total
+        return resolve_effective_total_episode(subscribe, mediainfo)
 
     @staticmethod
     def _SubscribeChain__apply_episodes_refresh(

@@ -530,8 +530,8 @@ class ConfigModel(BaseModel):
     SUBSCRIBE_MODE: str = "spider"
     # RSS订阅模式刷新时间间隔（分钟）
     SUBSCRIBE_RSS_INTERVAL: int = 30
-    # 订阅数据共享
-    SUBSCRIBE_STATISTIC_SHARE: bool = True
+    # 订阅数据共享（fork：默认关闭数据上报）
+    SUBSCRIBE_STATISTIC_SHARE: bool = False
     # 订阅搜索开关
     SUBSCRIBE_SEARCH: bool = False
     # 订阅搜索时间间隔（小时）
@@ -658,8 +658,8 @@ class ConfigModel(BaseModel):
     SCRAP_FOLLOW_TMDB: bool = True
     # 优先使用辅助识别
     RECOGNIZE_PLUGIN_FIRST: bool = False
-    # 共享使用媒体识别数据
-    MEDIA_RECOGNIZE_SHARE: bool = True
+    # 共享使用媒体识别数据（fork：默认关闭识别数据上报）
+    MEDIA_RECOGNIZE_SHARE: bool = False
 
     # ==================== 服务地址配置 ====================
     # 服务器地址，对应 https://github.com/jxxghp/MoviePilot-Server 项目
@@ -682,10 +682,10 @@ class ConfigModel(BaseModel):
     PLUGIN_MARKET: str = (
         "https://github.com/narrator-z/MoviePilot-Plugins"
     )
-    # 插件安装数据共享
-    PLUGIN_STATISTIC_SHARE: bool = True
-    # 安装版本统计上报
-    USAGE_STATISTIC_SHARE: bool = True
+    # 插件安装数据共享（fork：默认关闭数据上报）
+    PLUGIN_STATISTIC_SHARE: bool = False
+    # 安装版本统计上报（fork：默认关闭数据上报）
+    USAGE_STATISTIC_SHARE: bool = False
     # 是否开启插件热加载
     PLUGIN_AUTO_RELOAD: bool = False
     # 临时放行的废弃标识，多个用,分隔；仅对已进入停用阶段的接口有效，用于观察真实依赖方
@@ -777,8 +777,8 @@ class ConfigModel(BaseModel):
     PASSKEY_REQUIRE_UV: bool = True
 
     # ==================== 工作流配置 ====================
-    # 工作流数据共享
-    WORKFLOW_STATISTIC_SHARE: bool = True
+    # 工作流数据共享（fork：默认关闭数据上报）
+    WORKFLOW_STATISTIC_SHARE: bool = False
 
     # ==================== 存储配置 ====================
     # 对rclone进行快照对比时，是否检查文件夹的修改时间

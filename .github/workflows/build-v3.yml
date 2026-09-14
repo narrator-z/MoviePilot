@@ -98,8 +98,8 @@ jobs:
       - name: Release version
         id: release_version
         run: |
-          app_version=$(cat version.py |sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp")
-          frontend_version=$(sed -ne "s/FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/gp" version.py)
+          app_version=$(cat version.py |sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp" | tr -d '\r')
+          frontend_version=$(sed -ne "s/FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/gp" version.py | tr -d '\r')
           echo "app_version=$app_version" >> $GITHUB_ENV
           echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
           echo "frontend_version=$frontend_version" >> "$GITHUB_OUTPUT"
@@ -242,8 +242,8 @@ jobs:
       - name: Release version
         id: release_version
         run: |
-          app_version=$(cat version.py |sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp")
-          frontend_version=$(sed -ne "s/FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/gp" version.py)
+          app_version=$(cat version.py |sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp" | tr -d '\r')
+          frontend_version=$(sed -ne "s/FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/gp" version.py | tr -d '\r')
           echo "app_version=$app_version" >> $GITHUB_ENV
           echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
           echo "frontend_version=$frontend_version" >> "$GITHUB_OUTPUT"

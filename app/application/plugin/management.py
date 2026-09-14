@@ -44,11 +44,17 @@ def refresh_plugin_registrations(plugin_id: str) -> None:
 
 
 def reload_plugin_runtime(plugin_id: str) -> PluginRuntimeStatus:
-    """重载插件实例并重新注册其命令、定时任务和 API。"""
+    """重载插件实例树并重新注册其命令、定时任务和 API。
+
+    分身与本体共用同一份源码，只重载本体会让分身继续持有旧模块与旧类对象，改完源码
+    点重载后新旧代码在同一进程内并存；分身的 API、调度与命令注册也不会刷新。文件监听
+    那条重载路径本来就是按实例树走的，手工重载必须与它一致。
+    """
     plugin_manager = get_plugin_manager()
     with plugin_manager.mutation(f"重载插件 {plugin_id}"):
-        runtime_status = plugin_manager.reload_plugin(plugin_id)
-        refresh_plugin_registrations(plugin_id)
+        runtime_status = plugin_manager.reload_plugin_tree(plugin_id)
+        for reload_target in plugin_manager.get_plugin_reload_targets(plugin_id):
+            refresh_plugin_registrations(reload_target)
         return runtime_status
 
 
@@ -339,7 +345,11 @@ async def uninstall_plugin_runtime(plugin_id: str) -> dict[str, Any]:
             plugin_manager.delete_plugin_config(plugin_id, force=True)
             plugin_manager.delete_plugin_data(plugin_id, force=True)
             plugin_manager.delete_plugin_instance(plugin_id)
-        elif was_clone:
+        else:
+            # 本体的装载判据在实例表的启用位上：不停用这一行，卸载后重启仍会
+            # 按已删除的包去加载它。业务参数保留，重装后用户的配置应当还在
+            plugin_manager.disable_plugin_host(plugin_id)
+        if not virtual_instance and was_clone:
             plugin_manager.delete_plugin_config(plugin_id, force=True)
             plugin_manager.delete_plugin_data(plugin_id, force=True)
             try:

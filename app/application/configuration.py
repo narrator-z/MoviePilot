@@ -183,6 +183,7 @@ class SchedulerRuntimeConfig:
     site_link: str | None
     auto_update: bool = False
     auto_update_resource: bool = True
+    wallpaper: str = ""
 
     @property
     def update_check_enabled(self) -> bool:
@@ -270,7 +271,7 @@ class ChainRuntimeConfig:
     television_rename_format: str = ""
     music_rename_format: str = ""
     tmdb_image_domain: str = "image.tmdb.org"
-    wallpaper: str = "bing"
+    wallpaper: str = ""
     wallpaper_image_url: Optional[str] = None
     customize_wallpaper_api_url: Optional[str] = None
     security_image_suffixes: tuple[str, ...] = ()

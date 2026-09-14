@@ -341,6 +341,7 @@ SCHEMA_EXPORTS = {
     'PerformanceSnapshot': ('app.schemas.monitoring', 'PerformanceSnapshot'),
     'Plugin': ('app.schemas.plugin', 'Plugin'),
     'PluginActionEventData': ('app.schemas.event', 'PluginActionEventData'),
+    'PluginCloneOutcome': ('app.schemas.plugin', 'PluginCloneOutcome'),
     'PluginCloneRequest': ('app.schemas.plugin', 'PluginCloneRequest'),
     'PluginDashboard': ('app.schemas.plugin', 'PluginDashboard'),
     'PluginDashboardMetaItem': ('app.schemas.plugin', 'PluginDashboardMetaItem'),
@@ -353,6 +354,12 @@ SCHEMA_EXPORTS = {
     'PluginFoldersData': ('app.schemas.plugin', 'PluginFoldersData'),
     'PluginInstallOutcome': ('app.schemas.plugin', 'PluginInstallOutcome'),
     'PluginInstance': ('app.schemas.plugin', 'PluginInstance'),
+    'PluginInstanceEnabledRequest': ('app.schemas.plugin', 'PluginInstanceEnabledRequest'),
+    'PluginInstanceLogLevel': ('app.schemas.plugin', 'PluginInstanceLogLevel'),
+    'PluginInstanceLogLevelOverview': ('app.schemas.plugin', 'PluginInstanceLogLevelOverview'),
+    'PluginInstanceLogLevelUpdateRequest': ('app.schemas.plugin', 'PluginInstanceLogLevelUpdateRequest'),
+    'PluginInstancePurgeOutcome': ('app.schemas.plugin', 'PluginInstancePurgeOutcome'),
+    'PluginInstancePurgeRequest': ('app.schemas.plugin', 'PluginInstancePurgeRequest'),
     'PluginMarketSyncData': ('app.schemas.system', 'PluginMarketSyncData'),
     'PluginMarketSyncRequest': ('app.schemas.system', 'PluginMarketSyncRequest'),
     'PluginMemoryInfo': ('app.schemas.plugin', 'PluginMemoryInfo'),
@@ -364,6 +371,7 @@ SCHEMA_EXPORTS = {
     'PluginReleaseItem': ('app.schemas.plugin', 'PluginReleaseItem'),
     'PluginReloadEventData': ('app.schemas.event', 'PluginReloadEventData'),
     'PluginRemoteInfo': ('app.schemas.plugin', 'PluginRemoteInfo'),
+    'PluginRestorableInstance': ('app.schemas.plugin', 'PluginRestorableInstance'),
     'PluginRuntimeActionCapability': ('app.schemas.plugin', 'PluginRuntimeActionCapability'),
     'PluginRuntimeActionGroup': ('app.schemas.plugin', 'PluginRuntimeActionGroup'),
     'PluginRuntimeCapabilities': ('app.schemas.plugin', 'PluginRuntimeCapabilities'),
@@ -567,6 +575,7 @@ SCHEMA_EXPORTS = {
     'json': ('app.schemas.subscribe', 'json'),
     'model_validator': ('app.schemas.transfer', 'model_validator'),
     're': ('app.schemas.file', 're'),
+    'validate_plugin_id': ('app.schemas.plugin', 'validate_plugin_id'),
 }
 
 SCHEMA_CONFLICTS = {

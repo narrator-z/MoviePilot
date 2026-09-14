@@ -20,6 +20,7 @@ from app.runtime.extensions.plugin.database import PluginDatabase
 from app.runtime.extensions.plugin.dependency import PluginDependencyService
 from app.runtime.extensions.plugin.lifecycle import PluginLifecycle
 from app.runtime.extensions.plugin.loader import PluginLoader
+from app.runtime.extensions.plugin.loglevel import PluginLogLevelControl
 from app.runtime.extensions.plugin.metadata import PluginMetadataMapper
 from app.runtime.extensions.plugin.monitor import PluginMonitorController
 from app.runtime.extensions.plugin.paths import PluginPathResolver
@@ -27,6 +28,7 @@ from app.runtime.extensions.plugin.projection import PluginProjection
 from app.runtime.extensions.plugin.registry import PluginRegistry
 from app.runtime.extensions.plugin.storage import (
     PluginConfigStore,
+    PluginInstanceDirectory,
     PluginInstanceStore,
     PluginStorage,
 )
@@ -35,6 +37,7 @@ from app.runtime.extensions.plugin.sync import (
     PluginSyncService,
 )
 from app.runtime.extensions.plugin.system import PluginSystemServices
+from app.runtime.extensions.plugin.target import PluginDefaultTargetControl
 from app.runtime.extensions.plugin.tools import PluginToolCatalog
 from app.schemas.types import SystemConfigKey
 
@@ -89,6 +92,7 @@ class PluginRuntimeEnvironment:
 
     plugins_root: Path
     storage: Callable[[], PluginStorage]
+    instance_directory: Callable[[], PluginInstanceDirectory]
     system: Callable[[], PluginSystemServices]
     database: Callable[[], PluginDatabase]
     catalog_factory: PluginCatalogFactory
@@ -98,6 +102,10 @@ class PluginRuntimeEnvironment:
     remote_entry: PluginRemoteEntryBuilder
     development: Callable[[], bool]
     logger: Any
+    # 默认调用目标的置位与清除必须在库层一个事务内清旧置新，因而由组合根直接给出
+    # 原子写入端口，不经过按实例逐行读写的实例表端口
+    set_default_target: Callable[[str, str], bool]
+    clear_default_target: Callable[[str], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +128,8 @@ class PluginRuntime:
     metadata: PluginMetadataMapper
     sync: PluginSyncService
     clone: PluginCloneService
+    log_level: PluginLogLevelControl
+    default_target: PluginDefaultTargetControl
     projection: PluginProjection
     classification: PluginClassificationRegistry
     recent_local_sync: dict[str, float]
@@ -134,7 +144,10 @@ def build_plugin_runtime(
 ) -> PluginRuntime:
     """按依赖顺序构造唯一插件运行时，各业务能力仍由对应 owner 实现。"""
     registry = PluginRegistry()
-    instances = PluginInstanceStore(storage=environment.storage)
+    instances = PluginInstanceStore(
+        storage=environment.storage,
+        directory=environment.instance_directory,
+    )
     configs = PluginConfigStore(
         storage=environment.storage,
         database=environment.database,
@@ -166,17 +179,31 @@ def build_plugin_runtime(
 
     def load_plugins(
         plugin_id: Optional[str],
-        installed_plugins: list[str],
+        loadable_plugins: list[str],
         validator: Callable[[Any], bool],
     ) -> list[Any]:
-        """加载物理插件或虚拟实例，并保持持久化实例顺序。"""
+        """加载物理插件或虚拟实例，并保持持久化实例顺序。
+
+        带具体实例 ID 的定向装载同样认启用位。实例存储的读取口刻意返回全部在册行
+        （含停用的），加载器在收到具体插件 ID 时也只按这个 ID 找目录、不看可装载
+        清单；两处叠在一起，源码变更触发的实例树重载、按 ID 发起的重载就会绕过启用
+        判据，把用户停用的实例又拉起来跑到下次重启。
+        """
         if plugin_id:
             instance = instances.get(plugin_id)
             if instance:
+                if not instance.is_enabled:
+                    return []
                 return loader.load_instance(instance, validator)
-            return loader.load(plugin_id, installed_plugins, validator)
-        plugins = loader.load(None, installed_plugins, validator)
-        for instance in instances.all().values():
+            if not any(
+                loadable.casefold() == plugin_id.casefold()
+                for loadable in loadable_plugins
+            ):
+                return []
+            return loader.load(plugin_id, loadable_plugins, validator)
+        plugins = loader.load(None, loadable_plugins, validator)
+        # 只装载启用的配置：停用的分身仍登记在册、卡片可见，但不该被实例化
+        for instance in instances.enabled().values():
             plugins.extend(loader.load_instance(instance, validator))
         return plugins
 
@@ -184,9 +211,9 @@ def build_plugin_runtime(
         classes=registry.classes,
         running=registry.running,
         load_plugins=load_plugins,
-        installed_plugins=lambda: environment.storage().read(
-            SystemConfigKey.UserInstalledPlugins
-        ) or [],
+        # 本体的装载判据归口到实例表的启用位；安装清单只回答「包在不在磁盘上」，
+        # 它同时兼任运行开关时，「装着但先不跑」根本没有地方可以表达
+        loadable_plugins=lambda: list(instances.enabled_hosts()),
         plugin_config=configs.read,
         auth_checker=lambda plugin: access.check(plugin),
         clear_modules=loader.clear_modules,
@@ -248,6 +275,7 @@ def build_plugin_runtime(
         ),
         plugin_instance=instances.get,
         plugin_instances=instances.all,
+        host_instances=instances.all_hosts,
         runtime_status=registry.runtime_status,
         log=environment.logger,
     )
@@ -270,7 +298,9 @@ def build_plugin_runtime(
     )
     dependencies = PluginDependencyService(
         system=environment.system,
-        instances=instances.all,
+        # 分类结果会被逐个 start()，因此两层都只能给出应当装载的那一部分
+        instances=instances.enabled,
+        loadable_hosts=lambda: set(instances.enabled_hosts()),
         registry=registry,
         log=environment.logger,
     )
@@ -294,17 +324,79 @@ def build_plugin_runtime(
         runtime_status_writer=registry.set_runtime_status,
         log=environment.logger,
     )
+
     def source_plugin_id(plugin_id: str) -> str:
         """把虚拟实例归一到持久化的物理源码插件。"""
         instance = instances.get(plugin_id)
         return instance.source_plugin_id if instance else plugin_id
 
+    def plugin_registered(plugin_id: str) -> bool:
+        """判断插件是否在册：装过（安装清单里有）或留有持久化的实例行。
+
+        默认调用目标与实例日志等级这两个管理接口问的都是「这个插件还在不在册、能不能
+        被管理」，因此共用这一个判据，而不能绑在运行期类注册表上：启动只把启用中的
+        本体与分身装进注册表，某插件的全部实例停用后重启，注册表里就没有它的类了，
+        但它的安装记录与实例行都还在。绑在注册表上等于说「停用即不存在」，而停用不是
+        卸载——在册的实例必须仍然可见、可管理，否则用户再也无法把它重新指回默认调用
+        目标，也调不出它的日志等级设置，而那份设置正是排查它为什么被停用时要看的。
+
+        「当前是否装载」是另一个问题，由各自的端口回答：插件配置读写看类注册表，
+        分身建号与安装前置看包在不在磁盘上，都不走这里。
+
+        :param plugin_id: 插件 ID
+        :return: 该插件是否在册
+        """
+        if instances.get_host(plugin_id) is not None:
+            return True
+        if instances.for_source(plugin_id):
+            return True
+        installed = environment.storage().read(
+            SystemConfigKey.UserInstalledPlugins
+        ) or []
+        return plugin_id in installed
+
+    def instance_id_taken(instance_id: str) -> bool:
+        """判断一个候选实例 ID 是否已被占用。
+
+        创建分身的判存与自动分配后缀共用这一个判据，自动分配因此不可能挑中一个手填
+        时会被拒绝的 ID。四条依据各自覆盖一类占用者，缺一条就会让新分身顶掉一个真实
+        存在的插件身份：
+
+        * 类注册表——当前已装载的本体与分身；
+        * 实例行——含已停用的分身与本体，它们的配置还留在行上，不是空位；
+        * 安装清单——装过但此刻未装载的物理插件；
+        * 插件包目录——卸载不删源码，磁盘上因此会留下不在前三者里的插件包，占了它的
+          号会让那个插件以后再也装不回来（实例行的归属列对不上，写入直接被拒）。
+
+        判存不能只看运行态：源插件本次加载失败时，已有的同名分身会被判成「不存在」
+        而放行，随后它的描述符被覆盖，再在回滚里连同配置一起删掉。``catalog.exists``
+        不足以充当磁盘判据——它要从**运行中**的实例上取版本号，未装载的插件包一律
+        报告不存在，因而这里直接看包目录。
+
+        :param instance_id: 候选实例 ID
+        :return: 该 ID 是否已被占用
+        """
+        if registry.plugin_class(instance_id) is not None:
+            return True
+        if instances.get(instance_id) is not None:
+            return True
+        if instances.get_host(instance_id) is not None:
+            return True
+        installed = environment.storage().read(
+            SystemConfigKey.UserInstalledPlugins
+        ) or []
+        if instance_id in installed:
+            return True
+        return (environment.plugins_root / instance_id.lower()).is_dir()
+
     clone = PluginCloneService(
         plugin_class=registry.plugin_class,
-        plugin_exists=catalog.exists,
+        instance_id_taken=instance_id_taken,
+        get_instance=instances.get,
         source_plugin_id=source_plugin_id,
         save_instance=instances.save,
         delete_instance=instances.delete,
+        disable_instance=instances.disable,
         read_config=configs.read,
         save_config=lambda plugin_id, config: configs.write(
             plugin_id,
@@ -315,6 +407,23 @@ def build_plugin_runtime(
         reload_plugin=host.reload_plugin,
         remove_plugin=host.remove_plugin,
         log=environment.logger,
+    )
+    log_level = PluginLogLevelControl(
+        plugin_exists=plugin_registered,
+        get_instance=instances.get,
+        instances_for_source=instances.for_source,
+        read_log_level=configs.read_log_level,
+        write_log_level=configs.write_log_level,
+    )
+    default_target = PluginDefaultTargetControl(
+        plugin_exists=plugin_registered,
+        get_instance=instances.get,
+        instances_for_source=instances.for_source,
+        get_host_instance=instances.get_host,
+        save_host_instance=instances.save_host,
+        running=lambda: registry.running,
+        set_default_target=environment.set_default_target,
+        clear_default_target=environment.clear_default_target,
     )
     projection = PluginProjection(
         registry.running,
@@ -341,6 +450,8 @@ def build_plugin_runtime(
         metadata=metadata,
         sync=sync,
         clone=clone,
+        log_level=log_level,
+        default_target=default_target,
         projection=projection,
         classification=classification,
         recent_local_sync=recent_local_sync,

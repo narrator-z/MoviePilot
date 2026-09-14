@@ -13,10 +13,18 @@ Purpose: Inspect the runtime capabilities exposed by installed plugins.
 
 ### `plugin.clone`
 `POST /api/v1/plugin/clone/{plugin_id}`; policy effect: `external_side_effect`.
-Purpose: Create a configurable clone of one installed plugin.
+Purpose: Create a configurable clone of one installed plugin; leave suffix empty to let the server allocate the next free instance ID, and reusing the suffix of a disabled clone re-enables that clone together with its stored configuration.
 - `path_params`: `plugin_id*` (string): Exact installed or marketplace plugin ID.
 - `query`: none
-- `body`: `description` (string; default ``): Human-readable media, torrent, or subscription description.; `icon` (string|null): Icon name or URL used by a workflow, network target, plugin, or category.; `name` (string; default ``): Human-readable name of the site, storage item, subscription, or rule group.; `suffix*` (string; minimum length `1`): File suffix or extension matched by an automatic category rule.; `version` (string|null): Plugin release or schema version selected by the operation.
+- `body`: `description` (string; default ``): Human-readable media, torrent, or subscription description.; `icon` (string|null): Icon name or URL used by a workflow, network target, plugin, or category.; `name` (string; default ``): Human-readable name of the site, storage item, subscription, or rule group.; `restore_previous` (boolean; default `True`): When creating a plugin clone, reuse the stored configuration of a disabled clone that already holds the same suffix; false rebuilds that clone's configuration from the source plugin template.; `suffix` (string|null): File suffix or extension matched by an automatic category rule.; `version` (string|null): Plugin release or schema version selected by the operation.
+
+### `plugin.clone.restorable`
+`GET /api/v1/plugin/clone/{plugin_id}/restorable`; policy effect: `safe_read`.
+Purpose: List one plugin's disabled clones whose configuration is still stored and can be brought back by creating a clone with the same suffix.
+- `response`: `data` remains a list; omitting both `page` and `count` keeps the complete legacy result. `collection.result_count` reports the returned items and `collection.total_count` reports the exact pre-pagination total. For counts or summaries, send `page=1,count=1`, read `collection.total_count`, and do not fall back to a database query because the item preview was truncated.
+- `path_params`: `plugin_id*` (string): Exact installed or marketplace plugin ID.
+- `query`: `count` (integer|null): Optional page size for a legacy full-list endpoint. Supplying page or count activates pagination; an omitted count then uses 50.; `page` (integer|null): Optional one-based page for a legacy full-list endpoint. Omit both page and count to keep the original unpaginated full result.
+- `body`: none
 
 ### `plugin.config.get`
 `GET /api/v1/plugin/form/{plugin_id}`; policy effect: `safe_read`.
@@ -37,6 +45,20 @@ Purpose: Replace one installed plugin's complete configuration and apply it imme
 Purpose: Read a bounded preview of one plugin's persisted data.
 - `path_params`: `plugin_id*` (string): Exact installed or marketplace plugin ID.
 - `query`: `key` (string|null): Optional exact plugin data key used to narrow the returned preview.; `max_chars` (integer|null): Maximum number of serialized plugin-data characters to return.
+- `body`: none
+
+### `plugin.default_target.clear`
+`DELETE /api/v1/plugin/instances/{plugin_id}/{instance_id}/default_target`; policy effect: `reversible_write`.
+Purpose: Clear one plugin instance's default-call-target flag, only if it is the plugin's current default.
+- `path_params`: `instance_id*` (string): Exact plugin instance ID returned by plugin.loglevel.get.; `plugin_id*` (string): Exact installed or marketplace plugin ID.
+- `query`: none
+- `body`: none
+
+### `plugin.default_target.set`
+`PUT /api/v1/plugin/instances/{plugin_id}/{instance_id}/default_target`; policy effect: `reversible_write`.
+Purpose: Set one plugin instance as the plugin's default call target, automatically clearing any previous default.
+- `path_params`: `instance_id*` (string): Exact plugin instance ID returned by plugin.loglevel.get.; `plugin_id*` (string): Exact installed or marketplace plugin ID.
+- `query`: none
 - `body`: none
 
 ### `plugin.folder.create`
@@ -116,6 +138,41 @@ Purpose: List installed plugins and their runtime status.
 - `path_params`: none
 - `query`: `count` (integer|null): Optional page size for a legacy full-list endpoint. Supplying page or count activates pagination; an omitted count then uses 50.; `force` (boolean; default `False`): Force a marketplace refresh or plugin installation when true.; `max_results` (integer|null): Optional upper bound on plugin catalog results, from 1 to 200; omit it for the complete catalog.; `page` (integer|null): Optional one-based page for a legacy full-list endpoint. Omit both page and count to keep the original unpaginated full result.; `query` (string|null): Optional case-insensitive keyword matched against plugin ID, name, description, and author.; `state*` (string=installed): Literal installed, selecting only installed plugin catalog entries.
 - `body`: none
+
+### `plugin.instance.purge`
+`POST /api/v1/plugin/instance/{instance_id}/purge`; policy effect: `destructive_write`.
+Purpose: Permanently delete one plugin instance's selected data: saved configuration, plugin data rows, its own database and its data directory; a clone also loses its instance record. Nothing is deleted unless explicitly selected.
+- `path_params`: `instance_id*` (string): Exact plugin instance ID returned by plugin.loglevel.get.
+- `query`: none
+- `body`: `config` (boolean; default `False`): Purge scope flag: delete this plugin instance's saved configuration values.; `data_directory` (boolean; default `False`): Purge scope flag: delete this plugin instance's entire data directory; its own database is always destroyed first.; `own_database` (boolean; default `False`): Purge scope flag: destroy this plugin instance's own database.; `plugin_data` (boolean; default `False`): Purge scope flag: delete this plugin instance's rows in the shared plugin data table.
+
+### `plugin.instance.set_enabled`
+`POST /api/v1/plugin/instance/{instance_id}/enabled`; policy effect: `reversible_write`.
+Purpose: Enable or disable one plugin instance, host or clone; disabling only stops it running and keeps its configuration for a later re-enable.
+- `path_params`: `instance_id*` (string): Exact plugin instance ID returned by plugin.loglevel.get.
+- `query`: none
+- `body`: `enabled*` (boolean): Whether this category or classification rule participates in evaluation.
+
+### `plugin.loglevel.clear`
+`DELETE /api/v1/plugin/loglevel/{plugin_id}/{instance_id}`; policy effect: `reversible_write`.
+Purpose: Clear one plugin instance's log-level override so it immediately follows the global log level again.
+- `path_params`: `instance_id*` (string): Exact plugin instance ID returned by plugin.loglevel.get.; `plugin_id*` (string): Exact installed or marketplace plugin ID.
+- `query`: none
+- `body`: none
+
+### `plugin.loglevel.get`
+`GET /api/v1/plugin/loglevel/{plugin_id}`; policy effect: `safe_read`.
+Purpose: List one plugin's instances, including the plugin itself, with each instance's configured and effective log level.
+- `path_params`: `plugin_id*` (string): Exact installed or marketplace plugin ID.
+- `query`: none
+- `body`: none
+
+### `plugin.loglevel.set`
+`PUT /api/v1/plugin/loglevel/{plugin_id}/{instance_id}`; policy effect: `reversible_write`.
+Purpose: Set one plugin instance's log-level override, taking effect immediately without following the global log level.
+- `path_params`: `instance_id*` (string): Exact plugin instance ID returned by plugin.loglevel.get.; `plugin_id*` (string): Exact installed or marketplace plugin ID.
+- `query`: none
+- `body`: `expires_at` (string|null): Expiry timestamp for a plugin instance's log-level override; null means it never expires. A timestamp without a timezone is read as UTC.; `level*` (string): Target log level, one of DEBUG, INFO, WARNING, ERROR, or CRITICAL.
 
 ### `plugin.market`
 `GET /api/v1/plugin/`; policy effect: `safe_read`.

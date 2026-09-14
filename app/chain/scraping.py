@@ -33,6 +33,7 @@ from app.runtime.cache import cached
 from app.runtime.events import Event, eventmanager
 from app.runtime.log import logger
 from app.runtime.reload import ConfigReloadMixin
+from app.schemas.file import FileItem as _SchemaFileItem
 from app.schemas.media import resolve_media_identity
 from app.schemas.types import (
     MUSIC_ENTITY_ALBUM,
@@ -45,8 +46,6 @@ from app.schemas.types import (
     ScrapingTarget,
     SystemConfigKey,
 )
-from app.schemas.workflow import FileItem
-from app.schemas.workflow import FileItem as _SchemaFileItem
 
 
 class ScrapingResponsePort(Protocol):
@@ -132,6 +131,7 @@ def _scraping_http_snapshot() -> ScrapingHttpPort:
         raise RuntimeError("刮削 HTTP 端口尚未由启动组合根装配")
     return http
 
+
 scraping_lock = Lock()
 
 current_umask = os.umask(0)
@@ -144,6 +144,7 @@ class _MusicScrapeFileResult:
 
     metadata_success: bool = True
     lyrics_status: str = "disabled"
+
 
 class ScrapingOption:
     """刮削选项"""
@@ -192,6 +193,7 @@ class ScrapingOption:
     def is_upgrade(self) -> bool:
         """是否只在歌词等产物质量更高时替换。"""
         return self.policy == ScrapingPolicy.UPGRADE
+
 
 class ScrapingConfig:
     """媒体刮削配置"""
@@ -466,8 +468,8 @@ class ScrapingChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     # 电影文件NFO: 放在电影文件同级目录，名称与电影文件主体一致，后缀.nfo
                     final_filename = f"{target_dir_path.stem}.nfo"
                     target_dir_item = (
-                            parent_fileitem
-                            or self.storagechain.get_parent_item(current_fileitem)
+                        parent_fileitem
+                        or self.storagechain.get_parent_item(current_fileitem)
                     )
                     if not target_dir_item:
                         logger.error(
@@ -657,7 +659,7 @@ class ScrapingChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             mediainfo: MediaInfo,
             season: Optional[int] = None,
             episode: Optional[int] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, str]]:
         """
         获取图片名称和url，合并所有模块的结果。
         优先使用高优先级模块的图片，低优先级模块补充缺失的图片类型。
@@ -696,7 +698,7 @@ class ScrapingChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             return
         event_data = event.event_data or {}
         # 读取事件载荷
-        fileitem: FileItem = event_data.get("fileitem")
+        fileitem: _SchemaFileItem = event_data.get("fileitem")
         file_list: List[str] = list(dict.fromkeys(event_data.get("file_list") or []))
         meta: MetaBase = event_data.get("meta")
         mediainfo: MediaInfo = event_data.get("mediainfo")
@@ -718,9 +720,9 @@ class ScrapingChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                         Path(context.get("path")).as_posix(): context.get("mediainfo")
                         for context in event_data.get("file_contexts") or []
                         if (
-                                isinstance(context, dict)
-                                and context.get("path")
-                                and isinstance(context.get("mediainfo"), MusicInfo)
+                            isinstance(context, dict)
+                            and context.get("path")
+                            and isinstance(context.get("mediainfo"), MusicInfo)
                         )
                     }
                 _, message = self.scrape_metadata(
@@ -781,8 +783,8 @@ class ScrapingChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                                 getattr(mediainfo, "type", None) == MediaType.TV
                                 and root_path.parent != root_path
                                 and (
-                                        root_path.name in self.runtime_config.season_zero_names
-                                        or MetaInfo(root_path.name).begin_season is not None
+                                    root_path.name in self.runtime_config.season_zero_names
+                                    or MetaInfo(root_path.name).begin_season is not None
                                 )
                         ):
                             # 整理事件可能以季目录为根，补回剧集根目录才能触发电视剧分支。

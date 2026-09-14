@@ -126,8 +126,8 @@ def test_transfer_degrades_to_library_root_when_automatic_category_missing_tmdb(
         ),
     )
     monkeypatch.setattr("app.chain.transfer.filter.MediaChain", lambda: SimpleNamespace(
-            supplement_tmdb_info=lambda media, _meta: media,
-        ))
+        supplement_tmdb_info=lambda media, _meta: media,
+    ))
     task = TransferTask(
         fileitem=FileItem(
             storage="local",

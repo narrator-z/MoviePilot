@@ -9,6 +9,7 @@ from app.runtime.extensions.plugin.contracts import (
     supports_plugin_hook,
 )
 from app.runtime.log import logger as default_logger
+from app.runtime.log import wrap_for_plugin_instance
 from app.schemas.plugin import PluginDashboard
 
 
@@ -51,7 +52,7 @@ class PluginProjection:
         return commands
 
     def apis(self, pid: Optional[str] = None) -> List[Dict[str, Any]]:
-        """聚合插件 API 并补充宿主路径和默认认证方式。"""
+        """聚合插件 API 并补充宿主路径和默认认证方式，端点绑定发起实例的日志上下文。"""
         apis: list[dict] = []
         for plugin_id, plugin in self._items(pid):
             if not supports_plugin_hook(plugin, "get_api"):
@@ -62,6 +63,9 @@ class PluginProjection:
                     api["path"] = f"/{plugin_id}{api['path']}"
                     if not api.get("auth"):
                         api["auth"] = "apikey"
+                    endpoint = api.get("endpoint")
+                    if callable(endpoint):
+                        api["endpoint"] = wrap_for_plugin_instance(endpoint, plugin_id)
                     apis.append(api)
             except Exception as error:
                 self._logger.error(f"获取插件 {plugin_id} API出错：{str(error)}")
@@ -161,18 +165,31 @@ class PluginProjection:
             render_mode, dist_path = plugin.get_render_mode()
             if render_mode != "vue":
                 continue
-            if not self._remote_entry_factory:
-                raise RuntimeError("插件联邦入口生成器尚未配置")
-            remote = {
-                "id": plugin_id,
-                "url": self._remote_entry_factory(plugin_id, dist_path),
-                "name": plugin.plugin_name,
-            }
-            source_plugin_id = getattr(plugin, "plugin_source_id", None)
-            if source_plugin_id:
-                remote["source_plugin_id"] = source_plugin_id
-            remotes.append(remote)
+            remotes.append(self._remote_descriptor(plugin_id, plugin, dist_path))
         return remotes
+
+    def _remote_descriptor(
+        self,
+        plugin_id: str,
+        plugin: Any,
+        dist_path: str,
+    ) -> Dict[str, Any]:
+        """构造联邦远程入口描述，分身额外带出其源插件 ID。
+
+        分身与本体共享同一份前端产物，只有源插件名下才有产物目录；前端联邦加载器
+        拿不到源插件 ID 就只能按分身 ID 去取，必然落空。
+        """
+        if not self._remote_entry_factory:
+            raise RuntimeError("插件联邦入口生成器尚未配置")
+        remote: Dict[str, Any] = {
+            "id": plugin_id,
+            "url": self._remote_entry_factory(plugin_id, dist_path),
+            "name": plugin.plugin_name,
+        }
+        source_plugin_id = getattr(plugin, "plugin_source_id", None)
+        if source_plugin_id:
+            remote["source_plugin_id"] = source_plugin_id
+        return remote
 
     def auth_providers(self) -> List[Dict[str, Any]]:
         """投影启用插件声明的登录认证提供方。"""
@@ -203,17 +220,8 @@ class PluginProjection:
                 provider.setdefault("name", plugin.plugin_name)
                 provider.setdefault("enabled", True)
                 if render_mode == "vue" and dist_path:
-                    if not self._remote_entry_factory:
-                        raise RuntimeError("插件联邦入口生成器尚未配置")
+                    remote = self._remote_descriptor(plugin_id, plugin, dist_path)
                     provider.setdefault("component", "AuthPage")
-                    remote = {
-                        "id": plugin_id,
-                        "url": self._remote_entry_factory(plugin_id, dist_path),
-                        "name": plugin.plugin_name,
-                    }
-                    source_plugin_id = getattr(plugin, "plugin_source_id", None)
-                    if source_plugin_id:
-                        remote["source_plugin_id"] = source_plugin_id
                     provider["remote"] = remote
                 providers.append(provider)
         return providers

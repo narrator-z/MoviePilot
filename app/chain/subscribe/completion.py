@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from app.application.classification.reference import effective_classification_snapshot
 from app.application.subscription.contract import (
@@ -128,8 +128,15 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                 downloads=downloads,
             )
             subscribe = facts["subscribe"]
+        elif downloads and meta.type == MediaType.MUSIC:
+            apply_update = self._SubscribeChain__apply_subscribe_update
+            update_note = self._SubscribeChain__update_subscribe_note
+            subscribe = _record_music_download_facts(apply_update, update_note, subscribe, downloads)
         elif downloads:
-            self._SubscribeChain__update_subscribe_note(subscribe=subscribe, downloads=downloads)
+            subscribe = self._SubscribeChain__update_subscribe_note(
+                subscribe=subscribe,
+                downloads=downloads,
+            )
         if downloads and meta.type == MediaType.MOVIE:
             subscribe = self._SubscribeChain__update_movie_download_priority(
                 subscribe=subscribe,
@@ -197,13 +204,13 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         self,
         subscribe: SubscriptionSnapshot,
         downloads: Optional[List[Context]],
-    ) -> None:
+    ) -> SubscriptionSnapshot:
         """
         更新已下载信息到note字段
         """
         # 查询现有Note
         if not downloads:
-            return
+            return subscribe
         note = []
         if subscribe.note:
             note = subscribe.note or []
@@ -227,8 +234,8 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                 # 电影只有一个条目，设置为 [1]
                 items = [1]
             elif mediainfo.type == MediaType.MUSIC:
-                # 专辑只能记录已由下载层确认的整专资源；单曲任一成功任务即可完成。
-                if getattr(subscribe, "music_type", None) != MUSIC_ENTITY_ALBUM or context.confirmed_full_coverage:
+                # 单曲任一成功任务即可完成；专辑由独立音轨事实记录，不写入 note。
+                if getattr(subscribe, "music_type", None) != MUSIC_ENTITY_ALBUM:
                     items = [1]
             if not items:
                 continue
@@ -236,11 +243,13 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
             note = list(set(note).union(set(items)))
         # 更新订阅
         if note:
-            self._SubscribeChain__apply_subscribe_update(
+            updated = self._SubscribeChain__apply_subscribe_update(
                 subscribe,
                 {"note": note},
                 scene="download_note",
             )
+            return updated or subscribe
+        return subscribe
 
     @staticmethod
     def _SubscribeChain__get_downloaded(subscribe: SubscriptionSnapshot) -> List[int]:
@@ -519,3 +528,50 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                 )
         logger.info(f"订阅 {subscribe_name} 缺失剧集数更新为：{no_exists}")
         return False, no_exists
+
+
+def _record_music_download_facts(
+        apply_update: Callable[..., SubscriptionSnapshot],
+        update_note: Callable[..., SubscriptionSnapshot],
+        subscribe: SubscriptionSnapshot,
+        downloads: Optional[List[Context]],
+) -> SubscriptionSnapshot:
+    """合并本轮专辑音轨事实，按统一媒体身份去重后返回最新订阅快照。"""
+    if not downloads:
+        return subscribe
+    if getattr(subscribe, "music_type", None) != MUSIC_ENTITY_ALBUM:
+        return update_note(subscribe=subscribe, downloads=downloads)
+
+    downloaded_tracks = {
+        item
+        for item in (getattr(subscribe, "downloaded_tracks", None) or [])
+        if isinstance(item, str) and item
+    }
+    subscribe_identity = resolve_media_identity(media=subscribe)
+    for context in downloads:
+        media = context.media_info
+        if not media or media.type != MediaType.MUSIC:
+            continue
+        if subscribe_identity != resolve_media_identity(media=media):
+            continue
+        downloaded_tracks.update(
+            item
+            for item in (getattr(context, "music_track_keys", None) or [])
+            if isinstance(item, str) and item
+        )
+    if not downloaded_tracks:
+        return subscribe
+
+    updated = apply_update(
+        subscribe,
+        {
+            "downloaded_tracks": sorted(downloaded_tracks),
+            "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        scene="music_download_tracks",
+    )
+    logger.info(
+        f"订阅 {subscribe.name} 记录已下载专辑曲目："
+        f"{len(downloaded_tracks)}/{subscribe.total_tracks or 0}"
+    )
+    return updated or subscribe

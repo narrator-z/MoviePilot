@@ -31,11 +31,20 @@ from app.schemas.subscribe import Subscribe as _SchemaSubscribe
 from app.schemas.subscribe import SubscribeDownloadFileInfo as _SchemaSubscribeDownloadFileInfo
 from app.schemas.subscribe import SubscribeEpisodeInfo as _SchemaSubscribeEpisodeInfo
 from app.schemas.subscribe import SubscribeLibraryFileInfo as _SchemaSubscribeLibraryFileInfo
+from app.schemas.subscribe import compute_subscribe_completed_tracks
 from app.schemas.types import (
     MediaSource,
     MediaType,
     SystemConfigKey,
 )
+
+
+def _public_subscribe_view(subscribe: SubscriptionSnapshot) -> _SchemaSubscribe:
+    """将订阅内部快照投影为公开 DTO，并隐藏活动音轨事实。"""
+    payload = subscribe.to_dict()
+    payload["completed_tracks"] = compute_subscribe_completed_tracks(subscribe)
+    payload.pop("downloaded_tracks", None)
+    return _SchemaSubscribe(**payload)
 
 
 class SubscribeQueryOwner(_SubscribeOwnerBase):
@@ -401,7 +410,7 @@ class SubscribeQueryOwner(_SubscribeOwnerBase):
         self._append_subscribe_media_servers(subscribe, mediainfo, episodes)
 
         # 更新订阅信息
-        subscribe_info.subscribe = _SchemaSubscribe(**subscribe.to_dict())
+        subscribe_info.subscribe = _public_subscribe_view(subscribe)
         subscribe_info.episodes = episodes
         return subscribe_info
 

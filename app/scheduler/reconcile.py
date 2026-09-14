@@ -489,7 +489,7 @@ class SchedulerReconcileOwner(_SchedulerOwnerBase):
                 sites_helper.get_authsites(),
             )
             if normalized_auth_conf:
-                status, msg = sites_helper.check_user(**normalized_auth_conf)
+                status, msg = sites_helper.check_user(**normalized_auth_conf)  # type: ignore[arg-type]
             else:
                 status, msg = sites_helper.check_user()
         if status:

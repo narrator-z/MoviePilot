@@ -469,7 +469,9 @@ def user_auth():
             sites_helper.get_authsites(),
         )
         status, msg = (
-            sites_helper.check_user(**normalized_auth_conf)
+            # 运行时 check_user 由 setattr 替换为 lambda(self, site=None, params=None)，
+            # ** 解包 dict[str, JsonData] 的静态类型无法被 mypy 校验，属预期内的误报。
+            sites_helper.check_user(**normalized_auth_conf)  # type: ignore[arg-type]
             if normalized_auth_conf
             else sites_helper.check_user()
         )

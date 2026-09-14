@@ -257,6 +257,80 @@ def test_local_projects_effective_log_level_for_physical_plugin(
     assert plugin.log_level_effective == "WARNING"
 
 
+def test_local_projection_survives_concurrent_class_registration():
+    """后台装载插件期间投影本地目录不能因类表被改写而失败。
+
+    启动收敛阶段，前端轮询 ``GET /api/v1/plugin/?state=installed`` 会走到
+    ``local()`` 遍历插件类表；与此同时后台线程正在往同一张活字典里登记新加载的
+    插件类。直接迭代活字典会抛 ``RuntimeError: dictionary changed size during
+    iteration``，使插件页偶发 500。投影必须按同一次快照完成。
+    """
+    class LoadedPlugin:
+        plugin_name = "已加载插件"
+        plugin_version = "1.0.0"
+        plugin_order = 0
+
+    class ArrivingPlugin:
+        plugin_name = "装载中的插件"
+        plugin_version = "1.0.0"
+        plugin_order = 0
+
+    classes = {"LoadedPlugin": LoadedPlugin}
+    running = {"LoadedPlugin": SimpleNamespace(get_state=lambda: True)}
+
+    def background_loader(**_kwargs):
+        """模拟后台线程在投影途中登记刚加载完成的插件类与实例。"""
+        classes["ArrivingPlugin"] = ArrivingPlugin
+        running["ArrivingPlugin"] = SimpleNamespace(get_state=lambda: True)
+        return True
+
+    facade = _facade(
+        classes=lambda: classes,
+        running=lambda: running,
+        storage=lambda: SimpleNamespace(read=lambda _key: ["LoadedPlugin"]),
+        auth_checker=background_loader,
+    )
+
+    plugins = facade.local()
+
+    assert [plugin.id for plugin in plugins] == ["LoadedPlugin"]
+    assert len(classes) == 2
+
+
+def test_local_reads_class_and_running_tables_from_one_moment():
+    """同一张卡片里的类信息与该插件的运行实例必须取自同一时刻的快照。"""
+    class DemoPlugin:
+        plugin_name = "Demo"
+        plugin_version = "1.0.0"
+        plugin_order = 0
+
+    batches = [
+        {"DemoPlugin": DemoPlugin},
+        {"DemoPlugin": DemoPlugin, "LatePlugin": DemoPlugin},
+    ]
+    running_batches = [
+        {},
+        {"DemoPlugin": SimpleNamespace(get_state=lambda: True)},
+    ]
+    reads: list[int] = []
+
+    def classes_reader():
+        reads.append(len(reads))
+        return batches[min(len(reads) - 1, len(batches) - 1)]
+
+    facade = _facade(
+        classes=classes_reader,
+        running=lambda: running_batches[min(len(reads) - 1, len(running_batches) - 1)],
+    )
+
+    plugins = facade.local()
+
+    # 快照只取一次：后续字典尺寸变化既不影响本次结果，也不允许再次被读取。
+    assert len(reads) == 1
+    assert [plugin.id for plugin in plugins] == ["DemoPlugin"]
+    assert plugins[0].state is False
+
+
 def test_installed_placeholder_projects_effective_log_level(
     _isolated_log_overrides,
 ):

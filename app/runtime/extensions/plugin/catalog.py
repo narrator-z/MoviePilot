@@ -78,9 +78,16 @@ class PluginCatalogFacade:
         installed = self._installed_ids()
         # 本体行一次取全：逐张卡片各查一次会让插件列表的查询次数随插件数线性增长
         host_instances = self._host_instances()
+        # 插件类表和运行实例表是进程内的活字典，后台加载/重载插件会并发增删其中的键。
+        # 必须先按同一次快照投影：一边遍历一边被改写会抛
+        # RuntimeError: dictionary changed size during iteration，
+        # 表现为启动收敛期 GET /api/v1/plugin/?state=installed 偶发 500。
+        # 两张表还取自同一时刻，避免卡片里同一插件的加载状态与运行实例来自不同代。
+        classes = dict(self._classes())
+        running = dict(self._running())
         plugins: list[Plugin] = []
-        for plugin_id, plugin_class in self._classes().items():
-            plugin_instance = self._running().get(plugin_id)
+        for plugin_id, plugin_class in classes.items():
+            plugin_instance = running.get(plugin_id)
             instance = self._plugin_instance(plugin_id)
             plugin = Plugin(
                 id=plugin_id,

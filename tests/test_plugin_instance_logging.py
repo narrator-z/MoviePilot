@@ -8,6 +8,7 @@ import io
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +35,9 @@ class _CapturingLogWriter:
         """初始化空的调用记录列表。"""
         self.entries: list[tuple[str, str, Path]] = []
 
-    def write_log(self, level: str, message: str, file_path: Path) -> None:
+    def write_log(
+        self, level: str, message: str, file_path: Path, exc_info: Any = None
+    ) -> None:
         """保存单条日志的级别、内容和目标路径。"""
         self.entries.append((level, message, file_path))
 

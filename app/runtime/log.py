@@ -79,7 +79,9 @@ class LogEntry:
 class LogWriter(Protocol):
     """平台日志门面使用的文件写入端口。"""
 
-    def write_log(self, level: str, message: str, file_path: Path) -> None:
+    def write_log(
+        self, level: str, message: str, file_path: Path, exc_info: Any = None
+    ) -> None:
         """将一条日志写入指定文件。"""
 
     def shutdown(self) -> Optional[bool]:
@@ -431,9 +433,11 @@ class NonBlockingFileHandler:
             self._rotating_handlers[file_path] = handler
             return handler
 
-    def write_log(self, level: str, message: str, file_path: Path) -> None:
+    def write_log(
+        self, level: str, message: str, file_path: Path, exc_info: Any = None
+    ) -> None:
         """根据当前线程是否运行事件循环选择异步或同步文件写入。"""
-        entry = LogEntry(level, message, file_path)
+        entry = LogEntry(level, message, file_path, exc_info=exc_info)
         if self._is_in_event_loop():
             self._write_non_blocking(entry)
             return
@@ -788,7 +792,9 @@ class LoggerManager:
                 configured_logger.setLevel(_CONSOLE_PIPELINE_LEVEL)
 
     @classmethod
-    def _write_file_log(cls, level: str, message: str, logfile: Path) -> None:
+    def _write_file_log(
+        cls, level: str, message: str, logfile: Path, exc_info: Any = None
+    ) -> None:
         """写入文件，或在启动装配完成前暂存日志。"""
         with cls._lock:
             writer = cls._writer
@@ -796,7 +802,7 @@ class LoggerManager:
             if not writer or not log_path:
                 cls._pending_file_logs.append((level, message, logfile))
                 return
-        writer.write_log(level, message, log_path / logfile)
+        writer.write_log(level, message, log_path / logfile, exc_info=exc_info)
 
     def logger(self, method: str, msg: str, *args: Any, **kwargs: Any) -> None:
         """按调用来源路由并输出一条日志。
@@ -829,7 +835,8 @@ class LoggerManager:
             if plugin_name
             else self._default_log_file
         )
-        self._write_file_log(method.upper(), formatted_msg, logfile)
+        exc_info = kwargs.get("exc_info")
+        self._write_file_log(method.upper(), formatted_msg, logfile, exc_info=exc_info)
 
         configured_logger = self._get_console_logger(logfile)
         log_method = getattr(configured_logger, method, configured_logger.info)

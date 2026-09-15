@@ -1,6 +1,7 @@
 """插件日志文件路由测试。"""
 
 from pathlib import Path
+from typing import Any
 from types import SimpleNamespace
 
 from app.runtime.log import LoggerManager, logger
@@ -12,7 +13,9 @@ class CapturingLogWriter:
     def __init__(self) -> None:
         self.entries: list[tuple[str, str, Path]] = []
 
-    def write_log(self, level: str, message: str, file_path: Path) -> None:
+    def write_log(
+        self, level: str, message: str, file_path: Path, exc_info: Any = None
+    ) -> None:
         """保存单条日志的级别、内容和目标路径。"""
         self.entries.append((level, message, file_path))
 
@@ -54,3 +57,34 @@ def test_virtual_plugin_routes_log_by_runtime_module_identity(monkeypatch, tmp_p
             tmp_path / "plugins" / "mediawarp1.log",
         )
     ]
+
+
+def test_file_log_route_preserves_exc_info(monkeypatch, tmp_path):
+    """异常上下文必须随文件日志路径透传，使文件日志也能保留堆栈。"""
+    received: list = []
+
+    class _ExcInfoWriter:
+        def write_log(self, level, message, file_path, exc_info=None):
+            received.append((level, message, file_path, exc_info))
+
+        @staticmethod
+        def shutdown() -> bool:
+            return True
+
+    monkeypatch.setattr(LoggerManager, "_writer", _ExcInfoWriter())
+    monkeypatch.setattr(LoggerManager, "_log_path", tmp_path)
+    monkeypatch.setattr(
+        LoggerManager,
+        "_get_console_logger",
+        classmethod(
+            lambda _cls, _logfile: SimpleNamespace(
+                info=lambda *_a, **_k: None, error=lambda *_a, **_k: None
+            )
+        ),
+    )
+
+    captured = ValueError("boom")
+    logger.error("task failed", exc_info=captured)
+
+    assert received, "文件写入器未收到日志"
+    assert received[0][3] is captured, "exc_info 未随文件日志路径透传"

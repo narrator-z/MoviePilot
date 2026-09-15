@@ -1201,7 +1201,7 @@
   },
   "app/db/oper/systemconfig.py": {
     "no-any-return": 1,
-    "no-untyped-def": 3
+    "no-untyped-def": 2
   },
   "app/db/oper/transferhistory.py": {
     "no-any-return": 2,
@@ -1417,9 +1417,6 @@
     "no-untyped-def": 5,
     "return-value": 1,
     "type-arg": 7
-  },
-  "app/modules/bangumi/bangumi.py": {
-    "no-untyped-def": 2
   },
   "app/modules/dingtalk/__init__.py": {
     "arg-type": 2,
@@ -2494,10 +2491,9 @@
     "list-item": 1,
     "misc": 1,
     "no-any-return": 2,
-    "no-untyped-call": 3,
-    "no-untyped-def": 17,
-    "type-arg": 22,
-    "var-annotated": 3
+    "no-untyped-call": 2,
+    "no-untyped-def": 16,
+    "type-arg": 22
   },
   "app/runtime/execution.py": {
     "no-untyped-def": 8,
@@ -2766,7 +2762,7 @@
     "attr-defined": 2,
     "misc": 1,
     "no-any-return": 2,
-    "no-untyped-call": 9,
+    "no-untyped-call": 5,
     "no-untyped-def": 6,
     "return-value": 2
   },
@@ -2789,7 +2785,7 @@
     "type-arg": 1
   },
   "app/testing/bootstrap.py": {
-    "no-untyped-call": 2,
+    "no-untyped-call": 1,
     "no-untyped-def": 3,
     "type-arg": 6
   },

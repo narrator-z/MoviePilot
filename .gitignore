@@ -49,3 +49,15 @@ docs/superpowers/
 # 保留本地前端构建产物目录，目录内产物不纳入仓库
 frontend-dist/*
 !frontend-dist/.gitkeep
+
+# 本地测试缓存与运行产物（不纳入仓库）
+.pt_b2/
+.pt_b3/
+.pt_b4/
+.pt_b6/
+.pt_c3/
+.pytest_tmp/
+_baseline_report.json
+_commit_msg.txt
+_cov3.json
+.workbuddy/

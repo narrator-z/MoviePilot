@@ -1,0 +1,16 @@
+# 统一文本文件为 LF 行尾，防止 Windows 编辑器 / PowerShell 写入 CRLF 导致
+# 构建期解析失败（例如 version.py 被写成 CRLF 后使 gh api URL 含 \r 而构建中断）。
+* text=auto eol=lf
+
+# 二进制文件明确声明，避免被 text=auto 误转
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.so binary
+*.pyd binary

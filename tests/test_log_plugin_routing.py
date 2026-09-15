@@ -1,8 +1,8 @@
 """插件日志文件路由测试。"""
 
 from pathlib import Path
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 from app.runtime.log import LoggerManager, logger
 

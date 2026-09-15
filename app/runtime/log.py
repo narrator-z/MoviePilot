@@ -66,12 +66,14 @@ class LogEntry:
         level: str,
         message: str,
         file_path: Path,
+        exc_info: Any = None,
         timestamp: datetime | None = None,
     ) -> None:
         """记录日志级别、格式化文本和目标文件。"""
         self.level = level
         self.message = message
         self.file_path = file_path
+        self.exc_info = exc_info
         self.timestamp = timestamp or datetime.now()
         self.correlation_id = _get_log_correlation_id()
 
@@ -484,7 +486,7 @@ class NonBlockingFileHandler:
             lineno=0,
             msg=entry.message,
             args=(),
-            exc_info=None,
+            exc_info=entry.exc_info,
         )
         created_at = entry.timestamp.timestamp()
         record.created = created_at

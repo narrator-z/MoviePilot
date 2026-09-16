@@ -392,6 +392,7 @@ def test_domain_classification_is_a_pure_direct_import_package() -> None:
     package = APP_ROOT / "domain" / "classification"
     assert {path.name for path in package.glob("*.py")} == {
         "__init__.py",
+        "conditions.py",
         "evaluator.py",
         "facts.py",
         "fields.py",
@@ -805,7 +806,7 @@ def test_startup_composes_typed_chain_and_agent_data_contexts():
 
 def test_download_history_ports_are_typed_detached_and_canonically_injected():
     """下载历史宿主调用面只能消费冻结快照和显式事务 adapter。"""
-    history_path = APP_ROOT / "application" / "history.py"
+    history_path = APP_ROOT / "application" / "history" / "__init__.py"
     history_tree = ast.parse(
         history_path.read_text(encoding="utf-8"),
         filename=str(history_path),

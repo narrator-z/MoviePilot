@@ -7,10 +7,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 from app.adapters.system.fsproxy import fsproxy
 from app.application.directory import DirectoryHelper
 from app.application.history import (
+    get_transfer_history_repository,
+)
+from app.application.history.retry import (
     HistoryGateAction,
     describe_history_gate,
     evaluate_history_gate,
-    get_transfer_history_repository,
     is_skip_action,
     max_failed_retries,
     resolve_history,
@@ -126,7 +128,7 @@ class TransferDispatcher:
         """
         依据整理历史判断本次是否跳过整理。
 
-        判定策略由 app/application/history.py 统一提供，整理链的计划整理段使用
+        判定策略由 app/application/history/ 统一提供，整理链的计划整理段使用
         同一套判定，避免此处放行的文件在下游被另一套「存在记录即拦」的策略收回。
         :param storage: 存储
         :param src_path: 整理记录使用的源路径

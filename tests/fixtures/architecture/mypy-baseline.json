@@ -155,11 +155,6 @@
     "type-arg": 7,
     "type-var": 1
   },
-  "app/agent/middleware/activity.py": {
-    "misc": 3,
-    "type-arg": 5,
-    "valid-type": 1
-  },
   "app/agent/middleware/config.py": {
     "misc": 1
   },
@@ -1287,7 +1282,7 @@
     "operator": 1
   },
   "app/domain/metainfo.py": {
-    "arg-type": 6,
+    "arg-type": 5,
     "assignment": 4,
     "no-untyped-call": 3,
     "no-untyped-def": 1,

@@ -110,6 +110,26 @@ def test_resource_parser_merges_subtitle_without_target_information():
     assert meta.media_id is None
 
 
+def test_resource_parser_reads_unlabelled_album_description():
+    """描述末尾的无冒号专辑字段也应保留作品证据。"""
+    description = "Apple Music ALAC 宋冬野 2026 06 29 专辑 再想想"
+    meta = MetaMusic.parse_resource(
+        "Song DongYe 2026 AppleLossless Take Another Moment", description
+    )
+    assert (meta.title, meta.album, meta.artists, meta.year) == (
+        "AppleLossless Take Another Moment", "再想想", ["Song DongYe"], 2026
+    )
+
+
+def test_album_match_uses_unlabelled_description_title_as_candidate():
+    """外文资源的中文专辑描述可形成候选，但未核验艺术家不能自动命中。"""
+    title = "Song DongYe 2026 AppleLossless Take Another Moment"
+    description = "Apple Music ALAC 宋冬野 2026 06 29 专辑 再想想"
+    target = MusicInfo(music_type="album", title="再想想", artists=["宋冬野"], year=2026)
+    result = match_music_resource(target, title, description)
+    assert (result.status, result.reason) == ("candidate", "artist_unverified")
+
+
 def test_resource_parser_preserves_title_evidence_and_parses_track_segments():
     """冲突副标题不能覆盖标题艺术家，明确的曲序段则可用于区分专辑和单曲。"""
     meta = MetaMusic.parse_resource("Artist - Album - 01 - Song [FLAC]", "演唱：Other Artist")
@@ -134,6 +154,39 @@ def test_soundtrack_credit_does_not_change_recording_title(title):
     """影视来源说明不是歌名本体，不能让正确的 MusicBrainz 录音候选被拒绝。"""
     expected = "Macavity" if title.startswith("Macavity") else "Beautiful Ghosts"
     assert music_title_matches(MusicInfo(title=expected), title)
+
+
+@pytest.mark.parametrize("symbol", ["÷", "+", "=", "×", "−"])
+def test_symbol_only_music_title_matches_itself_and_alias(symbol):
+    """纯符号作品名不能因文本归一化为空而失去自身和别名匹配。"""
+    music = MusicInfo(title=symbol, title_aliases=["Readable Alias"])
+
+    assert music_title_matches(music, symbol)
+    assert music_title_matches(music, "Readable Alias")
+    assert not music_title_matches(music, "Different Title")
+
+
+@pytest.mark.parametrize("symbol,alias,year", [
+    ("÷", "Divide", 2017),
+    ("+", "Plus", 2011),
+    ("=", "Equals", 2021),
+    ("×", "Multiply", 2017),
+    ("−", "Subtract", 2023),
+])
+def test_symbol_only_album_matches_parsed_resource(symbol, alias, year):
+    """纯符号专辑经资源解析后仍应按原名或可信别名精确命中。"""
+    music = MusicInfo(
+        music_type="album",
+        title=symbol,
+        album=symbol,
+        title_aliases=[alias],
+        album_aliases=[alias],
+        artists=["Ed Sheeran"],
+        year=year,
+    )
+
+    resource = f"Ed Sheeran - {symbol} - {year} - FLAC 分轨"
+    assert match_music_resource(music, resource).status == "exact"
 
 
 def test_music_album_field_cannot_match_target_recording():

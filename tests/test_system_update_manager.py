@@ -153,6 +153,20 @@ def test_check_logs_when_application_is_current(monkeypatch, tmp_path):
     assert logs == ["MoviePilot 主程序已是最新版本：v3.0.0"]
 
 
+def test_status_refreshes_stale_application_version(monkeypatch, tmp_path):
+    """旧状态文件中的主程序版本应在读取时更新为当前运行版本。"""
+    manager = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(update_module, "get_app_version", lambda: "v3.0.0")
+    manager._write_item("application", state="idle")
+
+    monkeypatch.setattr(update_module, "get_app_version", lambda: "v3.0.3")
+    status = manager.get_status()
+    application = next(item for item in status.updates if item.type == "application")
+
+    assert status.current_version == "v3.0.3"
+    assert application.current_version == "v3.0.3"
+
+
 def test_public_download_request_omits_github_authorization(monkeypatch, tmp_path):
     """公开归档下载不得复用 GitHub API 的认证请求头。"""
     manager = _manager(monkeypatch, tmp_path)
@@ -491,6 +505,10 @@ def test_apply_prepared_application_replaces_docker_payload_and_preserves_plugin
         archive.writestr("MoviePilot-v3.1.0/uv.lock", "version = 1\n")
         archive.writestr("MoviePilot-v3.1.0/new.py", "new\n")
         archive.writestr(
+            "MoviePilot-v3.1.0/app/plugins/__init__.py",
+            "new compatibility\n",
+        )
+        archive.writestr(
             "MoviePilot-v3.1.0/app/application/site/__init__.py",
             "",
         )
@@ -531,6 +549,9 @@ def test_apply_prepared_application_replaces_docker_payload_and_preserves_plugin
     assert sync_calls[0][1] == {}
     assert (app_dir / "new.py").read_text(encoding="utf-8") == "new\n"
     assert not (app_dir / "old.py").exists()
+    assert (app_dir / "app" / "plugins" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "new compatibility\n"
     assert (app_dir / "app" / "plugins" / "local_plugin.py").exists()
     assert (resource_dir / "user.sites.v3.bin").read_text(encoding="utf-8") == "old-resource\n"
     assert (resource_dir / "auth.py").read_text(encoding="utf-8") == "new-auth\n"

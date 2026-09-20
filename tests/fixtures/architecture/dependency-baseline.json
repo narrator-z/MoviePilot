@@ -1077,8 +1077,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 8840,
-  "edge_sha256": "ce38390ccb4a1753c872a182588cdddc6f3fc62265741544d0ac7b090d23de45",
+  "edge_count": 8841,
+  "edge_sha256": "86c2bf6f894864e90c7a4f968355c425e8fcae4bf2f235acbd7462488c364999",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -9622,6 +9622,7 @@
     "app.startup.initializers.plugins -> app.runtime.cache",
     "app.startup.initializers.plugins -> app.runtime.compat",
     "app.startup.initializers.plugins -> app.runtime.compat.diagnostics",
+    "app.startup.initializers.plugins -> app.runtime.compat.imports",
     "app.startup.initializers.plugins -> app.runtime.compat.resources",
     "app.startup.initializers.plugins -> app.runtime.execution",
     "app.startup.initializers.plugins -> app.runtime.extensions",

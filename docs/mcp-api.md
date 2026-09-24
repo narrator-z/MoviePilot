@@ -178,6 +178,8 @@ operation ID、权限、副作用、确认、恢复、结果敏感性及精确�
 
 只允许传 `tools/list` 对应 operation 分支中声明的 `path_params`、`query` 和 `body` 字段。不得传 URL、认证头、API Token 或任意 HTTP 方法。
 
+`body` 使用原生 JSON 值。对象和数组直接传入；仅在选定的 operation 允许时传 `null`。当前唯一的字符串请求体为 `system.upgrade.dev` 的固定值 `"dev"`。网关会按选定的 operation 合同校验请求体类型和字段。
+
 `search.torrents` 可能按媒体标题与别名分轮搜索站点：MoviePilot 内层请求最多等待 290 秒，Agent 工具总等待上限为 300 秒，预留 10 秒处理超时与返回结果；V3 MCP 包装层继续使用原有 `mcp_proxy_timeout` 配置（默认 600 秒）。其它 operation 沿用原有超时配置。`page` / `count` 只分页已完成的搜索结果，不会缩短站点搜索过程。
 
 查询结果的兼容分页合同如下：
@@ -336,7 +338,16 @@ MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所�
 #### GitHub Token 授权
 
 GitHub Token 是可选的管理员配置，可在设置页或首次初始化页通过 GitHub Device Flow 授权，
-也可以直接保存已有的 PAT。授权接口只返回脱敏状态，不会把访问 Token 或刷新 Token 放进响应。
+也可以直接保存已有的 PAT。Device Flow 请求 `read:user`、`repo`、`workflow`：用于读取授权
+用户身份、读写公开和私有仓库，以及推送 GitHub Actions 工作流文件。旧 OAuth Token 缺少这些
+范围时，状态接口会提示重新授权。授权接口只返回脱敏状态，不会把访问 Token 或刷新 Token
+放进响应。
+
+反馈问题和创建 PR 两个 Agent Skill 共用服务端 Token。它们先读取目标仓库的
+`REPO_GITHUB_TOKEN`，再回退到 `GITHUB_TOKEN`；两种设置页入口（Device Flow 和手动 PAT）
+都保存到 `GITHUB_TOKEN`，因此授权一次后无需在对话中重复提供凭据。OAuth 授权包含仓库读写
+权限，GitHub 会在确认页展示；手动 PAT 也必须具备目标仓库对应的 Issue、Fork、Contents、PR
+和必要时的 workflow 权限。
 
 已完成初始化的实例使用登录态超级管理员接口：
 
@@ -352,8 +363,9 @@ GitHub Token 是可选的管理员配置，可在设置页或首次初始化页�
 `/api/v1/login/github-auth/start`；这些接口只在系统尚未创建用户时开放，初始化完成后返回
 `409`，不应作为已初始化实例的未认证管理入口。
 
-`GITHUB_TOKEN` 属于敏感运行时设置，通用环境设置接口只返回脱敏值。需要访问私有仓库或执行
-写操作时，仍须提供具备对应 GitHub 仓库权限的 Token；设备授权流程本身不替调用方扩大仓库权限。
+`GITHUB_TOKEN` 属于敏感运行时设置，通用环境设置接口只返回脱敏值。Agent Skill 只读取服务端
+配置，不会要求用户在聊天中发送 Token 或密码。OAuth 与 PAT 实际能访问的仓库仍受 GitHub
+账号和仓库策略限制。
 
 客户端可发送 `X-MoviePilot-Locale: zh-CN|zh-TW|en-US` 或 `Accept-Language`。后端会按当前请求语言直接翻译顶层 `message`；未提供语言头时使用简体中文，翻译缺失时回退原文本。SSE 和业务数据中原有的 `text_i18n`、`error_i18n` 等展示字段继续保留。
 
@@ -389,7 +401,7 @@ FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返�
 | GET | `/api/v1/media/recognize` | 识别标题，参数：`title`、`subtitle`、`custom_words`，可选 `media_source`；当 `title` 为含目录的媒体文件路径时，会合并父目录中的名称、年份等信息 |
 | GET | `/api/v1/media/recognize_file` | 识别文件路径，参数：`path`，可选 `media_source` |
 | GET | `/api/v1/media/{media_id}` | 按原生 ID 查询影视或音乐详情；必填参数：`media_source`、`type_name`，其中 `media_source` 与路径中的 `media_id` 组成统一媒体身份，`type_name` 支持电影、电视剧和音乐 |
-| POST | `/api/v1/media/scrape/{storage}` | 刮削媒体元数据；请求体为 `FileItem`，可选查询参数 `media_source`、`media_id`、`type_name`（电影/电视剧/音乐）。音乐会按策略处理音频标签、封面和歌词 |
+| POST | `/api/v1/media/scrape/{storage}` | 刮削媒体元数据；请求体为 `FileItem`，可选查询参数 `media_source`、`media_id`、`type_name`（电影/电视剧/音乐）和 TMDB `episode_group`。剧集组用于指定电视剧的季集顺序；音乐会按策略处理音频标签、封面和歌词 |
 | POST | `/api/v1/transfer/manual/target-path` | 按源文件与目录配置匹配手动整理目标路径；请求体为 `ManualTransferItem`，该接口不执行媒体识别 |
 | POST | `/api/v1/transfer/manual/history` | 查询文件、批量文件或目录命中的成功整理历史摘要，用于进入手动整理界面时显示重新整理状态 |
 | POST | `/api/v1/transfer/manual` | 手动整理；请求体可用 `media_source` + `media_id` 指定本次识别与刮削数据源；`logids` 会先还原为同一个显式文件批次，多首音乐因而共享专辑识别上下文；音乐请求未传 `music_type` 时，目录按 `album`、文件按 `recording` 解释；可用最多三项的 `music_release_regions`（ISO 3166-1）和 `music_release_scripts`（ISO 15924）仅覆盖本次 MusicBrainz 发行版本排序，省略时继承系统设置；命中持久失败历史，且未指定媒体身份、未开启 `reorganize` 时，由调度器重试原计划（包括 `logid` 历史入口）；显式重整先校验并放弃确定失败任务，再清理旧目标和记录；旧版失败历史仍清理后重试；`reorganize=true` 时清理命中的成功历史和非移动模式旧目标后重新整理 |

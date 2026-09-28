@@ -43,11 +43,11 @@
       "app.application": 0,
       "app.chain": 0
     },
-    "count": 52,
+    "count": 53,
     "counts_by_kind": {
       "network_sdk": 26,
       "protocol_operation": 7,
-      "raw_transport": 19
+      "raw_transport": 20
     },
     "entries": [
       {
@@ -704,11 +704,12 @@
       },
       {
         "bindings": [
+          "from:plexapi.base.PlexPartialObject as PlexPartialObject",
           "from:plexapi.exceptions.NotFound as NotFound",
           "from:plexapi.myplex.MyPlexAccount as MyPlexAccount",
           "from:plexapi.server.PlexServer as PlexServer"
         ],
-        "fingerprint": "76c1334863dc6c6623ce6ad3415bec5ff92656f51c31e4d982285898f193e57e",
+        "fingerprint": "55baa4290bb62468d504e954add3921c0068f3a3c77aa3db92667ae9022909ca",
         "kind": "network_sdk",
         "source": "app.modules.plex.plex",
         "target": "plexapi",
@@ -997,6 +998,18 @@
       },
       {
         "bindings": [
+          "import:websocket as websocket"
+        ],
+        "fingerprint": "09e1909ac750fe40b145dde8fee52eedf84aaf2123f6a1bc38109252c89d6000",
+        "kind": "raw_transport",
+        "source": "app.startup.composition.network",
+        "target": "websocket",
+        "uses": [
+          "_NetworkTestTransportAdapter.websocket.connect|call:create_connection"
+        ]
+      },
+      {
+        "bindings": [
           "import:urllib3.fields as _urllib3_fields"
         ],
         "fingerprint": "cb6f0a314aeb1e2d3e76c240aa20460ac0c36d9f5c18c1a6ea3170f64dd3366b",
@@ -1084,8 +1097,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 8905,
-  "edge_sha256": "4b1071e792b6d5738403729fc5b3fc9fedf86c72d5c2e4236fead4ed54c1c545",
+  "edge_count": 8936,
+  "edge_sha256": "e1ea6856352e226c0e558f109eee6d0448b3a39a31b1bf8736c5392be79b7b21",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -3726,8 +3739,15 @@
     "app.application.music.projection -> app.domain.context",
     "app.application.music.projection -> app.schemas",
     "app.application.music.projection -> app.schemas.types",
-    "app.application.network -> app.foundation",
-    "app.application.network -> app.foundation.url",
+    "app.application.nettest.catalogue -> app.application",
+    "app.application.nettest.catalogue -> app.application.nettest",
+    "app.application.nettest.catalogue -> app.application.nettest.domain",
+    "app.application.nettest.catalogue -> app.foundation",
+    "app.application.nettest.catalogue -> app.foundation.url",
+    "app.application.network -> app.application",
+    "app.application.network -> app.application.nettest",
+    "app.application.network -> app.application.nettest.catalogue",
+    "app.application.network -> app.application.nettest.domain",
     "app.application.notification -> app.application",
     "app.application.notification -> app.application.service",
     "app.application.notification -> app.schemas",
@@ -4549,6 +4569,9 @@
     "app.chain.interaction -> app.chain.base",
     "app.chain.interaction -> app.chain.download",
     "app.chain.interaction -> app.chain.media",
+    "app.chain.interaction -> app.chain.music_interaction",
+    "app.chain.interaction -> app.chain.music_interaction.music",
+    "app.chain.interaction -> app.chain.music_interaction.subscribe",
     "app.chain.interaction -> app.chain.search",
     "app.chain.interaction -> app.chain.search.facade",
     "app.chain.interaction -> app.chain.subscribe",
@@ -4558,9 +4581,6 @@
     "app.chain.interaction -> app.domain.episode",
     "app.chain.interaction -> app.domain.meta",
     "app.chain.interaction -> app.domain.meta.metabase",
-    "app.chain.interaction -> app.domain.title",
-    "app.chain.interaction -> app.foundation",
-    "app.chain.interaction -> app.foundation.url",
     "app.chain.interaction -> app.runtime",
     "app.chain.interaction -> app.runtime.log",
     "app.chain.interaction -> app.schemas",
@@ -4788,6 +4808,29 @@
     "app.chain.message -> app.schemas.message",
     "app.chain.message -> app.schemas.notification",
     "app.chain.message -> app.schemas.types",
+    "app.chain.music_interaction.music -> app.chain",
+    "app.chain.music_interaction.music -> app.chain.media",
+    "app.chain.music_interaction.music -> app.domain",
+    "app.chain.music_interaction.music -> app.domain.context",
+    "app.chain.music_interaction.music -> app.domain.meta",
+    "app.chain.music_interaction.music -> app.domain.meta.metamusic",
+    "app.chain.music_interaction.music -> app.domain.title",
+    "app.chain.music_interaction.music -> app.foundation",
+    "app.chain.music_interaction.music -> app.foundation.url",
+    "app.chain.music_interaction.music -> app.schemas",
+    "app.chain.music_interaction.music -> app.schemas.message",
+    "app.chain.music_interaction.music -> app.schemas.types",
+    "app.chain.music_interaction.subscribe -> app.chain",
+    "app.chain.music_interaction.subscribe -> app.chain.download",
+    "app.chain.music_interaction.subscribe -> app.chain.music_interaction",
+    "app.chain.music_interaction.subscribe -> app.chain.music_interaction.music",
+    "app.chain.music_interaction.subscribe -> app.chain.subscribe",
+    "app.chain.music_interaction.subscribe -> app.chain.subscribe.facade",
+    "app.chain.music_interaction.subscribe -> app.domain",
+    "app.chain.music_interaction.subscribe -> app.domain.context",
+    "app.chain.music_interaction.subscribe -> app.schemas",
+    "app.chain.music_interaction.subscribe -> app.schemas.message",
+    "app.chain.music_interaction.subscribe -> app.schemas.types",
     "app.chain.musicbrainz -> app.chain",
     "app.chain.musicbrainz -> app.chain.base",
     "app.chain.musicbrainz -> app.domain",
@@ -9303,6 +9346,7 @@
     "app.startup.composition.network -> app.application.image",
     "app.startup.composition.network -> app.application.messaging",
     "app.startup.composition.network -> app.application.messaging.ingress",
+    "app.startup.composition.network -> app.application.module",
     "app.startup.composition.network -> app.application.network",
     "app.startup.composition.network -> app.chain",
     "app.startup.composition.network -> app.chain.download",
@@ -9993,7 +10037,7 @@
     "app.workflow.actions.transfer_file -> app.workflow",
     "app.workflow.actions.transfer_file -> app.workflow.actions"
   ],
-  "module_count": 1046,
+  "module_count": 1052,
   "modules": [
     "app",
     "app.adapters",
@@ -10282,6 +10326,9 @@
     "app.application.music",
     "app.application.music.catalog",
     "app.application.music.projection",
+    "app.application.nettest",
+    "app.application.nettest.catalogue",
+    "app.application.nettest.domain",
     "app.application.network",
     "app.application.notification",
     "app.application.outbox",
@@ -10416,6 +10463,9 @@
     "app.chain.media.search",
     "app.chain.mediaserver",
     "app.chain.message",
+    "app.chain.music_interaction",
+    "app.chain.music_interaction.music",
+    "app.chain.music_interaction.subscribe",
     "app.chain.musicbrainz",
     "app.chain.notification",
     "app.chain.recommend",

@@ -58,6 +58,18 @@ class _TransferRetryExhausted(RuntimeError):
         self.snapshot = snapshot
 
 
+def _download_history_media_type(
+        history_type: Optional[str],
+        fallback: Optional[MediaType],
+) -> Optional[MediaType]:
+    """使用下载历史身份类型；缺少有效类型时回退到整理调用提示。"""
+    try:
+        media_type = MediaType(history_type)
+    except (TypeError, ValueError):
+        return fallback
+    return fallback if media_type == MediaType.UNKNOWN else media_type
+
+
 class _DurableTransferStepRunner:
     """以稳定顺序、lease 和 attempt fencing 执行整理外部步骤。"""
 
@@ -488,7 +500,7 @@ class TransferExecutionOwner(_TransferOwnerBase):
                         # 已把 mediainfo 声明为 MediaInfo | MusicInfo | None，重复
                         # 声明会遮蔽它，把音乐识别结果判成类型错误
                         mediainfo = MediaChain().recognize_media(
-                            mtype=task.mtype or MediaType(download_history.type),
+                            mtype=_download_history_media_type(download_history.type, task.mtype),
                             media_source=download_history.media_source,
                             media_id=download_history.media_id,
                             music_type=self._download_history_music_type(download_history),

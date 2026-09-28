@@ -841,12 +841,7 @@
     "no-any-return": 28
   },
   "app/chain/interaction.py": {
-    "arg-type": 4,
-    "assignment": 1,
-    "no-untyped-call": 1,
-    "return-value": 1,
-    "union-attr": 16,
-    "var-annotated": 1
+    "no-untyped-call": 1
   },
   "app/chain/mediaserver.py": {
     "arg-type": 3,
@@ -1917,13 +1912,13 @@
   },
   "app/modules/plex/plex.py": {
     "arg-type": 2,
-    "assignment": 3,
+    "assignment": 2,
     "misc": 1,
     "no-any-return": 1,
-    "no-untyped-def": 10,
+    "no-untyped-def": 9,
     "operator": 5,
     "return-value": 1,
-    "type-arg": 4,
+    "type-arg": 3,
     "union-attr": 4,
     "var-annotated": 3
   },
@@ -2410,7 +2405,6 @@
   },
   "app/monitor/snapshot.py": {
     "type-arg": 5,
-    "valid-type": 1,
     "var-annotated": 1
   },
   "app/monitor/syslimits.py": {

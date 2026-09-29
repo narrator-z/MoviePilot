@@ -117,3 +117,159 @@ vulnerabilities:
       - pkg:golang/google.golang.org/grpc
     expired_at: 2026-11-20
     statement: gRPC-Go is embedded in the rclone binary (1.75.0); CVE-2026-84445 is fixed only in grpc 1.82.2/1.83.2/1.85.0-dev, for which no patched rclone release is available yet. Reassess when this exception expires.
+
+  # rsync 3.5.0 CVE batch (disclosed 2026-09). OS-package (dpkg) findings carry no file
+  # path in the structured ignore model, so a wildcard keeps each rule scoped via 
+  # (rsync only) while still matching the Debian OS-package finding.
+  - id: CVE-2026-53783
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53784
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53785
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53789
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53790
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53791
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53793
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53795
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53802
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-53803
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70452
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70455
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70456
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70457
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70458
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70460
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70461
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70463
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+  - id: CVE-2026-70464
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/rsync@3.4.1+ds1-5+deb13u4
+      - pkg:deb/debian/rsync
+    expired_at: 2026-11-20
+    statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.

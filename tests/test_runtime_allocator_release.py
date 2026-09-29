@@ -1,4 +1,4 @@
-"""分配器空闲页归还：按进程实际加载的分配器选择 jemalloc purge 或 glibc malloc_trim。"""
+"""分配器空闲页归还：按进程实际加载的分配器选择 jemalloc purge 或 glibc malloc_trim，以及线程缓存刷新。"""
 
 from __future__ import annotations
 
@@ -35,6 +35,16 @@ class _FakeLib:
             return self._symbols[name]
         except KeyError:
             raise AttributeError(name) from None
+
+
+@pytest.fixture(autouse=True)
+def _fresh_symbol_resolution():
+    """符号解析按进程缓存；每个用例换用不同的伪 libc，前后都清空缓存。"""
+    runtime_gc._process_libc.cache_clear()
+    runtime_gc._jemalloc_mallctl.cache_clear()
+    yield
+    runtime_gc._process_libc.cache_clear()
+    runtime_gc._jemalloc_mallctl.cache_clear()
 
 
 @pytest.fixture
@@ -103,3 +113,77 @@ def test_full_gc_releases_allocator_after_collect(monkeypatch):
     SchedulerMaintenanceOwner.full_gc()
 
     assert order == ["collect", "release"]
+
+
+def test_thread_cache_flush_uses_jemalloc(linux, monkeypatch):
+    mallctl = _FakeSymbol()
+    _use_lib(monkeypatch, _FakeLib(mallctl=mallctl))
+
+    assert runtime_gc.flush_thread_allocator_cache() is True
+    assert mallctl.calls == [(b"thread.tcache.flush", None, None, None, 0)]
+
+
+def test_thread_cache_flush_resolves_symbols_once(linux, monkeypatch):
+    mallctl = _FakeSymbol()
+    loads: list[str] = []
+
+    def load(_name):
+        loads.append("load")
+        return _FakeLib(mallctl=mallctl)
+
+    monkeypatch.setattr(runtime_gc.ctypes, "CDLL", load)
+
+    for _ in range(3):
+        runtime_gc.flush_thread_allocator_cache()
+
+    # 线程池每个任务结束都可能调用，C 库只加载一次
+    assert loads == ["load"]
+    assert len(mallctl.calls) == 3
+
+
+def test_thread_cache_flush_is_a_no_op_without_jemalloc(linux, monkeypatch):
+    trim = _FakeSymbol()
+    _use_lib(monkeypatch, _FakeLib(malloc_trim=trim))
+
+    assert runtime_gc.flush_thread_allocator_cache() is False
+    assert trim.calls == []
+
+
+
+def test_background_thread_enabled_at_runtime(linux, monkeypatch):
+    monkeypatch.setenv("MALLOC_CONF", "narenas:8,dirty_decay_ms:5000")
+    mallctl = _FakeSymbol()
+    _use_lib(monkeypatch, _FakeLib(mallctl=mallctl))
+
+    assert runtime_gc.configure_allocator_background_thread() is True
+    assert [call[0] for call in mallctl.calls] == [b"max_background_threads", b"background_thread"]
+    assert all(call[1] is None and call[2] is None for call in mallctl.calls)
+    assert runtime_gc.os.environ["MALLOC_CONF"] == "narenas:8,dirty_decay_ms:5000"
+
+
+def test_inherited_background_thread_conf_is_stripped(linux, monkeypatch):
+    monkeypatch.setenv(
+        "MALLOC_CONF",
+        "background_thread:true,max_background_threads:1,narenas:8,dirty_decay_ms:5000,muzzy_decay_ms:0",
+    )
+    mallctl = _FakeSymbol()
+    _use_lib(monkeypatch, _FakeLib(mallctl=mallctl))
+
+    assert runtime_gc.configure_allocator_background_thread() is False
+    assert mallctl.calls == []
+    assert runtime_gc.os.environ["MALLOC_CONF"] == "narenas:8,dirty_decay_ms:5000,muzzy_decay_ms:0"
+
+
+def test_conf_with_only_background_thread_is_removed(linux, monkeypatch):
+    monkeypatch.setenv("MALLOC_CONF", "background_thread:false")
+    _use_lib(monkeypatch, _FakeLib(mallctl=_FakeSymbol()))
+
+    assert runtime_gc.configure_allocator_background_thread() is False
+    assert "MALLOC_CONF" not in runtime_gc.os.environ
+
+
+def test_background_thread_is_a_no_op_without_jemalloc(linux, monkeypatch):
+    monkeypatch.delenv("MALLOC_CONF", raising=False)
+    _use_lib(monkeypatch, _FakeLib(malloc_trim=_FakeSymbol()))
+
+    assert runtime_gc.configure_allocator_background_thread() is False

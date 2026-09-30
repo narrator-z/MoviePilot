@@ -1021,8 +1021,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 9050,
-  "edge_sha256": "bfebdefba60eb6cafd5c5a215d15ca326ac992a4f55aec9bad035db05ce1b631",
+  "edge_count": 9052,
+  "edge_sha256": "66809e45e38522f25737a2b7a9ccccdf757c765cabcc39d945819b106bbaea5b",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -5448,6 +5448,8 @@
     "app.chain.transfer.execution -> app.application.directory",
     "app.chain.transfer.execution -> app.application.history",
     "app.chain.transfer.execution -> app.application.history.retry",
+    "app.chain.transfer.execution -> app.application.music",
+    "app.chain.transfer.execution -> app.application.music.observation",
     "app.chain.transfer.execution -> app.application.transfer",
     "app.chain.transfer.execution -> app.application.transfer.execution",
     "app.chain.transfer.execution -> app.application.transfer.workflow",

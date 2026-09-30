@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Tuple, Union, cast
 
 from app.application.directory import DirectoryHelper
-from app.application.history.retry import (
-    max_failed_retries,
-)
+from app.application.history.retry import max_failed_retries
+from app.application.music.observation import BLOCKING_MUSIC_RECOGNITION_STATES
 from app.application.transfer.execution import (
     TransferExecutionCheckpoint,
     TransferExecutionCommand,
@@ -31,17 +30,13 @@ from app.chain.media import MediaChain
 from app.chain.tmdb import TmdbChain
 from app.chain.transfer.contract import _TransferOwnerBase
 from app.chain.transfer.music import defer_music_recognition, refresh_music_retry_context
-from app.application.music.observation import BLOCKING_MUSIC_RECOGNITION_STATES
 from app.chain.transfer.records import apply_download_history_classification
 from app.domain.context import MediaInfo, MusicInfo
 from app.domain.media import is_music_media_source
 from app.domain.meta.metamusic import MetaMusic
 from app.runtime.log import logger
 from app.schemas.transfer import TransferInfo
-from app.schemas.types import (
-    MediaSource,
-    MediaType,
-)
+from app.schemas.types import MediaSource, MediaType
 
 
 class _TransferRetryDeferred(RuntimeError):
@@ -483,7 +478,7 @@ class TransferExecutionOwner(_TransferOwnerBase):
         return info
 
     def _resolve_validation_or_degrade(
-        self, task: TransferTask, callback: Optional[Callable] = None
+        self, task: TransferTask, callback: Optional[Callable[..., Any]] = None
     ) -> Optional[Tuple[bool, str]]:
         """上游硬校验与 fork 软降级组合裁决（规划前拦截）。
 

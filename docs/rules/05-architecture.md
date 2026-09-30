@@ -65,13 +65,14 @@ to make the directory tree look symmetrical.
 | `app/application/search/` | Search state and later search-plan use cases |
 | `app/application/download/` | Download task querying/control and selection use cases; `failures.py` owns the frozen failure-cooldown write/query DTOs and persistence Port |
 | `app/application/history/` | History use cases and persistence contracts; DownloadHistory and TransferHistory own deeply frozen DTOs plus typed query/write/staging ports |
-| `app/application/music/` | Multi-source music catalog orchestration |
+| `app/application/music/` | 多来源音乐目录编排；`observation.py` 沿用站点搜索的调用观察模式，隔离一次音乐识别的结果、候选摘要与请求/等待预算，不持有来源客户端、不改变旧模块返回合同；`recognition.py` 通过注入来源回调串行回退、汇总诊断，并按领域候选计划有界补充真实Artist身份别名，子来源共享祖先预算，`catalog.py` 声明目录查询所需的最小来源 Port |
 | `app/application/chain/` | Injectable Chain runtime capabilities: `context.py` owns the typed runtime and persistence dependency aggregate, and `events.py` owns durable event write contracts plus replayable payload conversion |
 | `app/application/agent.py` | Agent orchestration facade and typed `AgentDataContext`; startup injects one explicit data context into the manager, memory, tool and scheduler owners without a process-wide persistence locator |
 | `app/application/invocation.py` | Frozen Agent write-call identity, claim and receipt contracts; the injected repository provides atomic claim, fenced settlement and unresolved-state reads, while `db/adapters/invocation.py` owns short transactions and cold-start recovery is invoked by startup |
 | `app/application/network.py` | System network-test target catalog, immutable public/private projections, URL and redirect admission, response validation and the injected transport Port; startup owns concrete HTTP Adapter assembly |
 | `app/application/outbox.py` | Durable intent, transaction-only stager, short-transaction dispatch store, claim fencing and structured post-commit result contracts |
 | `app/application/transfer/` | Durable transfer use cases: `workflow.py` owns queue service orchestration; `models.py` owns admission/planning/task contracts; `jobs.py` owns in-process task views; `notifications.py` owns failure aggregation; `projection.py` owns domain projections; `execution.py` owns stable operation identity, step/checkpoint state, retry/manual-review commands and terminal-settlement DTOs; `recovery.py` owns failed/corrupt task cleanup and history detachment through the execution repository; `history.py` projects history write fields and file fingerprints; `feedback.py` owns failure stages, notification snapshots and message text, while Chain owns notification delivery and cleanup side effects |
+| `app/chain/transfer/music.py` | 音乐整理的纯标签准入、目录共识、发行分组与曲目上下文编排；`filter.py` 保留通用文件筛选和既有 mixin 调用契约。可信标签在本地完成分类与命名，分类的外部事实补充可由本次用例明确禁用，仍遵守用户策略与人工覆盖 |
 | `app/application/plugin/` | Plugin market catalog, installation command, installed-plugin identity contract and startup migration, runtime port, folder operations and dynamic-route use cases; filenames remain single words (`catalog.py`, `identity.py`, `migration.py`, `install.py`, `runtime.py`, `folders.py`, `routes.py`) |
 | `app/application/server/` | MoviePilot Server reporting and sharing use cases; local data readers and transport callbacks are injected by startup |
 | `app/application/site/` | Configured site catalog, authentication level and index-resource capability; the generated extension and its data bundle stay together here |
@@ -249,11 +250,15 @@ the narrow `app.sdk.scheduler` facade; internal Scheduler owners must not be
 re-exported from the package root, SDK or Compat.
 
 Complexity and concurrency governance covers the complete canonical execution
-surface rather than only public methods. `scripts/architecture/complexity.py --v2`
-uses complete AST child traversal to ratchet private/dunder/nested methods,
-class/file hotspots, and the `app/scheduler/` package, including owners nested
-under `Match`, `TryStar`, and other control-flow nodes. Its generated baseline
-is an evidence ledger, not permission to add another oversized owner.
+surface rather than only public methods. `scripts/architecture/complexity.py`
+checks Ruff C901 (McCabe complexity, limit 15) and PLR1702 (nested blocks, limit 5)
+throughout `app/**/*.py`, excluding only runtime plugin copies in `app/plugins/**`.
+Complete AST traversal maps diagnostics to stable private/dunder/nested function
+owners, including definitions under `Match` and `TryStar`. Existing over-limit
+functions may only decrease; growth is rejected even by `--write`, and reductions
+must be recorded before the check passes. `--report` also records method/class/file
+line-span hotspots for review, but physical line counts never block CI. The former
+v1/v2 line-budget gates are retired; see [code quality](../code-quality.md).
 `scripts/architecture/concurrency.py` resolves canonical imports and aliases for
 native Thread, Timer, thread/process executors, Process, TaskGroup, event-loop
 task submission, asyncio task/thread helpers, and executor hand-off calls. It
@@ -698,6 +703,13 @@ exceptions and value domains used by both modules and upper layers live in
 `schemas`, and module capabilities are exposed to chains only as dispatched
 method names. The directory remains unchanged because discovery and plugin code
 depend on this established runtime root.
+
+SMB 同存储整理由 `app.modules.filemanager.storages.smb` 持有协议调用边界：
+复制调用 `smbclient.copyfile`（CopyChunk），共享内移动调用 `smbclient.rename`，硬链接调用
+`smbclient.link`；跨共享移动先用 SMB 查询确认目标未占用，服务端复制成功后才调用
+`smbclient.remove` 删除源文件。多共享挂载仍属于同一 SMB owner，路径首段选择已配置的共享。源目标同文件检查也通过 SMB 查询，不能使用本地临时下载/上传回退。
+下载器返回的远程路径保留存储 URI，整理 Chain 通过 `StorageChain` 查询源文件，
+不直接依赖 SMB SDK；断线后目标状态不明沿用持久步骤的保守恢复合同。
 
 `app.modules.filemanager` is a lazy compatibility entrypoint. The concrete
 `FileManagerModule` implementation lives in `app.modules.filemanager.module`,

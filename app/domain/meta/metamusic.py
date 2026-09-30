@@ -11,7 +11,7 @@ from Pinyin2Hanzi import DefaultHmmParams, is_pinyin
 from app.domain.meta.metabase import MetaBase
 from app.domain.meta.runtime import get_metainfo_accelerator
 from app.schemas.media import resolve_media_identity
-from app.schemas.types import MediaSource, MediaType
+from app.schemas.types import MUSIC_ENTITY_ALBUM, MediaSource, MediaType
 
 _AUDIO_FORMAT_PATTERN = re.compile(
     r"(?<![A-Z])(?P<format>DSD(?:64|128|256|512)?|DSF|DFF|SACD|FLAC|ALAC|APE|WAV|WAVE|AIFF?|PCM|"
@@ -35,7 +35,6 @@ _AUDIO_FORMAT_ALIASES = {
     "WAVE": "WAV",
     "AIF": "AIFF",
     "VORBIS": "OGG",
-    "M4A": "AAC",
     "DSF": "DSD",
     "DFF": "DSD",
     "SACD": "DSD",
@@ -43,6 +42,28 @@ _AUDIO_FORMAT_ALIASES = {
 _LOSSLESS_AUDIO_FORMATS = frozenset({"DSD", "FLAC", "ALAC", "APE", "WAV", "AIFF", "PCM"})
 _LOSSY_AUDIO_FORMATS = frozenset({"MP3", "AAC", "OGG", "OPUS", "WMA"})
 logger = logging.getLogger(__name__)
+
+
+def parse_music_release_types(values: Any, compilation: Optional[str] = None) -> tuple[Optional[str], list[str]]:
+    """将标签中的发行主副类型归一，保留 EP/Single，不从曲目数推断类型。"""
+    primary_names = {"album": "Album", "studio album": "Album", "专辑": "Album", "專輯": "Album",
+                     "single": "Single", "单曲": "Single", "單曲": "Single", "ep": "EP",
+                     "broadcast": "Broadcast", "other": "Other"}
+    secondary_names = {"compilation": "Compilation", "精选集": "Compilation", "合辑": "Compilation",
+                       "soundtrack": "Soundtrack", "ost": "Soundtrack", "原声": "Soundtrack",
+                       "live": "Live", "现场": "Live", "remix": "Remix", "dj-mix": "DJ-mix",
+                       "mixtape": "Mixtape/Street", "spokenword": "Spokenword"}
+    primary: Optional[str] = None
+    secondary: list[str] = []
+    for value in _string_list(values):
+        for token in re.split(r"[;,/+\\]", value):
+            key = token.strip().casefold()
+            primary = primary or primary_names.get(key)
+            if key in secondary_names and secondary_names[key] not in secondary:
+                secondary.append(secondary_names[key])
+    if str(compilation or "").strip().casefold() in {"1", "true", "yes"} and "Compilation" not in secondary:
+        secondary.append("Compilation")
+    return primary, secondary
 
 
 def normalize_audio_format(value: Any) -> Optional[str]:
@@ -391,7 +412,12 @@ _MUSIC_DIR_YEAR_RE = re.compile(r"[(\[]\s*(?P<year>(?:19|20)\d{2})\s*[)\]]")
 _MUSIC_DIR_PREFIX_YEAR_RE = re.compile(
     r"^(?P<year>(?:19|20)\d{2})\s*[-._\s]+(?!(?:19|20)\d{2}\b)"
 )
-# 目录名中的括号补充说明（格式、音质、厂牌等），如 [FLAC 24bit-96kHz]
+# 独立中间年份不能与数字专辑名混淆，必须同时存在艺人、年份及作品三个部分。
+_MUSIC_ALBUM_YEAR_RE = re.compile(
+    r"^(?P<artist>.+?)\s*[-–—−－]\s*(?P<year>(?:19|20)\d{2})"
+    r"\s*[-–—−－]\s*(?P<title>\S.*)$"
+)
+# 目录括号既可能是规格，也可能是作品或发行版本的一部分，需要按内容区分。
 _MUSIC_BRACKET_RE = re.compile(r"\[[^\]]*\]|【[^】]*】|\([^)]*\)")
 _MUSIC_RECORDING_VERSION_RE = re.compile(
     r"[\[(（【]([^\])）】]*(?:\blive\b|\bremix\b|\binstrumental\b|\bacoustic\b|"
@@ -722,6 +748,20 @@ class MetaMusic(MetaBase):
         media_source: Optional[MediaSource] = None,
         media_id: Optional[str] = None,
         parse_title: bool = False,
+        *,
+        musicbrainz_release_id: Optional[str] = None,
+        musicbrainz_release_group_id: Optional[str] = None,
+        musicbrainz_release_track_id: Optional[str] = None,
+        original_year: Optional[int] = None,
+        release_year: Optional[int] = None,
+        field_sources: Optional[dict[str, str]] = None,
+        music_type: Optional[str] = None,
+        album_type: Optional[str] = None,
+        secondary_types: Optional[list[str]] = None,
+        music_layout: Optional[str] = None,
+        cue_filename: Optional[str] = None,
+        cue_tracks: Optional[list[dict[str, Any]]] = None,
+        organization_error: Optional[str] = None,
     ):
         """初始化音乐标题、标签、音频规格和统一媒体身份。"""
         # 音乐无季集概念，仅复用 MetaBase 的基础字段初始化，不触发副标题季集识别
@@ -732,7 +772,20 @@ class MetaMusic(MetaBase):
         self.artists = list(artists) if artists else []
         self.album = album
         self.album_artist = album_artist
-        self.year = year
+        self.year = year if year is not None else release_year or original_year
+        self.original_year = original_year
+        self.release_year = release_year
+        self.musicbrainz_release_id = musicbrainz_release_id
+        self.musicbrainz_release_group_id = musicbrainz_release_group_id
+        self.musicbrainz_release_track_id = musicbrainz_release_track_id
+        self.field_sources = dict(field_sources or {})
+        self.music_type = music_type
+        self.album_type = album_type
+        self.secondary_types = list(secondary_types or [])
+        self.music_layout = music_layout
+        self.cue_filename = cue_filename
+        self.cue_tracks = [dict(track) for track in cue_tracks or []]
+        self.organization_error = organization_error
         self.disc_number = disc_number
         self.track_number = track_number
         self.total_discs = total_discs
@@ -752,6 +805,21 @@ class MetaMusic(MetaBase):
         if parse_title:
             # 种子/文件名字符串场景：解析艺术家、曲名、年份并补充音质参数
             self.apply_title(self.title or org_string or "")
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """恢复旧版解析缓存时补齐发行事实和字段来源，避免丢失旧字段或共享字典。"""
+        self.__dict__.update(state)
+        for key in ("musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id",
+                    "original_year", "release_year"):
+            self.__dict__.setdefault(key, None)
+        self.field_sources = dict(state.get("field_sources") or {})
+        self.music_type = state.get("music_type")
+        self.album_type = state.get("album_type")
+        self.secondary_types = list(state.get("secondary_types") or [])
+        self.music_layout = state.get("music_layout")
+        self.cue_filename = state.get("cue_filename")
+        self.cue_tracks = [dict(track) for track in state.get("cue_tracks") or []]
+        self.organization_error = state.get("organization_error")
 
     @classmethod
     def parse_query(cls, query: str) -> "MetaMusic":
@@ -824,6 +892,11 @@ class MetaMusic(MetaBase):
                 meta.title = native_title
         if not meta.version:
             meta.version = cls._resource_version(title, subtitle)
+        meta.field_sources.update({
+            key: "torrent" for key in ("title", "artists", "album", "year", "version",
+                                      "audio_format", "audio_lossless", "bit_depth", "sample_rate", "bitrate")
+            if getattr(meta, key) not in (None, "", [])
+        })
         return meta
 
     @classmethod
@@ -971,6 +1044,17 @@ class MetaMusic(MetaBase):
             isrc=info.isrc,
             media_source=info.media_source,
             media_id=info.media_id,
+            music_type=getattr(info, "music_type", None),
+            album_type=getattr(info, "album_type", None),
+            secondary_types=getattr(info, "secondary_types", None),
+            music_layout=getattr(info, "music_layout", None),
+            organization_error=getattr(info, "organization_error", None),
+            musicbrainz_release_id=getattr(info, "musicbrainz_release_id", None),
+            musicbrainz_release_group_id=getattr(info, "musicbrainz_release_group_id", None),
+            musicbrainz_release_track_id=getattr(info, "musicbrainz_release_track_id", None),
+            original_year=getattr(info, "original_year", None),
+            release_year=getattr(info, "release_year", None),
+            field_sources=getattr(info, "field_sources", None),
         )
 
     @classmethod
@@ -996,12 +1080,14 @@ class MetaMusic(MetaBase):
         artist = majority_artist if majority_artist and artist_votes[majority_artist] >= threshold else None
         return cls(
             org_string=directory_name,
+            music_type=MUSIC_ENTITY_ALBUM,
             title=album or directory.get("album") or directory_name,
             album=album or directory.get("album"),
             artists=[artist or directory.get("artist")]
             if artist or directory.get("artist") else [],
             album_artist=artist or directory.get("artist"),
             year=directory.get("year"),
+            version=directory.get("version"),
         )
 
     @property
@@ -1045,12 +1131,16 @@ class MetaMusic(MetaBase):
             self.audio_format, self.audio_lossless, self.bit_depth, self.sample_rate, self.bitrate
         )
 
-    def apply_audio_quality(self, value: Any, overwrite: bool = False) -> None:
+    def apply_audio_quality(
+            self, value: Any, overwrite: bool = False, evidence_source: Optional[str] = None,
+    ) -> None:
         """从资源文本补充音质参数，默认保留文件标签读取到的实际值。"""
         parsed = parse_audio_quality(value)
         for key, parsed_value in parsed.items():
             if parsed_value is not None and (overwrite or getattr(self, key, None) is None):
                 setattr(self, key, parsed_value)
+                if evidence_source:
+                    self.field_sources[key] = evidence_source
         self.audio_format = normalize_audio_format(self.audio_format)
         self.audio_lossless = infer_audio_lossless(self.audio_format, self.audio_lossless)
 
@@ -1060,7 +1150,7 @@ class MetaMusic(MetaBase):
         公共层先完成字符归一、音质与干扰信息剔除；随后由注册中心依次匹配
         命名模式和对应解析器，最后统一回填结构化字段并提取曲序前缀。
         """
-        raw = str(value or "")
+        raw = self._normalize_album_year(str(value or ""))
         if not self.version:
             self.version = self._resource_version(raw, None)
         accelerator = get_metainfo_accelerator()
@@ -1663,7 +1753,26 @@ class MetaMusic(MetaBase):
     def parse_disc_dir(cls, name: str) -> Optional[int]:
         """识别 CD1、Disc 2 这类碟片子目录并返回碟号。"""
         match = _MUSIC_DISC_DIR_RE.match(str(name or "").strip())
-        return int(match.group("num")) if match else None
+        return int(match.group("num")) if match and int(match.group("num")) > 0 else None
+
+    @staticmethod
+    def _normalize_album_year(value: str) -> str:
+        """在 Python/Rust 分流前统一艺人-年份-作品，保留数字作品及年份区间。"""
+        if _MUSIC_YEAR_RANGE_DETECT_RE.search(value) or _MUSIC_AUDIO_RELEASE_TAIL_RE.search(value):
+            return value
+        match = _MUSIC_ALBUM_YEAR_RE.fullmatch(value.strip())
+        if not match or match.group("artist").strip().isdigit():
+            return value
+        artist, year, title = match.group("artist", "year", "title")
+        return f"{artist.strip()} - {title.strip()} ({year})"
+
+    @staticmethod
+    def _clean_directory_bracket(match: re.Match[str]) -> str:
+        """只删除已知规格/内容评级，未知括号及版本名称保留作为作品证据。"""
+        content = match.group()[1:-1].strip()
+        if _MUSIC_SPEC_SEGMENT_RE.fullmatch(content) or content.casefold() in {"explicit", "clean"}:
+            return " "
+        return match.group()
 
     @classmethod
     def parse_album_dir(cls, name: str) -> dict[str, Any]:
@@ -1671,9 +1780,10 @@ class MetaMusic(MetaBase):
 
         支持 `歌手 - 专辑 (2004) [FLAC 24bit-96kHz]` 等常见命名。
         """
-        text = cls._clean_text(name)
+        text = cls._normalize_album_year(cls._normalize_text(name))
         if not text:
             return {}
+        quality_text = text
         year = None
         prefixed_year = False
         year_match = _MUSIC_DIR_YEAR_RE.search(text)
@@ -1686,9 +1796,10 @@ class MetaMusic(MetaBase):
                 year = int(prefix_year_match.group("year"))
                 text = text[prefix_year_match.end():]
                 prefixed_year = True
-        # 括号内的格式/音质描述先剥离出专辑名，但仍可用于音质解析
-        brackets = " ".join(fragment for fragment in _MUSIC_BRACKET_RE.findall(text))
-        album_text = cls._clean_text(_MUSIC_BRACKET_RE.sub(" ", text))
+        # Live/Deluxe 以及未知副标题均参与身份确认，不能像音质标签一样整体删除。
+        album_text = cls._clean_text(cls._strip_spec_segments(
+            _MUSIC_BRACKET_RE.sub(cls._clean_directory_bracket, text)
+        ))
         if not album_text:
             return {}
         artist, album = (
@@ -1700,7 +1811,8 @@ class MetaMusic(MetaBase):
             "artist": artist,
             "album": album,
             "year": year,
-            "quality_text": cls._clean_text(f"{album_text} {brackets}"),
+            "version": cls._resource_version(album, None),
+            "quality_text": quality_text,
         }
 
     def apply_path_context(self, path: "str | Path") -> "MetaMusic":
@@ -1712,7 +1824,7 @@ class MetaMusic(MetaBase):
         """
         file_path = Path(path)
         stem = file_path.stem
-        title_from_name = not self.title or self.title == stem
+        title_from_name = not self.title or (self.title == stem and self.field_sources.get("title") != "tag")
 
         # 曲序/碟号前缀是文件路径的强结构，先于通用艺术家-标题模式剥离，
         # 避免「01 - One More Time」把 01 误判为艺术家。
@@ -1730,6 +1842,7 @@ class MetaMusic(MetaBase):
             filename_meta.disc_number = disc_number
         if title_from_name and filename_meta.title:
             self.title = filename_meta.title
+            self.field_sources["title"] = "filename"
         for field_name in (
             "artists",
             "album",
@@ -1750,6 +1863,7 @@ class MetaMusic(MetaBase):
             parsed_value = getattr(filename_meta, field_name, None)
             if current_value in (None, "", []) and parsed_value not in (None, "", []):
                 setattr(self, field_name, parsed_value)
+                self.field_sources[field_name] = "filename"
 
         # 目录结构：父目录可能是碟片目录，专辑目录再往上一级
         parent = file_path.parent
@@ -1758,6 +1872,7 @@ class MetaMusic(MetaBase):
         if parent_disc is not None:
             if self.disc_number is None:
                 self.disc_number = parent_disc
+                self.field_sources["disc_number"] = "directory"
             album_dir = parent.parent
         dir_info = self.parse_album_dir(album_dir.name)
         if dir_info:
@@ -1765,15 +1880,23 @@ class MetaMusic(MetaBase):
             if dir_info.get("artist") or dir_info.get("year"):
                 if not self.album and dir_info.get("album"):
                     self.album = dir_info["album"]
+                    self.field_sources["album"] = "directory"
                 if not self.artists and dir_info.get("artist"):
                     self.artists = [dir_info["artist"]]
+                    self.field_sources["artists"] = "directory"
                 if not self.album_artist and dir_info.get("artist"):
                     self.album_artist = dir_info["artist"]
+                    self.field_sources["album_artist"] = "directory"
             if self.year is None and dir_info.get("year"):
                 self.year = dir_info["year"]
+                self.field_sources["year"] = "directory"
+            if title_from_name and not self.version and dir_info.get("version"):
+                # 目录版本可补无标签曲目，真实歌曲标签不能被整张专辑的版本推测覆盖。
+                self.version = dir_info["version"]
+                self.field_sources["version"] = "directory"
             # 目录名里的格式、位深、采样率可补齐本地标签未声明的音质参数
             if dir_info.get("quality_text"):
-                self.apply_audio_quality(dir_info["quality_text"])
+                self.apply_audio_quality(dir_info["quality_text"], evidence_source="directory")
         return self
 
     @property
@@ -1825,6 +1948,19 @@ class MetaMusic(MetaBase):
             "isrc": self.isrc,
             "media_source": self.media_source,
             "media_id": self.media_id,
+            "musicbrainz_release_id": self.musicbrainz_release_id,
+            "musicbrainz_release_group_id": self.musicbrainz_release_group_id,
+            "musicbrainz_release_track_id": self.musicbrainz_release_track_id,
+            "original_year": self.original_year,
+            "release_year": self.release_year,
+            "field_sources": dict(self.field_sources),
+            "music_type": self.music_type,
+            "album_type": self.album_type,
+            "secondary_types": list(self.secondary_types),
+            "music_layout": self.music_layout,
+            "cue_filename": self.cue_filename,
+            "cue_tracks": [dict(track) for track in self.cue_tracks],
+            "organization_error": self.organization_error,
         }
 
     @classmethod
@@ -1854,6 +1990,19 @@ class MetaMusic(MetaBase):
             isrc=data.get("isrc"),
             media_source=data.get("media_source"),
             media_id=data.get("media_id"),
+            musicbrainz_release_id=data.get("musicbrainz_release_id"),
+            musicbrainz_release_group_id=data.get("musicbrainz_release_group_id"),
+            musicbrainz_release_track_id=data.get("musicbrainz_release_track_id"),
+            original_year=_optional_int(data.get("original_year")),
+            release_year=_optional_int(data.get("release_year")),
+            field_sources=data.get("field_sources"),
+            music_type=data.get("music_type"),
+            album_type=data.get("album_type"),
+            secondary_types=_string_list(data.get("secondary_types")),
+            music_layout=data.get("music_layout"),
+            cue_filename=data.get("cue_filename"),
+            cue_tracks=data.get("cue_tracks"),
+            organization_error=data.get("organization_error"),
         )
         meta.apply_words = data.get("apply_words")
         return meta

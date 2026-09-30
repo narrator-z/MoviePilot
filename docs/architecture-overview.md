@@ -301,7 +301,9 @@ sequenceDiagram
 - **Scheduler 同名职责包**：旧 `app/scheduler.py` 单体已退役；`catalog.py` 负责作业目录和计划投影，
   `execution.py`、`bridge.py`、`progress.py` 分别负责执行、跨循环句柄和进度终态，`registry.py`
   唯一持有 generation、active generation、reservation 与 handle，`reconcile.py` 和 `lifecycle.py`
-  分别负责动态任务协调与启动/重载/关闭。
+  分别负责动态任务协调与启动/重载/关闭，`oncejob.py` 承接插件一次性任务：插件经
+  `app.sdk.scheduler.add_plugin_once_job` 在宿主调度器追加延迟单次执行，不再自建常驻
+  `BackgroundScheduler`；追加不重建周期服务，服务重建只丢弃已被重载替换实例登记的任务。
 - **Scheduler 显式装配**：`startup/initializers/scheduler.py` 构造业务 Chain 一次，将绑定 callable
   组成 frozen `SchedulerServices` 后注入 Scheduler；Scheduler 包内不再构造业务 Chain。
   `app.scheduler` 包根只惰性保留 `Scheduler`/`SchedulerChain` 旧 ABI，新插件经 `app.sdk.scheduler`
@@ -741,7 +743,7 @@ flowchart LR
   `--write-host` 不会替代人工决策。
 - 同一 baseline 的 `direct_adapter_imports` 记录现存原始直连；Application 与 Chain 均已清零，
   policy 目标为空集合。新增、替换、删除后未清理 policy 都会失败。
-- `direct_egress` 记录全宿主 53 条 raw transport、network SDK 和协议操作 identity；普通 HTTP/
+- `direct_egress` 记录全宿主 50 条 raw transport、network SDK 和协议操作 identity；普通 HTTP/
   Session bridge 与 Application DNS I/O 债务已清零，其余 canonical transport、SDK、
   stream/vendor/diagnostic/control-plane 事实是精确 containment。每条初始边的指纹由测试独立冻结，
   bindings/uses 变化、分类互换、通配导入和初始边增长都会失败；债务删除时同步删除冻结项以禁止恢复，
@@ -761,19 +763,19 @@ flowchart LR
 | 指标 | 当前值 |
 |---|---:|
 
-| Python 模块 | 1052 |
-| 内部导入边 | 8,940 |
+| Python 模块 | 1057 |
+| 内部导入边 | 9,050 |
+
 | 非平凡 SCC | 1（精确 containment 的 TMDB 移植包环） |
 | Application / Chain 具体 Adapter 直连 | 0 / 0 |
-| Direct egress | 53（债务已清零，53 条精确 containment） |
+| Direct egress | 50（债务已清零，50 条精确 containment） |
 | Module Contract V2 spec | 215（其中 211 个进入 `run_module` 观察面） |
 | Event Contract | 53 |
 | Event producer / consumer | 86（85 静态、1 动态）/ 17（16 静态、1 动态） |
 | Model/Oper 自动事务与自建 Session | 0 |
 | 组合根外 `SystemConfigOper()` | 0 |
 
-
-整理失败反馈由 `app.application.transfer.feedback` 集中投影；已整理下载的站点字幕复用 `app.chain.transfer` 自动整理队列；网络连通性检测按 `app.application.nettest` 归档，并覆盖 HTTP 与 WebSocket 探测。未启用智能助手的消息音乐交互由 `app.chain.music_interaction` 包中的解析展示与订阅协调模块处理；宿主依赖边现为 8,940，音乐交互包未新增 SCC。Agent 持久回执新增 Application 端口及 DB Model/Oper/Adapter 四个冷导入模块。当前 `app.startup.lifecycle` 为 573、`app.factory` 为 585、`app.main` 为 587。性能基线只同步模块数量，原有耗时预算、历史采样和生命周期资源约束保持有效。
+整理失败反馈由 `app.application.transfer.feedback` 集中投影；已整理下载的站点字幕复用 `app.chain.transfer` 自动整理队列；网络连通性检测按 `app.application.nettest` 归档，并覆盖 HTTP 与 WebSocket 探测。未启用智能助手的消息音乐交互由 `app.chain.music_interaction` 包中的解析展示与订阅协调模块处理；音乐标签准入与批次共识由 `app.chain.transfer.music` 负责；宿主依赖边现为 9,050，音乐交互包未新增 SCC，插件一次性任务 owner `app.scheduler.oncejob` 带来 1 个模块和 9 条依赖边。Agent 持久回执新增 Application 端口及 DB Model/Oper/Adapter 四个冷导入模块。缓存组合根只在启动时选用 Redis 缓存才导入 Redis 适配器，依赖 langchain_core 的对话记忆模型归属 `app.agent.memory`，文件缓存且未启用智能体的实例不再加载 redis 与 langchain_core。Telegram 渠道改用模块内 `app.modules.telegram.botapi` 精简 Bot API 客户端，经 `RequestUtils` 出站，宿主不再导入 pyTelegramBotAPI，启用 Telegram 的实例也不会因该 SDK 加载 redis；该依赖暂时保留给插件使用。当前 `app.startup.lifecycle` 为 577、`app.factory` 为 589、`app.main` 为 591。音乐调用观察 `app.application.music.observation` 新增一个轻量模块，记录来源结果及请求预算；AcoustID及路径识别复用此上下文传递有界指纹候选，保留旧单ID模块合同。站点图片域名快照新增 `app.application.security.image`，各启动入口增加一个模块；性能基线只同步模块数量，原有耗时预算、历史采样和生命周期资源约束保持有效。
 
 架构专项验证分为两个 CI 投影：`Check event semantic policy` 先运行依赖、Adapter、出口和 Event
 语义门禁，`Check host architecture snapshot` 再执行快照测试及一次
@@ -828,3 +830,5 @@ flowchart LR
 | [`docs/refactor/refactor-roadmap.md`](refactor/refactor-roadmap.md) | 多级 Goal、叶子依赖、清零条件与交付状态 |
 | [`docs/v3t-runtime-governance.md`](v3t-runtime-governance.md) | V3/V3t 运行依赖、故障恢复、GIL 可观测性与兼容退场门禁 |
 | [`docs/adr/0007-background-action-reliability.md`](adr/0007-background-action-reliability.md) | 后台动作 E0–E3 可靠性分级与完成语义决策 |
+
+音乐来源回退由 `app.application.music.recognition` 持有独立来源诊断和共享祖先预算，新增一个轻量启动模块。来源顺序由现有配置冻结，Chain通过已声明的音乐目录Port获取专辑与完整曲目；领域层只负责检索计划、身份和唯一对位。新增31条内部依赖均符合分层边界，不增加SCC或具体Adapter直连；启动性能仍使用原耗时预算。

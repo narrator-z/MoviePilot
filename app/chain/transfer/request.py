@@ -7,10 +7,12 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 from app.application.formatting import FormatParser
 from app.application.history import (
     DownloadHistoryQueryPort,
+    DownloadHistorySnapshot,
 )
 from app.application.transfer.workflow import TransferTask
 from app.chain.media import MediaChain
 from app.chain.storage import StorageChain
+from app.chain.transfer.music import append_cue_companions
 from app.domain.context import MediaInfo, MusicInfo
 from app.domain.meta.metabase import MetaBase
 from app.domain.metainfo import MetaInfoPath
@@ -116,14 +118,17 @@ class _TransferCandidatePlanner:
 
     def _build_file_meta(
             self,
-            source_path: Path,
+            fileitem: FileItem,
             custom_word_list: Optional[List[str]] = None,
     ) -> Optional[MetaBase]:
         """
         构建整理任务使用的文件元数据，并应用手动季集/自定义格式覆盖。
         """
+        if not fileitem.path:
+            return None
+        source_path = Path(fileitem.path)
         built_meta = deepcopy(self._meta) if self._meta else self._build_path_meta(
-            source_path, custom_word_list=custom_word_list
+            source_path, custom_word_list=custom_word_list, storage=fileitem.storage
         )
         if not built_meta:
             return None
@@ -132,6 +137,29 @@ class _TransferCandidatePlanner:
             # 这里避免再次偏移集数，导致手动整理的集数偏移翻倍。
             return built_meta
         return self._apply_meta_overrides(built_meta, source_path)
+
+    def _build_file_context(
+            self,
+            fileitem: FileItem,
+            history: Optional[DownloadHistorySnapshot],
+            inherited: Optional[MetaBase],
+            discard_saved_identity: bool,
+    ) -> tuple[Optional[MetaBase], Optional[MusicInfo]]:
+        """按显式输入、下载证据及附加文件归属构建上下文，读取始终绑定具体存储。"""
+        if not fileitem.path:
+            return None, None
+        history_meta, history_info = self._chain._restore_music_download_context(
+            download_history=history, file_path=Path(fileitem.path),
+            discard_saved_identity=discard_saved_identity,
+            storage=fileitem.storage, batch_mtype=self._batch_mtype,
+        )
+        if self._meta:
+            return self._build_file_meta(fileitem), history_info
+        if history_meta:
+            return history_meta, history_info
+        if inherited:
+            return deepcopy(inherited), history_info
+        return self._build_file_meta(fileitem, self._chain._get_subscribe_custom_words(history)), history_info
 
     def _has_reliable_video_source(self) -> bool:
         """
@@ -148,6 +176,8 @@ class _TransferCandidatePlanner:
             source_path: Path,
             custom_word_list: Optional[List[str]] = None,
             force_video: Optional[bool] = False,
+            *,
+            storage: Optional[str] = "local",
     ) -> Optional[MetaBase]:
         """
         从文件路径识别媒体信息，用于判断附加文件是否属于当前主视频。
@@ -159,7 +189,7 @@ class _TransferCandidatePlanner:
                 and source_path.suffix.lower() in self._chain._audio_exts
                 and not self._has_reliable_video_source()
         ):
-            path_meta = MediaChain.read_path_meta(source_path)
+            path_meta = MediaChain.read_path_meta(source_path, storage=storage)
         else:
             # 影视场景附加音轨（如评论音轨）强制按视频解析，保留季集归属
             path_meta = MetaInfoPath(
@@ -225,7 +255,7 @@ class _TransferCandidatePlanner:
             download_hash=self._download_hash,
         )
         return self._build_file_meta(
-            main_path,
+            main_fileitem,
             custom_word_list=self._chain._get_subscribe_custom_words(main_download_history),
         )
 
@@ -371,7 +401,7 @@ class _TransferCandidatePlanner:
                         )
                         if main_meta:
                             inherited_map[self._chain._get_file_key(current_item)] = deepcopy(main_meta)
-                    return list(items), inherited_map
+                    return append_cue_companions(self._chain, list(items), inherited_map, self._has_reliable_video_source(), self._transfer_exclude_words)
 
         if not main_items:
             remaining = [
@@ -382,7 +412,7 @@ class _TransferCandidatePlanner:
                     and self._chain._is_music_lyrics_file(item[0])
                 )
             ]
-            return remaining, inherited_map
+            return append_cue_companions(self._chain, remaining, inherited_map, self._has_reliable_video_source(), self._transfer_exclude_words)
 
         planned_items: List[Tuple[FileItem, bool]] = []
         seen_file_keys: set[Tuple[str, str]] = set()
@@ -425,7 +455,7 @@ class _TransferCandidatePlanner:
                 main_download_history
             )
             main_meta = self._build_file_meta(
-                main_path,
+                main_item,
                 custom_word_list=subscribe_custom_words,
             )
             if not main_meta:
@@ -478,7 +508,7 @@ class _TransferCandidatePlanner:
                 continue
             self._append_item(planned_items, seen_file_keys, item, is_bluray_dir)
 
-        return planned_items, inherited_map
+        return append_cue_companions(self._chain, planned_items, inherited_map, self._has_reliable_video_source(), self._transfer_exclude_words)
 
 
 def build_transfer_preview_item(task: TransferTask, transferinfo: TransferInfo) -> dict[str, Any]:

@@ -54,9 +54,15 @@ class WorkflowManager(metaclass=Singleton):
 
         # 加载所有动作
         self._actions = {}
+
+        def _on_action_import_error(module_name: str, err: Exception) -> None:
+            """暴露被吞掉的导入错误，避免动作静默丢失后运行时才报含糊的「未找到动作」。"""
+            logger.error(f"加载动作模块失败，该动作将不可用: {module_name} - {err}")
+
         actions = ModuleHelper.load(
             "app.workflow.actions",
-            filter_func=lambda _, obj: filter_func(obj)
+            filter_func=lambda _, obj: filter_func(obj),
+            on_import_error=_on_action_import_error,
         )
         for action in actions:
             logger.debug(f"加载动作: {action.__name__}")

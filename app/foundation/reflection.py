@@ -59,8 +59,14 @@ class ModuleHelper:
         cls,
         package_path: str,
         filter_func: FilterFuncType = _default_filter,
+        on_import_error: Optional[Callable[[str, Exception], None]] = None,
     ) -> List[Any]:
-        """加载包的一级模块，并返回通过过滤器的去重类对象。"""
+        """加载包的一级模块，并返回通过过滤器的去重类对象。
+
+        :param on_import_error: 模块导入失败时回调，参数为模块全名与异常。
+            默认静默跳过（保持历史行为）；调用方可借其暴露被吞掉的导入错误，
+            避免动作/扩展因导入失败而悄无声息地从注册表消失、运行时才报含糊错误。
+        """
         submodules: list = []
         loaded_modules = set()
         packages = importlib.import_module(package_path)
@@ -79,7 +85,9 @@ class ModuleHelper:
                             continue
                         loaded_modules.add(name)
                         submodules.append(obj)
-            except Exception:
+            except Exception as err:  # 不再静默吞掉：至少交给回调记录
+                if on_import_error is not None:
+                    on_import_error(full_package_name, err)
                 continue
         return submodules
 

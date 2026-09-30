@@ -31,6 +31,7 @@ from app.chain.media import MediaChain
 from app.chain.tmdb import TmdbChain
 from app.chain.transfer.contract import _TransferOwnerBase
 from app.chain.transfer.music import defer_music_recognition, refresh_music_retry_context
+from app.application.music.observation import BLOCKING_MUSIC_RECOGNITION_STATES
 from app.chain.transfer.records import apply_download_history_classification
 from app.domain.context import MediaInfo, MusicInfo
 from app.domain.media import is_music_media_source
@@ -637,9 +638,39 @@ class TransferExecutionOwner(_TransferOwnerBase):
             if not task.target_storage and task.target_directory:
                 task.target_storage = task.target_directory.library_storage
 
-            preview_reject = self._degrade_missing_category_to_root(task)
-            if preview_reject is not None:
-                return preview_reject
+            # 上游硬校验：CUE 损坏 / 专辑歧义 / 缺分类，必须在规划前拦截
+            validation_error = self._transfer_validation_error(task)
+            if validation_error:
+                # fork 定制：仅「缺分类」这一种情形软降级到媒体库根目录；
+                # CUE 损坏（结构性错误）与专辑歧义（须人工确认）必须按上游硬拒绝。
+                # 注意 _transfer_validation_error 对缺分类返回错误的前提是 CUE/专辑歧义
+                # 均不成立，这里显式排除二者，避免把结构性错误误判为可降级。
+                cue_broken = isinstance(task.meta, MetaMusic) and bool(
+                    task.meta.organization_error
+                )
+                recognition = (
+                    task.mediainfo.raw_data.get("recognition")
+                    if isinstance(task.mediainfo, MusicInfo)
+                    else None
+                )
+                music_ambiguous = isinstance(recognition, dict) and recognition.get(
+                    "status"
+                ) in BLOCKING_MUSIC_RECOGNITION_STATES
+                if not cue_broken and not music_ambiguous:
+                    preview_reject = self._degrade_missing_category_to_root(task)
+                    if preview_reject is not None:
+                        return preview_reject
+                    # 非预览态已将 task 降级（关闭分类子目录），继续走规划
+                else:
+                    logger.error(f"{task.fileitem.name} {validation_error}")
+                    if task.preview:
+                        return False, validation_error
+                    transferinfo = self._TransferChain__checkpoint_planning_rejection(
+                        task, validation_error,
+                    )
+                    if callback:
+                        return cast(Tuple[bool, str], callback(task, transferinfo))
+                    return transferinfo.success, transferinfo.message
 
             # 正在处理
             self.jobview.running_task(task)

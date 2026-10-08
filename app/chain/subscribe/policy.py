@@ -1,6 +1,7 @@
 """订阅优先级、剧集范围与来源编码策略"""
 
 import json
+from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from app.application.download.admission import SubscriptionDownloadGovernance
@@ -20,6 +21,29 @@ from app.schemas.mediaserver import NotExistMediaInfo as _SchemaNotExistMediaInf
 from app.schemas.types import (
     MediaType,
 )
+
+
+def _prepare_batch_missing(no_exists: Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]], mediakey: Union[int, str], targets: set[str]) -> Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]:
+    """仅部分缺集就绪时展开以便拆包；全部就绪或整季洗版保留原整季包优先行为。"""
+    scoped = deepcopy(no_exists)
+    seasons = scoped.get(mediakey, {})
+    for season, missing in seasons.items():
+        if missing.episodes or missing.require_complete_coverage or not missing.total_episode or f"{season}:season" in targets:
+            continue
+        episodes = list(range(max(1, missing.start_episode or 1), missing.total_episode + 1))
+        if any(f"{season}:{episode}" not in targets for episode in episodes):
+            seasons[season] = missing.model_copy(update={"episodes": episodes})
+    return scoped
+
+
+def _ready_episodes(no_exists: Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]], mediakey: Union[int, str],
+                    eligible_targets: Optional[set[str]]) -> Optional[set[int]]:
+    """仅部分缺集就绪时限制本批下载集数；本批已覆盖全部剩余缺集时不限制，完全沿用原下载行为。"""
+    if eligible_targets is None or eligible_targets == {"movie"} or any(target.endswith(":season") for target in eligible_targets):
+        return None
+    allowed = {int(target.split(":")[1]) for target in eligible_targets}
+    missing = {episode for info in (no_exists.get(mediakey) or {}).values() for episode in info.episodes or []}
+    return None if missing <= allowed else allowed
 
 
 class _SubscribePriorityPolicyOwner(_SubscribeOwnerBase):
@@ -283,6 +307,7 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
         downloader: Optional[str] = None,
         source: Optional[str] = None,
         execution_context: Optional[SubscriptionExecutionContext] = None,
+        eligible_targets: Optional[set[str]] = None,
     ) -> Tuple[List[Context], Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]]:
         """
         TV 分集洗版先尝试覆盖目标范围的全集资源，失败后回退到按集下载。
@@ -302,7 +327,10 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
             if current is None:
                 logger.info(f"订阅 {subscribe.id} 已删除，放弃本轮下载提交")
                 return [], no_exists
-            if current.state == "S":
+            # 已接纳的 Search 可完成本次下载；无搜索上下文的 Match 等路径仍遵守暂停状态。
+            if current.state == "S" and not (
+                execution_context and execution_context.lease.operation == "search"
+            ):
                 logger.info(f"订阅 {current.name} 已暂停，放弃本轮下载提交")
                 return [], no_exists
             if self._SubscribeChain__candidate_contract_changed(subscribe, current):
@@ -332,6 +360,9 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
                 cancelled=execution_context.should_stop if execution_context else None,
                 mark_started=execution_context.mark_download_started if execution_context else None,
             )
+        if eligible_targets is not None:
+            no_exists = _prepare_batch_missing(no_exists, mediakey, eligible_targets)
+        allowed_episodes = _ready_episodes(no_exists, mediakey, eligible_targets)
         full_pack_no_exists = self._SubscribeChain__build_full_pack_first_no_exists(
             subscribe=subscribe, mediakey=mediakey
         )
@@ -377,6 +408,7 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
                 source=source,
                 custom_words=subscribe.custom_words,
                 governance=governance,
+                allowed_episodes=allowed_episodes,
             )
             if downloads:
                 return downloads, lefts
@@ -392,6 +424,7 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
                 source=source,
                 custom_words=subscribe.custom_words,
                 governance=governance,
+                allowed_episodes=allowed_episodes,
             )
         )
         return result
@@ -482,7 +515,7 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
             N: New（新建，未处理）
             R: Resolved（订阅中）
             P: Pending（待定，信息待进一步更新，允许搜索，不允许完成）
-            S: Suspended（暂停，订阅不参与任何动作，暂时停止处理）
+            S: Suspended（暂停自动调度，已接纳搜索及指定订阅补搜可继续执行）
         :return: 需要查询的状态列表（多个状态用逗号分隔）
         """
         # 如果状态是 R 或 P，则视为一起搜索，返回 R,P 作为查询条件

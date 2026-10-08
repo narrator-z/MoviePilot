@@ -43,7 +43,7 @@ _WNS_DEFAULT_TTL = 86400
 class WebPushError(Protocol):
     """Web Push 订阅状态判断所需的最小异常协议。"""
 
-    response: Any  # 推送服务响应，状态码字段由具体 SDK 提供
+    response: Any  # 推送服务 HTTP 响应，失败前未收到响应时为 None
 
 
 def is_webpush_subscription_gone(error: WebPushError) -> bool:
@@ -63,7 +63,7 @@ def is_wns_endpoint(endpoint: str | None) -> bool:
 
 
 def webpush_options_for_endpoint(endpoint: str | None) -> dict[str, Any]:
-    """返回指定推送端点需要的 pywebpush 附加参数。"""
+    """返回指定推送端点需要的 Web Push 附加参数（ttl 与请求头）。"""
     if not is_wns_endpoint(endpoint):
         return {}
     return {
@@ -337,7 +337,7 @@ def incoming_verify(
     微信/VoceChat等验证响应
     """
     logger.info(
-        f"收到验证请求: token={token}, echostr={echostr}, "
+        f"收到验证请求: echostr={echostr}, "
         f"msg_signature={msg_signature}, timestamp={timestamp}, nonce={nonce}"
     )
     if echostr and msg_signature and timestamp and nonce:
@@ -367,12 +367,12 @@ async def subscribe(
 )
 def send_notification(
     payload: _SchemaSubscriptionMessage,
-    _: _SchemaTokenPayload = Depends(verify_token),
+    _: ApiPrincipal = Depends(get_current_active_superuser),
 ):
     """
-    发送webpush通知
+    发送webpush通知；会推送到全部已订阅浏览器，因此仅限超级管理员调用
     """
-    from pywebpush import WebPushException, webpush
+    from app.adapters.network.webpush import WebPushDeliveryError, send_webpush
 
     subscriptions = webpush_registry.list()
     if not subscriptions:
@@ -382,15 +382,15 @@ def send_notification(
     failure_count = 0
     for sub in subscriptions:
         try:
-            webpush(
-                subscription_info=sub,
+            send_webpush(
+                subscription=sub,
                 data=json.dumps(payload.model_dump()),
                 vapid_private_key=get_api_runtime_config_snapshot().vapid_private_key,
-                vapid_claims={"sub": get_api_runtime_config_snapshot().vapid_subject},
+                vapid_subject=get_api_runtime_config_snapshot().vapid_subject,
                 **webpush_options_for_endpoint(sub.get("endpoint")),
             )
             success_count += 1
-        except WebPushException as err:
+        except WebPushDeliveryError as err:
             logger.error(f"WebPush发送失败: {str(err)}")
             if is_webpush_subscription_gone(err) and webpush_registry.remove(sub):
                 logger.info(f"已移除失效WebPush订阅: {sub.get('endpoint')}")

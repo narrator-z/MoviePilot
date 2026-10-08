@@ -321,6 +321,7 @@ def test_streaming_agent_uses_non_streaming_llm_for_model_middlewares(with_invoc
     assert compaction_middleware.summarizer.model is non_streaming_llm
     assert [item.name for item in middlewares] == [
         "AgentPolicyMiddleware",
+        "CodeExecutionMiddleware",
         "ToolOutputMiddleware",
         *(["InvocationMiddleware"] if with_invocations else []),
         "SkillsMiddleware",
@@ -328,8 +329,10 @@ def test_streaming_agent_uses_non_streaming_llm_for_model_middlewares(with_invoc
         "RuntimeConfigMiddleware",
         "PlanMiddleware",
         "MemoryMiddleware",
+        "ToolGuardrailsMiddleware",
         "PatchToolCallsMiddleware",
         "_FakeToolSelectorMiddleware",
+        "CodeCaptureMiddleware",
         "FinalRequestCompactionMiddleware",
         "VisionMiddleware",
         "UsageMiddleware",
@@ -1197,7 +1200,7 @@ def test_summary_failure_preserves_database_history():
         user_id=user_id,
         memory=isolated_memory,
     )
-    agent._compiled_agent_bundle = object()
+    agent._compiled_agent_bundle = SimpleNamespace(models=())
     agent._should_stream = lambda: False
     agent._create_agent = AsyncMock(return_value=_FailingGraph())
     agent.stream_handler = SimpleNamespace(stop_streaming=AsyncMock(return_value=(False, "")))

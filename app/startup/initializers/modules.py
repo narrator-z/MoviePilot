@@ -274,6 +274,7 @@ def notify_event_error(title: str, message: str) -> None:
         title=title,
         message=message,
         role="system",
+        level="error",
     )
 
 
@@ -489,7 +490,7 @@ def check_auth():
     """
     if SitesHelper().auth_level < 2:
         err_msg = "用户认证失败，站点相关功能将无法使用！"
-        MessageHelper().put(f"注意：{err_msg}", title="用户认证", role="system")
+        MessageHelper().put(f"注意：{err_msg}", title="用户认证", role="system", level="warning")
         CommandChain().post_message(
             Message(
                 mtype=MessageType.Manual,
@@ -682,6 +683,7 @@ async def _initialize_modules() -> HostRuntime:
         runtime=database_runtime,
         system_config=system_config,
         dependencies=runtime_dependencies,
+        tasks=get_task_registry(),
     )
     if agent_composition.data.invocations is not None:
         await database_runtime.worker.run(agent_composition.data.invocations.recover_running)

@@ -316,6 +316,10 @@ SYSTEMCONFIG_CONTRACTS: dict[SystemConfigKey, _SystemConfigContract] = {
         operations=_LIST_SCALAR_OPERATIONS,
         dependencies=(SystemConfigKey.UserFilterRuleGroups.value,),
     ),
+    SystemConfigKey.SubscribeSearchStrategy: _contract(
+        "subscribe_defaults", Optional[Literal["smart", "full", "single_page"]],
+        examples=("smart", "full", "single_page"),
+    ),
     SystemConfigKey.SubscribeDefaultParams: _contract(
         "subscribe_defaults",
         Optional[SubscribeDefaultParams],
@@ -449,6 +453,8 @@ _RESTART_REQUIRED_GROUPS = {
     "security",
     "system_update",
 }
+# 所在分组需要重启，但由调用方逐次读取、修改后立即生效的例外项。
+_IMMEDIATE_SETTINGS_IN_RESTART_GROUPS = frozenset({"API_DOCS_ENABLE"})
 
 
 def _load_source_catalog() -> dict[str, Any]:
@@ -543,6 +549,7 @@ def build_setting_specs() -> tuple[dict[str, SettingSpec], dict[str, SettingSpec
             apply_mode=(
                 "restart_required"
                 if group in _RESTART_REQUIRED_GROUPS
+                and key not in _IMMEDIATE_SETTINGS_IN_RESTART_GROUPS
                 else "immediate"
             ),
             unit=_runtime_unit(key),

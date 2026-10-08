@@ -17,6 +17,7 @@ from app.domain.meta.metamusic import (
     audio_quality_tier,
     format_audio_quality,
     infer_audio_lossless,
+    music_credit_values,
     normalize_audio_format,
 )
 from app.domain.metainfo import MetaInfo
@@ -613,6 +614,11 @@ class MusicInfo:
     listen_count: int | None = None
     raw_data: dict[str, Any] = field(default_factory=dict)
     field_sources: dict[str, str] = field(default_factory=dict, kw_only=True)
+    # 古典角色独立于发行署名；乐器/声部映射保留演奏者的具体职责。
+    composers: list[str] = field(default_factory=list, kw_only=True)
+    conductors: list[str] = field(default_factory=list, kw_only=True)
+    orchestras: list[str] = field(default_factory=list, kw_only=True)
+    performers: dict[str, list[str]] = field(default_factory=dict, kw_only=True)
     music_layout: str | None = field(default=None, kw_only=True)
     organization_error: str | None = field(default=None, kw_only=True)
     # 内部标记：是否命中本地识别缓存，不参与序列化；与 MediaInfo 保持一致，
@@ -622,6 +628,7 @@ class MusicInfo:
     def __setstate__(self, state: dict[str, Any]) -> None:
         """恢复旧版本音乐缓存时补齐新增别名字段，避免列表字段被缺失属性兜底为 None。"""
         self.__dict__.update(state)
+        self.__dict__.update(music_credit_values(state))
         for name in ("title_aliases", "album_aliases", "artist_aliases"):
             self.__dict__.setdefault(name, [])
         self.__dict__.setdefault("field_sources", {})
@@ -629,6 +636,7 @@ class MusicInfo:
     def __post_init__(self) -> None:
         """规范化媒体身份，并兼容拆分旧音乐分类字段。"""
         self.field_sources = dict(self.field_sources or {})
+        self.__dict__.update(music_credit_values(self))
         self.year = self.year if self.year is not None else self.release_year or self.original_year
         self.media_source, self.media_id = resolve_media_identity(media=self)
         classification = _classification_result(self.classification)
@@ -845,6 +853,7 @@ class MusicInfo:
     def from_meta(cls, meta: MetaMusic) -> Self:
         """将文件名和音频标签解析结果转换为无远端依赖的标准音乐信息。"""
         return cls(
+            **music_credit_values(meta),
             media_source=normalize_media_source(meta.media_source),
             media_id=meta.media_id,
             music_type=meta.music_type or MUSIC_ENTITY_RECORDING,
@@ -955,10 +964,16 @@ class MusicAlbumInfo:
     releases: list[MusicRelease] = field(default_factory=list)
     raw_data: dict[str, Any] = field(default_factory=dict)
     field_sources: dict[str, str] = field(default_factory=dict, kw_only=True)
+    # 古典角色独立于发行署名；乐器/声部映射保留演奏者的具体职责。
+    composers: list[str] = field(default_factory=list, kw_only=True)
+    conductors: list[str] = field(default_factory=list, kw_only=True)
+    orchestras: list[str] = field(default_factory=list, kw_only=True)
+    performers: dict[str, list[str]] = field(default_factory=dict, kw_only=True)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """恢复旧版专辑缓存时补齐别名列表，保留既有媒体身份及曲目数据。"""
         self.__dict__.update(state)
+        self.__dict__.update(music_credit_values(state))
         for name in ("title_aliases", "artist_aliases"):
             self.__dict__.setdefault(name, [])
         self.__dict__.setdefault("field_sources", {})
@@ -966,6 +981,7 @@ class MusicAlbumInfo:
     def __post_init__(self) -> None:
         """规范化媒体身份，并补全专辑描述分类和分类结果。"""
         self.field_sources = dict(self.field_sources or {})
+        self.__dict__.update(music_credit_values(self))
         self.media_source, self.media_id = resolve_media_identity(media=self)
         self.library_category = str(self.library_category or "").strip()
         self.metadata_category = str(self.metadata_category or "").strip() or (
@@ -1121,6 +1137,7 @@ class MusicAlbumInfo:
     def to_music_info(self) -> MusicInfo:
         """转换为专辑卡片使用的音乐信息，供列表接口统一返回。"""
         return MusicInfo(
+            **music_credit_values(self),
             media_source=self.media_source,
             media_id=self.media_id,
             musicbrainz_release_id=self.musicbrainz_release_id,
@@ -1375,6 +1392,8 @@ class TorrentInfo:
     pri_order: int = 0
     # 种子分类 电影/电视剧/音乐
     category: str = None
+    # 自动订阅分页搜索的内部候选标识，只用于提交结果与候选对应，不进入对外字典
+    search_resource_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         """将种子声明的媒体身份规范化为统一成对字段。"""
@@ -1472,6 +1491,7 @@ class TorrentInfo:
         dicts["media_id"] = str(self.media_id) if self.media_id is not None else None
         dicts["volume_factor"] = self.volume_factor
         dicts["freedate_diff"] = self.freedate_diff
+        dicts.pop("search_resource_id", None)
         return dicts
 
 

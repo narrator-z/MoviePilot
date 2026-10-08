@@ -375,6 +375,8 @@ class SystemConfigKey(Enum):
     SearchFilterRuleGroups = "SearchFilterRuleGroups"
     # 订阅默认过滤规则组
     SubscribeFilterRuleGroups = "SubscribeFilterRuleGroups"
+    # 补全搜索策略：smart 默认、full 全量、single_page 仅第一页；洗版始终全量
+    SubscribeSearchStrategy = "SubscribeSearchStrategy"
     # 订阅默认参数
     SubscribeDefaultParams = "SubscribeDefaultParams"
     # 洗版默认过滤规则组
@@ -592,8 +594,8 @@ class MediaServerType(Enum):
     Ugreen = "Ugreen"
     # Navidrome 音乐服务器
     Navidrome = "Navidrome"
-    # MediaVault 自建媒体库
-    MediaVault = "MediaVault"
+    # Vyo 媒体服务
+    Vyo = "Vyo"
 
 
 # 识别器类型

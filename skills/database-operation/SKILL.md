@@ -24,6 +24,22 @@ This skill is the direct SQL boundary. It is implemented as a Python script and
 is appropriate when the agent must inspect records, run data statistics, repair
 stuck state, or perform an explicitly requested database update.
 
+Run the bundled copy from the MoviePilot program directory with its project
+runtime, for example:
+
+```bash
+cd <MOVIEPILOT_ROOT>
+python skills/database-operation/scripts/mp-db.py tables
+```
+
+The Agent command environment routes `python` to the project-specific `moviepilot-python`
+entry when available and falls back to the project or Docker `VENV_PATH` Python otherwise.
+
+The runtime sets `MOVIEPILOT_ROOT` for copied skills. If you run a copied
+script directly from `<CONFIG_PATH>/agent/skills/`, set that variable to the
+program directory first; otherwise the helper reports how to relocate it.
+Use the project runtime instead of a system `python3`.
+
 Prefer safer product surfaces first:
 
 | Request | Preferred skill |
@@ -211,6 +227,12 @@ python scripts/mp-db.py write "UPDATE subscribe SET state = 'S' WHERE id = 123"
 - Useful queries: Diagnosing clone naming and ownership, inspecting what a plugin or one of its clones is configured with, or finding which instance currently overrides the global log level and until when.
 - Write boundary: Owned by the plugin instance, plugin configuration, and plugin log-level APIs; never edit rows directly.
 - Columns: `id`, `instance_id`, `source_plugin_id`, `plugin_name`, `plugin_desc`, `plugin_icon`, `is_default_target`, `is_enabled`, `log_level`, `log_expires_at`, `config_data`, `created_at`, `updated_at`
+
+### `searchsession`
+- Purpose: Stores the page cursor and pending candidates of one unfinished subscription search task, without site credentials; removed when the task ends and purged after 14 days without updates.
+- Useful queries: Diagnosing a paused or resumed paged search through task_id, version, and updated_at.
+- Write boundary: Written only under the queue task lease with version CAS; never edit payloads, they can skip pages or resubmit candidates.
+- Columns: `id`, `task_id`, `version`, `payload`, `updated_at`
 
 ### `site`
 - Purpose: Stores private-tracker URLs, RSS, credentials, rate limits, proxy state, and downloader binding.

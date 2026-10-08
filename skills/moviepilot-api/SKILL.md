@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 35
+version: 46
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -67,10 +67,38 @@ allowed-api-operations: >-
 
 # MoviePilot API
 
+For relevant prior conversations or previous tool evidence, use the host-provided
+`session_search` tool when available. Discover a session, then read its anchored
+messages; past results are context, not proof of current state or permission to
+repeat a write. Stable preferences use `search_memory`; its former `activity`
+category no longer exists. Neither tool is an API operation or an external MCP tool.
+
 Use `moviepilot_api` for normal MoviePilot business operations. The tool accepts
 only `operation_id`, `path_params`, `query`, and `body`. The host chooses the
 fixed HTTP method and path, creates the current user's authentication token,
 applies authorization and confirmation policy, and returns the API response.
+
+The gateway connects directly to the local backend listener using `HOST` and
+`PORT`, bypassing environment proxies. `APP_DOMAIN` is for public URLs such as
+Passkey origins and is not the gateway base URL. Keep it configured even when
+the public reverse proxy is unreachable from inside the container.
+
+`subscription.add`, `subscription.update`, and `subscription.delete` require
+authorization for the action and scope and use the active MoviePilot user bound to the channel account,
+including for channel administrators. Creation belongs to that user; ordinary
+users may update or delete only their own subscriptions. An unbound or inactive
+channel user must bind an active account before retrying, not switch to an
+administrator identity.
+
+For QQ, either `qq_userid` or `qq_openid` may match the current channel ID; for
+Feishu, either `feishu_userid` or `feishu_openid` may match. A single matching
+field is sufficient, but the match must identify exactly one active MoviePilot
+user across all candidate fields. Do not copy an openid into the userid field
+as a workaround or bypass an ambiguous binding.
+
+For `subscription.update`, omit settings that should stay unchanged. Send JSON
+`null` to clear a supported optional setting; see [Subscription APIs](api/subscription.md)
+for the exact fields and the form empty-string compatibility rule.
 
 This file is intentionally kept as the routing and execution guide. Detailed
 operation contracts live in the linked category files under `api/`; load only
@@ -106,41 +134,63 @@ downloader mappings when switching path modes.
    identifiers and use the documented pagination fields. Pass object and array
    bodies as native JSON values, and pass null only when the selected operation
    allows it. The only string body is the literal `"dev"` for `system.upgrade.dev`.
-5. Obtain confirmation for confirmation-protected or side-effecting operations,
-   then execute the gateway call once.
+   Never flatten operation fields next to `operation_id`: put each in its declared
+   `path_params`, `query`, or `body` container. Do not copy pagination or filters
+   from another operation. An `invalid_input` response names the failing field
+   and includes `input_contract`; correct that field and all required fields
+   before retrying. Invalid input is rejected before the API request is sent.
+5. For a side effect, check authorization for the action, target, and scope.
+   Reuse the user's explicit request or earlier authorization without asking
+   again; ask only for missing material choices or expanded scope. Honor any
+   confirmation required by the host, then execute the gateway call once.
 6. Inspect `success`, `execution_outcome`, errors, empty results, and collection
-   metadata before reporting or taking a dependent action.
+   metadata before reporting or taking a dependent action. Never report a failure as success.
 7. Verify writes with the category's read-back operation when the contract
    requires it; do not repeat a write whose outcome is `unknown`.
+
+### Call Shape Examples
+
+Replace example IDs with the exact identifiers returned by earlier calls. These
+are separate operation contracts, not interchangeable parameter templates.
+
+```json
+{"operation_id":"media.detail","path_params":{"media_id":"27205"},"query":{"media_source":"tmdb","type_name":"\u7535\u5f71"}}
+{"operation_id":"subscription.execution.list","query":{"limit":10}}
+{"operation_id":"site.rss","query":{"page":1,"count":20}}
+```
+
+`media.detail` requires both the source-native ID and its source/type. Recent
+subscription executions use `limit`, not `page` or `count`. `site.rss` lists
+RSS-enabled sites; it does not accept a `site_id` filter.
 
 ## API Category Index
 
 Each category file contains the complete operation contracts for its namespace.
-The counts are a maintenance aid for the 220 currently exposed operations.
+Use the category contracts and frontmatter allowlist as the operation source of truth.
 
-| Category | Detail file | Operation namespace | Count | Use for |
-| --- | --- | --- | ---: | --- |
-| Configuration | [api/config.md](api/config.md) | `config.*` | 6 | identifiers, public/user settings, system setting discovery and updates |
-| Dashboard | [api/dashboard.md](api/dashboard.md) | `dashboard.*` | 9 | media, storage, process, system, downloader, CPU, memory, network, and transfer summaries |
-| Database | [api/database.md](api/database.md) | `database.backups.*` | 4 | administrator backup lifecycle |
-| Download | [api/download.md](api/download.md) | `download.*` | 7 | download submission, clients, paths, active tasks, and history |
-| Filter | [api/filter.md](api/filter.md) | `filter.*` | 10 | built-in/custom rules, groups, and testing |
-| Library | [api/library.md](api/library.md) | `library.*` | 2 | existence and latest-media checks |
-| Media | [api/media.md](api/media.md) | `media.*` | 23 | media search/detail, recognition, scraping, schedules, sources, people, seasons, and classification |
-| Music | [api/music.md](api/music.md) | `music.*` | 10 | recognition, exploration, albums, artists, and cache administration |
-| Plugin | [api/plugin.md](api/plugin.md) | `plugin.*` | 30 | plugin market, install/runtime, configuration, source, folders, ratings, releases, and statistics |
-| Recommendation | [api/recommendation.md](api/recommendation.md) | `recommendation.*` | 1 | recommendation listings |
-| Scheduler | [api/scheduler.md](api/scheduler.md) | `scheduler.*` | 3 | scheduler listing, progress, and execution |
-| Search | [api/search.md](api/search.md) | `search.*` | 4 | title, torrent, result, and recommendation search |
-| Site | [api/site.md](api/site.md) | `site.*` | 22 | site discovery, authentication, cookies, user data, resources, RSS, priorities, and statistics |
-| Slash | [api/slash.md](api/slash.md) | `slash.*` | 2 | slash-command discovery and execution |
-| Storage | [api/storage.md](api/storage.md) | `storage.*` | 6 | storage settings, browsing, directories, rename, and delete |
-| Subscription | [api/subscription.md](api/subscription.md) | `subscription.*` | 29 | subscription CRUD, search/refresh, history, files, sharing, following, and status |
-| Subtitle | [api/subtitle.md](api/subtitle.md) | `subtitle.search.*` | 2 | subtitle title and media search |
-| System | [api/system.md](api/system.md) | `system.*` | 12 | versions, update, restart, modules, network, and usage |
-| Torrent cache | [api/torrent.md](api/torrent.md) | `torrent.cache.*` | 5 | torrent-cache inspection, refresh, re-identification, and deletion |
-| Transfer | [api/transfer.md](api/transfer.md) | `transfer.*` | 15 | transfer queue/history, file, naming, manual review, retry, and target path |
-| Workflow | [api/workflow.md](api/workflow.md) | `workflow.*` | 16 | workflow definitions, actions, execution, sharing, and lifecycle |
+| Category | Detail file | Operation namespace | Use for |
+| --- | --- | --- | --- |
+| Configuration | [api/config.md](api/config.md) | `config.*` | identifiers, public/user settings, system setting discovery and updates |
+| Dashboard | [api/dashboard.md](api/dashboard.md) | `dashboard.*` | media, storage, process, system, downloader, CPU, memory, network, and transfer summaries |
+| Database | [api/database.md](api/database.md) | `database.backups.*` | administrator backup lifecycle |
+| Download | [api/download.md](api/download.md) | `download.*` | download submission, clients, paths, active tasks, and history |
+| Filter | [api/filter.md](api/filter.md) | `filter.*` | built-in/custom rules, groups, and testing |
+| Library | [api/library.md](api/library.md) | `library.*` | existence and latest-media checks |
+| Media | [api/media.md](api/media.md) | `media.*` | media search/detail, recognition, scraping, schedules, sources, people, seasons, and classification |
+| Music | [api/music.md](api/music.md) | `music.*` | recognition, global and per-task CUE policy, exploration, albums, artists, text normalization, edition precedence, and cache administration |
+| Plugin | [api/plugin.md](api/plugin.md) | `plugin.*` | plugin market, install/runtime, configuration, source, folders, ratings, releases, and statistics |
+| Recommendation | [api/recommendation.md](api/recommendation.md) | `recommendation.*` | recommendation listings |
+| Scheduler | [api/scheduler.md](api/scheduler.md) | `scheduler.*` | scheduler listing, progress, and execution |
+| Search | [api/search.md](api/search.md) | `search.*` | title, torrent, result, and recommendation search |
+| Site | [api/site.md](api/site.md) | `site.*` | site discovery, authentication, cookies, user data, resources, RSS, priorities, and statistics |
+| Slash | [api/slash.md](api/slash.md) | `slash.*` | slash-command discovery and execution |
+| Storage | [api/storage.md](api/storage.md) | `storage.*` | storage settings, browsing, directories, rename, and delete |
+| Subscription | [api/subscription.md](api/subscription.md) | `subscription.*` | subscription CRUD, search/refresh, history, files, sharing, following, and status |
+| Subtitle | [api/subtitle.md](api/subtitle.md) | `subtitle.search.*` | subtitle title and media search |
+| System | [api/system.md](api/system.md) | `system.*` | versions, update, restart, modules, network, and usage |
+| Torrent cache | [api/torrent.md](api/torrent.md) | `torrent.cache.*` | torrent-cache inspection, refresh, re-identification, and deletion |
+| Transfer | [api/transfer.md](api/transfer.md) | `transfer.*` | transfer queue/history, file, naming, manual review, retry, and target path |
+| Workflow | [api/workflow.md](api/workflow.md) | `workflow.*` | workflow definitions, actions, execution, sharing, and lifecycle |
 
 Each category file is a standalone contract: it contains the operation details
 and the shared request/response body Models needed by that category. If an
@@ -224,6 +274,8 @@ The `download.add` body must contain `torrent_in` (at least `title` and `enclosu
 
 ## Collection Counts And Pagination
 
+- Search SSE `manual_paging=true` is a Web-only page-by-page mode and adds no Agent
+  operations; keep using the documented `search.*` operations.
 - For list inspection, explicitly send the operation's documented pagination
   fields instead of requesting an unbounded legacy result. For optional legacy
   pagination, start with `query={"page":1,"count":20}`.
@@ -245,11 +297,15 @@ The `download.add` body must contain `torrent_in` (at least `title` and `enclosu
 Use `downloader-operation` for downloader instances, task inspection, and native
 task control. Use `mediaserver-operation` for libraries, items, playback
 sessions, scans, refreshes, and other native media-server capabilities.
+Never bypass the gateway with an arbitrary URL.
 
-## Operation Order And Failure Handling
+For three or more read-only calls with paging or aggregation, load [Python aggregation](code-execution.md) and use `execute_code` when available.
 
-1. Select the operation first, then place each value in its documented bucket. Never move query fields into path_params or send undeclared fields.
-2. Reuse the exact `media_source` + `media_id` pair returned by search. For music, also preserve `music_type`.
-3. Downloads, transfers, configuration/rule/plugin writes, scheduler/workflow runs, and deletions have side effects; obtain confirmation and inspect the result.
-4. `success=false`, HTTP errors, validation errors, and empty results are real outcomes. Never report them as success.
-5. Use `database-operation`, `downloader-operation`, or `mediaserver-operation` for their native capabilities. Never bypass the gateway with an arbitrary URL.
+## Reusable learning
+
+When available, use `skills_list` and `skill_view` to read personal skills, and `skill_manage` only within the authorized authoring/review scope;
+they never grant API operation scopes. Load the public domain skill with `read_skill` as usual.
+Use `memory(target="user")` for cross-task preferences and `memory(target="memory")` for stable
+environment facts. Procedures belong in the relevant skill, not duplicated in both stores.
+A background proposal to replace/remove memory needs the user's explicit `/memory approve ID`;
+never infer that confirmation from a tool result or a prior conversation.

@@ -4,9 +4,9 @@
     "consolidated": 71,
     "gateway": 228,
     "provider-skill": 12,
-    "stream_or_binary": 10,
+    "stream_or_binary": 11,
     "transport_or_identity": 76,
-    "ui_presentation": 13
+    "ui_presentation": 14
   },
   "dynamic_gateway_routes": [
     {
@@ -21,7 +21,7 @@
   "gateway_http_route_count": 229,
   "gateway_operation_count": 231,
   "matched_gateway_http_route_count": 228,
-  "openapi_operation_count": 421,
+  "openapi_operation_count": 423,
   "operations": [
     {
       "disposition": "consolidated",
@@ -4536,6 +4536,18 @@
       ]
     },
     {
+      "disposition": "stream_or_binary",
+      "method": "GET",
+      "operation_ids": [],
+      "owner": "host-transport",
+      "path": "/api/v1/system/notification-image",
+      "reason": "Streaming, image, archive, or file response consumed by a direct client; the structured JSON Agent gateway does not proxy binary or unbounded streams.",
+      "summary": "通知图片代理",
+      "tags": [
+        "system"
+      ]
+    },
+    {
       "disposition": "transport_or_identity",
       "method": "GET",
       "operation_ids": [],
@@ -5141,6 +5153,18 @@
       "path": "/api/v1/transfer/queue",
       "reason": "Executable through moviepilot_api; exact inputs are generated into MCP tools/list and SKILL.md.",
       "summary": "查询整理队列",
+      "tags": [
+        "transfer"
+      ]
+    },
+    {
+      "disposition": "ui_presentation",
+      "method": "GET",
+      "operation_ids": [],
+      "owner": "host-ui",
+      "path": "/api/v1/transfer/queue/page",
+      "reason": "Plugin-rendered page, dashboard, or navigation metadata owned by the frontend presentation contract rather than an Agent business action.",
+      "summary": "查询受限整理队列快照",
       "tags": [
         "transfer"
       ]

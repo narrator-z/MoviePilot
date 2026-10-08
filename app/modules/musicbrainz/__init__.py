@@ -2,6 +2,7 @@ import asyncio
 import re
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from itertools import chain
@@ -32,15 +33,19 @@ from app.domain.context import (
 )
 from app.domain.media import is_media_source_enabled, is_media_source_selected
 from app.domain.meta.metabase import MetaBase
-from app.domain.meta.metamusic import MetaMusic
+from app.domain.meta.metamusic import MUSIC_CREDIT_FIELDS, MetaMusic, music_credit_values
 from app.domain.music import (
     align_music_tracks,
+    music_album_artist_evidence_matches,
     music_album_matches,
     music_album_title_is_weak,
     music_artist_affix_matches,
-    music_artist_matches,
+    music_artist_evidence_matches,
     music_base_title,
+    music_credit_conflicts,
+    music_isrc_conflicts,
     music_isrc_matches,
+    music_query_artists,
     music_text_key,
     music_title_matches,
     music_titles,
@@ -73,7 +78,42 @@ from app.schemas.types import (
     MusicEntityType,
 )
 
+_RECORDING_INCLUDES = "artists+releases+release-groups+isrcs+genres+aliases+artist-rels+work-rels+work-level-rels"
+_RELEASE_RELATIONS = "+recording-level-rels+work-rels+work-level-rels+artist-rels"
+
 _MusicEvidenceModel = TypeVar("_MusicEvidenceModel", MusicInfo, MusicAlbumInfo)
+
+
+def _musicbrainz_artist_role(credits: dict[str, Any], relation: dict[str, Any], *, work: bool = False) -> None:
+    """只消费实际Artist关系；作品作曲者和录音演奏角色各归其位。"""
+    artist = relation.get("artist") or {}
+    name = relation.get("target-credit") or artist.get("name")
+    kind = str(relation.get("type") or "").casefold()
+    if not artist.get("id") or not name:
+        return
+    if work:
+        if kind == "composer":
+            credits["composers"].append(str(name))
+        return
+    field = {"conductor": "conductors", "orchestra": "orchestras", "choir": "orchestras"}.get(kind)
+    if kind == "performer" and str(artist.get("type") or "").casefold() in {"orchestra", "choir"}:
+        field = "orchestras"
+    if field:
+        credits[field].append(str(name))
+    elif kind in {"instrument", "vocal", "performer"}:
+        role = ", ".join(str(item) for item in relation.get("attributes") or []) or kind
+        credits["performers"].setdefault(role, []).append(str(name))
+
+
+def _musicbrainz_credits(payload: dict[str, Any]) -> dict[str, Any]:
+    """同次详情展开录音关系及其作品关系，不逐个作品额外请求或向所有曲目传播专辑角色。"""
+    credits = music_credit_values({})
+    for relation in payload.get("relations") or []:
+        _musicbrainz_artist_role(credits, relation)
+        if relation.get("type") == "performance":
+            for related in (relation.get("work") or {}).get("relations") or []:
+                _musicbrainz_artist_role(credits, related, work=True)
+    return music_credit_values(credits)
 
 
 def _remote_music_evidence(info: _MusicEvidenceModel) -> _MusicEvidenceModel:
@@ -81,9 +121,9 @@ def _remote_music_evidence(info: _MusicEvidenceModel) -> _MusicEvidenceModel:
     fields = ("title", "artists", "album", "album_artist", "year", "original_year", "release_year",
               "release_date", "disc_number", "track_number", "total_tracks", "total_discs",
               "version", "media_id", "musicbrainz_release_id", "musicbrainz_release_group_id",
-              "musicbrainz_release_track_id")
+              "musicbrainz_release_track_id", *MUSIC_CREDIT_FIELDS)
     info.field_sources.update({
-        key: "remote" for key in fields if getattr(info, key, None) not in (None, "", [])
+        key: "remote" for key in fields if getattr(info, key, None) not in (None, "", [], {})
     })
     return info
 
@@ -520,6 +560,7 @@ class MusicBrainzModule(_ModuleBase):
 
     def _search_recordings(self, meta: MetaMusic, limit: int, require_match: bool = False) -> list[MusicInfo]:
         """查询 Recording；自动识别须确认身份才停止，手动浏览仍保留原始候选。"""
+        credit_details: dict[str, Optional[dict[str, Any]]] = {}
         for query in self._recording_queries(meta):
             payload = self._request_json(
                 "/recording",
@@ -527,6 +568,7 @@ class MusicBrainzModule(_ModuleBase):
             )
             results = self._project_recording_search(payload)
             if require_match:
+                self._enrich_recording_credits(meta, results, credit_details)
                 enrich_music_artist_aliases(
                     ((meta, item) for item in results), self._source,
                     lambda identity: self._lookup_artist_aliases([identity], []),
@@ -542,6 +584,7 @@ class MusicBrainzModule(_ModuleBase):
             require_match: bool = False,
     ) -> list[MusicInfo]:
         """异步查询 Recording，与同步入口共用候选准入和停止条件。"""
+        credit_details: dict[str, Optional[dict[str, Any]]] = {}
         for query in self._recording_queries(meta):
             payload = await self._async_request_json(
                 "/recording",
@@ -553,6 +596,7 @@ class MusicBrainzModule(_ModuleBase):
             )
             results = self._project_recording_search(payload)
             if require_match:
+                await self._async_enrich_recording_credits(meta, results, credit_details)
                 await async_enrich_music_artist_aliases(
                     ((meta, item) for item in results), self._source,
                     lambda identity: self._async_lookup_artist_aliases([identity], []),
@@ -573,6 +617,49 @@ class MusicBrainzModule(_ModuleBase):
         ]
 
     @classmethod
+    def _recording_credit_targets(cls, meta: MetaMusic, candidates: list[MusicInfo]) -> dict[str, list[MusicInfo]]:
+        """本地存在角色证据且搜索摘要缺失时，最多核验三个不同录音，沿用现有请求预算。"""
+        roles = [key for key, value in music_credit_values(meta).items() if value]
+        targets: dict[str, list[MusicInfo]] = {}
+        if not roles:
+            return targets
+        for candidate in candidates:
+            identity = candidate.media_id
+            if not identity or candidate.media_source != cls._source or all(getattr(candidate, key) for key in roles):
+                continue
+            if not music_title_matches(candidate, meta.title) or not music_version_matches(candidate, meta) or not music_year_matches(candidate, meta):
+                continue
+            if identity in targets or len(targets) < 3:
+                targets.setdefault(identity, []).append(candidate)
+        return targets
+
+    @staticmethod
+    def _apply_recording_credits(identity: str, candidates: list[MusicInfo], payload: Optional[dict[str, Any]]) -> None:
+        """只把同一Recording详情中的非空角色补入本次摘要副本，不改变其主身份。"""
+        if not payload or payload.get("id") != identity:
+            return
+        credits = {key: value for key, value in _musicbrainz_credits(payload).items() if value}
+        for candidate in candidates:
+            candidate.__dict__.update(deepcopy(credits))
+            _remote_music_evidence(candidate)
+
+    def _enrich_recording_credits(self, meta: MetaMusic, candidates: list[MusicInfo],
+                                 details: dict[str, Optional[dict[str, Any]]]) -> None:
+        """检索阶梯共用三个录音的补证上限，失败身份同样计数，普通音乐不新增请求。"""
+        for identity, targets in self._recording_credit_targets(meta, candidates).items():
+            if identity not in details and len(details) < 3:
+                details[identity] = self._request_json(f"/recording/{identity}", params={"inc": _RECORDING_INCLUDES, "fmt": "json"})
+            self._apply_recording_credits(identity, targets, details.get(identity))
+
+    async def _async_enrich_recording_credits(self, meta: MetaMusic, candidates: list[MusicInfo],
+                                             details: dict[str, Optional[dict[str, Any]]]) -> None:
+        """异步补证使用相同候选上限、身份核验、缓存与请求预算。"""
+        for identity, targets in self._recording_credit_targets(meta, candidates).items():
+            if identity not in details and len(details) < 3:
+                details[identity] = await self._async_request_json(f"/recording/{identity}", params={"inc": _RECORDING_INCLUDES, "fmt": "json"})
+            self._apply_recording_credits(identity, targets, details.get(identity))
+
+    @classmethod
     def _recording_queries(cls, meta: MetaMusic) -> list[str]:
         """构造 Recording 检索式阶梯，由严到宽逐级放宽避免零命中。
 
@@ -582,7 +669,8 @@ class MusicBrainzModule(_ModuleBase):
         title = cls._search_title(meta.title)
         if not title:
             return []
-        artist = meta.artists[0] if meta.artists else None
+        query_artists = music_query_artists(meta)
+        artist = query_artists[0] if query_artists else None
         # 括号内的影视 tie-in、版本说明多为半角，与条目全角写法不一致，准备去注释曲名兜底
         bare_title = cls._strip_parenthetical(title)
         # 曲名开头的艺术家署名前缀是命名习惯不是曲名内容，用主体名检索
@@ -1107,7 +1195,7 @@ class MusicBrainzModule(_ModuleBase):
                     # Release lookup 默认只返回 Release Group 的最小引用，
                     # 不包含 primary-type / secondary-types。目录级专辑识别
                     # 后续需要这些字段执行音乐分类，因此必须显式展开。
-                    "inc": "recordings+media+artist-credits+release-groups",
+                    "inc": "recordings+media+artist-credits+release-groups+isrcs" + _RELEASE_RELATIONS,
                     "fmt": "json",
                 },
             )
@@ -1185,8 +1273,8 @@ class MusicBrainzModule(_ModuleBase):
         if known_title and title_sim < 0.7 and not music_album_matches(album.to_music_info(), meta.album or meta.title):
             return 0.0
         artists = [meta.album_artist] if meta.album_artist else meta.artists
-        artist_match = bool(artists and music_artist_matches(album.to_music_info(), artists))
-        if artists and not artist_match:
+        artist_match = music_album_artist_evidence_matches(album, meta)
+        if (artists or any(music_credit_values(meta).values())) and not artist_match:
             return 0.0
         if meta.version and not music_version_matches(album.to_music_info(), meta):
             return 0.0
@@ -1258,6 +1346,7 @@ class MusicBrainzModule(_ModuleBase):
         group_id = release_group.get("id")
         artists, artist_ids = cls._artist_credits(detail.get("artist-credit"))
         album = MusicAlbumInfo(
+            **_musicbrainz_credits(detail),
             media_source=cls._source,
             # Release 与 Release Group 是不同实体，缺少 Group 时不能用 Release ID 补位。
             media_id=str(group_id) if group_id else None,
@@ -1433,11 +1522,12 @@ class MusicBrainzModule(_ModuleBase):
             album_matches = not meta.album or not cached_info.album or music_album_matches(cached_info, meta.album)
             release_matches = album_matches and music_year_matches(cached_info, meta)
             identity_matches = (
-                (not meta.artists or music_artist_matches(cached_info, meta.artists))
+                (not (meta.artists or any(music_credit_values(meta).values())) or music_artist_evidence_matches(cached_info, meta))
                 and (not meta.title or music_title_matches(cached_info, meta.title))
                 and music_version_matches(cached_info, meta)
             )
-            if not release_matches or (not music_isrc_matches(cached_info, meta) and not identity_matches):
+            if (music_credit_conflicts(cached_info, meta) or music_isrc_conflicts(cached_info, meta) or not release_matches
+                    or (not music_isrc_matches(cached_info, meta) and not identity_matches)):
                 return None
         if cached_info.media_id:
             logger.info(f"{meta.title} 使用音乐识别缓存：{cached_info.title}")
@@ -1576,6 +1666,8 @@ class MusicBrainzModule(_ModuleBase):
         for candidate in candidates:
             if normalized_source and str(candidate.media_source or "").casefold() != normalized_source:
                 continue
+            if music_credit_conflicts(candidate, meta) or music_isrc_conflicts(candidate, meta):
+                continue
             album_matches = not meta.album or not candidate.album or music_album_matches(candidate, meta.album)
             release_matches = album_matches and music_year_matches(candidate, meta)
             if music_isrc_matches(candidate, meta) and release_matches:
@@ -1585,7 +1677,7 @@ class MusicBrainzModule(_ModuleBase):
             score = 0
             title_match = False
             # 多艺术家资源任一命中即可，联名候选不会因主艺术家顺序失配
-            artist_match = music_artist_matches(candidate, meta.artists)
+            artist_match = music_artist_evidence_matches(candidate, meta)
             titles = music_titles(candidate)
             exact_title = bool(original_title and any(cls._same_text(original_title, title) for title in titles))
             if exact_title:
@@ -1607,7 +1699,7 @@ class MusicBrainzModule(_ModuleBase):
                 score += 1
             # 非显式身份必须同时满足作品名、已有署名与版本，不能只靠累计得分确认。
             if (
-                (meta.artists and not artist_match)
+                ((meta.artists or any(music_credit_values(meta).values())) and not artist_match)
                 or not title_match
                 or not music_version_matches(candidate, meta)
                 or not release_matches
@@ -1636,9 +1728,11 @@ class MusicBrainzModule(_ModuleBase):
         meta_volume = cls._volume_number(clean_title)
         ranked: list[tuple[bool, int, MusicInfo]] = []
         for album in albums:
+            if music_credit_conflicts(album, meta):
+                continue
             score = 0
             album_title = album.title or album.album
-            artist_match = music_artist_matches(album, meta.artists)
+            artist_match = music_artist_evidence_matches(album, meta)
             title_match = False
             exact_title = False
             # 资源带卷号时候选卷号不一致（含其他分卷）直接排除，避免 Vol.1 误配 Vol.3
@@ -1799,7 +1893,7 @@ class MusicBrainzModule(_ModuleBase):
             payload = self._request_json(
                 f"/recording/{plan.require_media_id()}",
                 params={
-                    "inc": "artists+releases+release-groups+isrcs+genres+aliases",
+                    "inc": _RECORDING_INCLUDES,
                     "fmt": "json",
                 },
             )
@@ -1828,7 +1922,7 @@ class MusicBrainzModule(_ModuleBase):
             payload = await self._async_request_json(
                 f"/recording/{plan.require_media_id()}",
                 params={
-                    "inc": "artists+releases+release-groups+isrcs+genres+aliases",
+                    "inc": _RECORDING_INCLUDES,
                     "fmt": "json",
                 },
             )
@@ -1881,9 +1975,13 @@ class MusicBrainzModule(_ModuleBase):
             media_id: str,
             music_release_regions: Optional[list[str]] = None,
             music_release_scripts: Optional[list[str]] = None,
+            musicbrainz_release_id: Optional[str] = None,
     ) -> Optional[MusicAlbumInfo]:
         """异步按 MusicBrainz Release Group ID 获取专辑详情及曲目。"""
         if not self._detail_plan(media_source, media_id, MUSIC_ENTITY_ALBUM):
+            return None
+        if musicbrainz_release_id is not None and not re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", musicbrainz_release_id):
             return None
         payload = await self._async_request_json(
             f"/release-group/{media_id}",
@@ -1893,7 +1991,7 @@ class MusicBrainzModule(_ModuleBase):
             },
         )
         album = self._project_album_detail(payload)
-        if not album:
+        if not album or (musicbrainz_release_id is not None and album.media_id != media_id):
             return None
         tracks_payload = await self._async_album_tracks_payload(
             payload.get("releases") or [],
@@ -1901,9 +1999,15 @@ class MusicBrainzModule(_ModuleBase):
                 music_release_regions,
                 music_release_scripts,
             ),
+            release_id=musicbrainz_release_id,
+            group_id=media_id,
         )
+        if musicbrainz_release_id is not None and not tracks_payload:
+            return None
         self._apply_selected_release(album, tracks_payload)
         album.tracks = self._project_album_tracks(album, tracks_payload)
+        if musicbrainz_release_id is not None and not album.tracks:
+            return None
         album.artist_aliases = await self._async_lookup_artist_aliases(album.artist_ids, album.artist_aliases)
         return album
 
@@ -1913,9 +2017,13 @@ class MusicBrainzModule(_ModuleBase):
             media_id: str,
             music_release_regions: Optional[list[str]] = None,
             music_release_scripts: Optional[list[str]] = None,
+            musicbrainz_release_id: Optional[str] = None,
     ) -> Optional[MusicAlbumInfo]:
         """按 MusicBrainz Release Group ID 获取标准化专辑详情及曲目。"""
         if not self._detail_plan(media_source, media_id, MUSIC_ENTITY_ALBUM):
+            return None
+        if musicbrainz_release_id is not None and not re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", musicbrainz_release_id):
             return None
         payload = self._request_json(
             f"/release-group/{media_id}",
@@ -1925,7 +2033,7 @@ class MusicBrainzModule(_ModuleBase):
             },
         )
         album = self._project_album_detail(payload)
-        if not album:
+        if not album or (musicbrainz_release_id is not None and album.media_id != media_id):
             return None
         tracks_payload = self._album_tracks_payload(
             payload.get("releases") or [],
@@ -1933,9 +2041,15 @@ class MusicBrainzModule(_ModuleBase):
                 music_release_regions,
                 music_release_scripts,
             ),
+            release_id=musicbrainz_release_id,
+            group_id=media_id,
         )
+        if musicbrainz_release_id is not None and not tracks_payload:
+            return None
         self._apply_selected_release(album, tracks_payload)
         album.tracks = self._project_album_tracks(album, tracks_payload)
+        if musicbrainz_release_id is not None and not album.tracks:
+            return None
         album.artist_aliases = self._lookup_artist_aliases(album.artist_ids, album.artist_aliases)
         return album
 
@@ -2051,8 +2165,9 @@ class MusicBrainzModule(_ModuleBase):
         title = cls._search_title(meta.title, preserve_script=True)
         if title:
             clauses.append(f"recording:{cls._query_phrase(title)}")
-        if meta.artists:
-            clauses.append(f'artist:{cls._query_phrase(meta.artists[0])}')
+        query_artists = music_query_artists(meta)
+        if query_artists:
+            clauses.append(f'artist:{cls._query_phrase(query_artists[0])}')
         if meta.album:
             clauses.append(f'release:{cls._query_phrase(meta.album)}')
         if meta.isrc:
@@ -2126,6 +2241,7 @@ class MusicBrainzModule(_ModuleBase):
         ]
         category_parts = [cls._stripped(release_group.get("primary-type")), *secondary_types]
         return _remote_music_evidence(MusicInfo(
+            **_musicbrainz_credits(recording),
             media_source=cls._source,
             media_id=str(media_id),
             title=str(title),
@@ -2279,32 +2395,57 @@ class MusicBrainzModule(_ModuleBase):
             cls,
             releases: list[dict[str, Any]],
             preference: Optional[_MusicReleasePreference] = None,
+            *,
+            release_id: Optional[str] = None,
+            group_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """同步读取专辑代表性发行版本的原始曲目响应。"""
-        release = cls._select_track_release(releases, preference)
+        """同步读取指定发行或默认代表版本的曲目，显式版本失败不回退。"""
+        release = {"id": release_id.lower()} if release_id is not None else cls._select_track_release(releases, preference)
         if not release.get("id"):
             return None
         payload = cls._request_json(
             f"/release/{release['id']}",
-            params={"inc": "recordings+artist-credits", "fmt": "json"},
+            params={"inc": "recordings+artist-credits+isrcs" + _RELEASE_RELATIONS
+                    + ("+release-groups" if release_id is not None else ""), "fmt": "json"},
         )
-        return payload if isinstance(payload, dict) else None
+        return cls._validate_album_release(payload, release_id=release_id, group_id=group_id)
 
     @classmethod
     async def _async_album_tracks_payload(
             cls,
             releases: list[dict[str, Any]],
             preference: Optional[_MusicReleasePreference] = None,
+            *,
+            release_id: Optional[str] = None,
+            group_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """异步读取专辑代表性发行版本的原始曲目响应。"""
-        release = cls._select_track_release(releases, preference)
+        """异步读取指定发行或默认代表版本的曲目，显式版本失败不回退。"""
+        release = {"id": release_id.lower()} if release_id is not None else cls._select_track_release(releases, preference)
         if not release.get("id"):
             return None
         payload = await cls._async_request_json(
             f"/release/{release['id']}",
-            params={"inc": "recordings+artist-credits", "fmt": "json"},
+            params={"inc": "recordings+artist-credits+isrcs" + _RELEASE_RELATIONS
+                    + ("+release-groups" if release_id is not None else ""), "fmt": "json"},
         )
-        return payload if isinstance(payload, dict) else None
+        return cls._validate_album_release(payload, release_id=release_id, group_id=group_id)
+
+    @staticmethod
+    def _validate_album_release(
+            payload: Optional[dict[str, Any]],
+            *,
+            release_id: Optional[str],
+            group_id: Optional[str],
+    ) -> Optional[dict[str, Any]]:
+        """核验具体发行及所属发行组，不以可能截断的内嵌发行列表决定归属。"""
+        if not isinstance(payload, dict):
+            return None
+        if release_id is not None:
+            release_group = payload.get("release-group")
+            if (payload.get("id") != release_id.lower() or not isinstance(release_group, dict)
+                    or release_group.get("id") != group_id):
+                return None
+        return payload
 
     @classmethod
     def _apply_selected_release(
@@ -2321,6 +2462,7 @@ class MusicBrainzModule(_ModuleBase):
             album.release_date = release_date
         album.musicbrainz_release_id = cls._stripped(payload.get("id"))
         album.total_discs = len(payload.get("media") or []) or None
+        album.__dict__.update(_musicbrainz_credits(payload))
         album.raw_data = {
             **(album.raw_data or {}),
             "release_id": cls._stripped(payload.get("id")),
@@ -2361,6 +2503,7 @@ class MusicBrainzModule(_ModuleBase):
             track.get("artist-credit") or recording.get("artist-credit")
         )
         return _remote_music_evidence(MusicInfo(
+            **_musicbrainz_credits(recording),
             media_source=cls._source,
             media_id=str(media_id),
             title=str(title),
@@ -2383,6 +2526,7 @@ class MusicBrainzModule(_ModuleBase):
             track_number=cls._optional_int(track.get("position")),
             total_tracks=cls._optional_int(medium.get("track-count")),
             duration=cls._duration_seconds(track.get("length") or recording.get("length")),
+            isrc=next(iter(recording.get("isrcs") or []), None),
             cover_url=album.cover_url,
             version=recording.get("disambiguation") or None,
             secondary_types=list(album.secondary_types),
@@ -2393,6 +2537,7 @@ class MusicBrainzModule(_ModuleBase):
             release_status=album.release_status,
             names=[str(title)],
             detail_link=f"{cls._detail_url}/{media_id}",
+            raw_data={"isrcs": list(recording.get("isrcs") or [])},
         ))
 
     @classmethod

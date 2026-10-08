@@ -19,10 +19,10 @@ from app.runtime.log import logger
 
 CURRENT_PERSONA_FILE = "CURRENT_PERSONA.md"
 SYSTEM_RUNTIME_DIR = "runtime"
+HISTORY_DIR = "history"
 MEMORY_DIR = "memory"
 SKILLS_DIR = "skills"
 JOBS_DIR = "jobs"
-ACTIVITY_DIR = "activity"
 USER_MEMORY_DIR = "users"
 PERSONAS_DIR = "personas"
 PERSONA_FILE = "PERSONA.md"
@@ -248,14 +248,13 @@ class AgentRuntimeManager:
         agent_root_dir: Optional[Path] = None,
         bundled_defaults_dir: Optional[Path] = None,
     ) -> None:
+        """绑定用户数据与内置模板目录，布局初始化不再创建逐轮活动日志。"""
         self.agent_root_dir = agent_root_dir or _default_agent_root_dir()
         self.runtime_dir = self.agent_root_dir / SYSTEM_RUNTIME_DIR
         self.memory_dir = self.agent_root_dir / MEMORY_DIR
         self.user_memory_root = self.memory_dir / USER_MEMORY_DIR
         self.skills_dir = self.agent_root_dir / SKILLS_DIR
         self.jobs_dir = self.agent_root_dir / JOBS_DIR
-        # 活动记忆属于统一 memory 域；旧的 agent/activity 目录不再读取或迁移。
-        self.activity_dir = self.memory_dir / ACTIVITY_DIR
         self.subagents_dir = self.runtime_dir / SUBAGENTS_DIR
         self.bundled_defaults_dir = bundled_defaults_dir or (Path(__file__).parent / "defaults")
         self._cache_lock = threading.Lock()
@@ -276,7 +275,6 @@ class AgentRuntimeManager:
         self.user_memory_root.mkdir(parents=True, exist_ok=True)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.activity_dir.mkdir(parents=True, exist_ok=True)
         self.subagents_dir.mkdir(parents=True, exist_ok=True)
         self._migrate_root_runtime_files()
         self._remove_obsolete_runtime_files()
@@ -313,6 +311,11 @@ class AgentRuntimeManager:
             self._cached_signature_checked_at = 0.0
             self._layout_ready = False
 
+    def get_user_learning_dir(self, user_id: Optional[str]) -> Optional[Path]:
+        """个人技能和维护元数据使用独立用户目录，不混入公共市场技能。"""
+        user_key = build_user_memory_key(user_id)
+        return self.agent_root_dir / SYSTEM_RUNTIME_DIR / 'learning' / 'users' / user_key if user_key else None
+
     def get_user_memory_dir(self, user_id: Optional[str]) -> Optional[Path]:
         """
         获取指定用户的记忆目录，不创建目录或暴露原始用户标识。
@@ -324,16 +327,6 @@ class AgentRuntimeManager:
         if user_key is None:
             return None
         return self.user_memory_root / user_key
-
-    def get_user_activity_dir(self, user_id: Optional[str]) -> Optional[Path]:
-        """
-        获取指定用户的活动记忆目录。
-
-        :param user_id: 由可信入口传入的用户 ID
-        :return: 用户级活动记忆目录；系统内部用户或空标识返回 None
-        """
-        user_memory_dir = self.get_user_memory_dir(user_id)
-        return user_memory_dir / ACTIVITY_DIR if user_memory_dir else None
 
     def current_signature(self) -> tuple[tuple[str, int, int], ...]:
         """返回当前运行时配置文件签名，供调用方判断缓存是否仍可复用。"""
@@ -457,18 +450,26 @@ class AgentRuntimeManager:
         return updated_persona, created
 
     def _build_signature(self) -> tuple[tuple[str, int, int], ...]:
-        """基于运行时配置和内置人格生成文件签名。"""
+        """生成配置签名，排除实时历史库并容忍扫描期间文件被并发删除。"""
         entries: list[tuple[str, int, int]] = []
         for prefix, root in (
             ("runtime", self.runtime_dir),
             ("bundled", self.bundled_defaults_dir),
         ):
-            if not root.exists():
-                continue
-            for path in sorted(root.rglob("*")):
-                if not path.is_file():
+            paths: list[Path] = []
+            for directory, dirnames, filenames in root.walk():
+                if directory == self.runtime_dir:
+                    # 历史库及 WAL 边车不是配置，必须在递归前排除整个目录。
+                    dirnames[:] = [name for name in dirnames if name != HISTORY_DIR]
+                paths.extend(directory / name for name in filenames)
+            for path in sorted(paths):
+                try:
+                    if not path.is_file():
+                        continue
+                    stat = path.stat()
+                except FileNotFoundError:
+                    # 类型检查与元数据读取之间，文件仍可能被删除或替换。
                     continue
-                stat = path.stat()
                 relative = path.relative_to(root).as_posix()
                 entries.append((f"{prefix}:{relative}", stat.st_mtime_ns, stat.st_size))
         return tuple(entries)
@@ -559,6 +560,7 @@ class AgentRuntimeManager:
             logger.info(f"已迁移旧版 Agent memory 文件: {path} -> {target}")
 
     def _load_from_root(self, root: Path) -> AgentRuntimeConfig:
+        """从指定根目录解析人格、子代理和额外上下文，配置错误交由调用方回退。"""
         current_persona_path = root / CURRENT_PERSONA_FILE
         current_doc = self._read_markdown(current_persona_path)
         current_meta = current_doc.metadata
@@ -729,6 +731,7 @@ class AgentRuntimeManager:
 
     @staticmethod
     def _read_markdown(path: Path) -> ParsedMarkdownDocument:
+        """解析配置正文与元数据，并将读取或格式错误转换为配置异常。"""
         if not path.exists():
             raise AgentRuntimeConfigError(f"缺少配置文件: {path}")
         try:
@@ -751,6 +754,7 @@ class AgentRuntimeManager:
 
     @staticmethod
     def _resolve_optional_paths(root: Path, values: Any) -> list[Path]:
+        """校验额外上下文路径数组，并按配置根目录解析相对路径。"""
         if not values:
             return []
         if not isinstance(values, list):
@@ -759,11 +763,13 @@ class AgentRuntimeManager:
 
     @staticmethod
     def _resolve_relative_path(root: Path, value: str) -> Path:
+        """保留显式绝对路径，相对路径以所属配置根目录为基准。"""
         candidate = Path(value)
         return candidate if candidate.is_absolute() else (root / candidate).resolve()
 
     @staticmethod
     def _normalize_string_list(values: Any, field_name: str) -> list[str]:
+        """严格校验数组类型，清理空白后保留非空配置项。"""
         if values is None:
             return []
         if not isinstance(values, list):
@@ -777,6 +783,7 @@ class AgentRuntimeManager:
 
     @staticmethod
     def _coerce_string_list(values: Any) -> list[str]:
+        """宽容读取可选字符串数组，非数组配置按空值处理。"""
         if not isinstance(values, list):
             return []
         return [str(value).strip() for value in values if str(value).strip()]
@@ -860,6 +867,7 @@ class AgentRuntimeManager:
         extra_context_paths: list[Path],
         persona_text: str,
     ) -> list[str]:
+        """收集重复引用和废弃短语警告，不阻止有效人格加载。"""
         warnings: list[str] = []
         required_paths = [persona_path]
         duplicates = self._find_duplicate_paths(required_paths + extra_context_paths)
@@ -875,6 +883,7 @@ class AgentRuntimeManager:
 
     @staticmethod
     def _find_duplicate_paths(paths: Iterable[Path]) -> list[Path]:
+        """按解析后的文件路径识别重复引用，每条重复路径只报告一次。"""
         seen: set[Path] = set()
         duplicates: list[Path] = []
         for path in paths:
@@ -910,7 +919,7 @@ class AgentRuntimeManager:
             "3. `extra_context_files`",
             "4. `memory/MEMORY.md`（全局公共记忆，默认注入）",
             "5. `memory/users/<user-key>/MEMORY.md`（当前用户记忆，默认注入）",
-            "6. 其它主题与活动记忆（通过 search_memory 按需检索）",
+            "6. 主题记忆（search_memory）与原始会话证据（session_search）",
             "",
             "`memory` 中的长期偏好可以细化回复方式，但不应覆盖系统核心身份、目标和安全边界。",
         ]

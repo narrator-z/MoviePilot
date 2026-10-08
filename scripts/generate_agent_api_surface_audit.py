@@ -89,6 +89,7 @@ STREAM_OR_BINARY_PATHS = frozenset(
         "/api/v1/system/logging",
         "/api/v1/system/logging/download/{name}",
         "/api/v1/system/message",
+        "/api/v1/system/notification-image",
         "/api/v1/system/progress/{process_type}",
     }
 )
@@ -104,6 +105,7 @@ UI_PRESENTATION_PATHS = frozenset(
         "/api/v1/rule/groups/reorder",
         "/api/v1/storage/catalog",
         "/api/v1/storage/options",
+        "/api/v1/transfer/queue/page",
     }
 )
 EXPLICIT_TRANSPORT_PATHS = frozenset(

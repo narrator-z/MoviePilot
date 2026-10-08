@@ -5,10 +5,11 @@ from typing import Any, Callable, List, Mapping, Optional, Tuple, Union, cast
 from urllib.parse import urljoin
 
 from app.application.site.health import get_configured_site_health_service
-from app.application.site.observation import report_site_search_outcome
+from app.application.site.observation import report_site_search_outcome, report_site_search_page
 from app.application.site.query import get_configured_site_query_service
 from app.application.site.sites import SitesHelper  # pylint: disable=import-error,no-name-in-module
 from app.domain import site as site_rules
+from app.domain import torrent as torrent_rules
 from app.domain.context import Context, SubtitleInfo, TorrentInfo
 from app.foundation import text as text_tools
 from app.foundation.reflection import ModuleHelper
@@ -49,6 +50,10 @@ _SPECIALIZED_SEARCH_ARGUMENTS = {
     "Haidan": ("keyword", "mtype"),
     "HDDolby": ("keyword", "mtype", "page"),
     "RousiPro": ("keyword", "mtype", "cat", "page"),
+}
+
+_SPECIALIZED_SUBTITLE_SEARCH_ARGUMENTS = {
+    "mTorrent": ("keyword", "page", "search_type"),
 }
 
 _UNKNOWN_SEARCH_FAILURE_MESSAGE = "站点请求或页面解析失败"
@@ -207,6 +212,7 @@ class IndexerModule(_ModuleBase):
         state, msg = SitesHelper().check(site_rules.extract_domain(site.get("domain")))
         if state:
             logger.warn(msg)
+            report_site_search_outcome(attempted=False, outcome="deferred", error=msg)
             return False
 
         return True
@@ -256,6 +262,7 @@ class IndexerModule(_ModuleBase):
         """
         解析搜索结果为 TorrentInfo 对象
         """
+        report_site_search_page(raw_count=len(result_array or []))
         if not result_array or len(result_array) == 0:
             logger.warn(f"{site.get('name')} 未搜索到数据，耗时 {seconds} 秒")
             return []
@@ -317,6 +324,23 @@ class IndexerModule(_ModuleBase):
         return page_size if page_size > 0 else SiteSpider.default_result_num()
 
     @staticmethod
+    def restore_search_torrent(site: dict[str, Any], record: dict[str, Any], allow_missing: bool = False) -> Optional[TorrentInfo]:
+        """用当前站点凭据恢复候选；无法安全重建的临时下载票据由调用方重取原页。"""
+        torrent = TorrentInfo()
+        torrent.from_dict(record)
+        # M-Team 下载链接含 API Key 不入检查点，按详情页链接中的站内 ID 用当前凭据重建。
+        identity = torrent_rules.resource_identity(torrent)
+        if site.get("parser") == "mTorrent" and identity and identity[1].startswith("id="):
+            torrent.enclosure = MTorrentSpider(site).get_download_url(identity[1][3:])
+        if not torrent.enclosure and not allow_missing:
+            return None
+        torrent.site_cookie = site.get("cookie") or ""
+        torrent.site_ua = site.get("ua") or ""
+        torrent.site_proxy = bool(site.get("proxy"))
+        torrent.site_downloader = site.get("downloader") or ""
+        return torrent
+
+    @staticmethod
     def __create_search_request(
         site: dict[str, Any],
         keyword: Optional[str],
@@ -332,7 +356,23 @@ class IndexerModule(_ModuleBase):
             return None
 
         search_word = IndexerModule.__clear_search_text(keyword)
+        parser_name = str(site.get("parser") or "")
+        parser_class = SPIDER_PARSER_CLASSES.get(parser_name)
         if search_type == "subtitles":
+            subtitle_argument_names = _SPECIALIZED_SUBTITLE_SEARCH_ARGUMENTS.get(parser_name)
+            if parser_class and subtitle_argument_names:
+                subtitle_available_arguments: dict[str, Any] = {
+                    "keyword": search_word,
+                    "page": page,
+                    "search_type": search_type,
+                }
+                return _IndexerSearchRequest(
+                    parser_class=parser_class,
+                    arguments=MappingProxyType({
+                        name: subtitle_available_arguments[name]
+                        for name in subtitle_argument_names
+                    }),
+                )
             return _IndexerSearchRequest(
                 parser_class=None,
                 arguments=MappingProxyType({
@@ -343,11 +383,9 @@ class IndexerModule(_ModuleBase):
                 }),
             )
 
-        parser_name = str(site.get("parser") or "")
-        parser_class = SPIDER_PARSER_CLASSES.get(parser_name)
-        argument_names = _SPECIALIZED_SEARCH_ARGUMENTS.get(parser_name)
-        if parser_class and argument_names:
-            available_arguments = {
+        torrent_argument_names = _SPECIALIZED_SEARCH_ARGUMENTS.get(parser_name)
+        if parser_class and torrent_argument_names:
+            torrent_available_arguments: dict[str, Any] = {
                 "keyword": search_word,
                 "mtype": mtype,
                 "cat": cat,
@@ -356,8 +394,8 @@ class IndexerModule(_ModuleBase):
             return _IndexerSearchRequest(
                 parser_class=parser_class,
                 arguments=MappingProxyType({
-                    name: available_arguments[name]
-                    for name in argument_names
+                    name: torrent_available_arguments[name]
+                    for name in torrent_argument_names
                 }),
             )
 
@@ -379,11 +417,12 @@ class IndexerModule(_ModuleBase):
     ) -> Tuple[bool, List[dict[str, Any]], Optional[str]]:
         """通过同步解析器执行已冻结的搜索请求，返回错误标志、结果与失败原因"""
         if request.parser_class:
+            spider = request.parser_class(site)
             error_flag, result = cast(
                 Tuple[bool, List[dict[str, Any]]],
-                request.parser_class(site).search(**request.arguments),
+                spider.search(**request.arguments),
             )
-            return error_flag, result, None
+            return error_flag, result, getattr(spider, "error_detail", None)
         return IndexerModule.__spider_search(**request.arguments)
 
     @staticmethod
@@ -393,11 +432,12 @@ class IndexerModule(_ModuleBase):
     ) -> Tuple[bool, List[dict[str, Any]], Optional[str]]:
         """通过异步解析器执行已冻结的搜索请求，返回错误标志、结果与失败原因"""
         if request.parser_class:
+            spider = request.parser_class(site)
             error_flag, result = cast(
                 Tuple[bool, List[dict[str, Any]]],
-                await request.parser_class(site).async_search(**request.arguments),
+                await spider.async_search(**request.arguments),
             )
-            return error_flag, result, None
+            return error_flag, result, getattr(spider, "error_detail", None)
         return await IndexerModule.__async_spider_search(**request.arguments)
 
     @staticmethod
@@ -504,6 +544,8 @@ class IndexerModule(_ModuleBase):
         result = []
         start_time = datetime.now()
         error_flag = False
+        error: Optional[Exception] = None
+        failure_detail: Optional[str] = None
 
         request = self.__create_search_request(
             site=site,
@@ -515,15 +557,31 @@ class IndexerModule(_ModuleBase):
             return []
 
         try:
-            error_flag, result, _ = self.__execute_search(site, request)
+            error_flag, result, failure_detail = self.__execute_search(site, request)
         except Exception as err:
+            error = err
             self.__log_search_error(site, "subtitles", err)
 
-        outcome = self.__create_search_outcome(start_time, error_flag, result)
+        outcome = self.__create_search_outcome(
+            start_time,
+            error_flag,
+            result,
+            error=error,
+            failure_detail=failure_detail,
+        )
         self.__indexer_statistic(
             site=site,
             error_flag=outcome.error_flag,
             seconds=outcome.seconds,
+        )
+        report_site_search_outcome(
+            attempted=True,
+            outcome=(
+                _classify_search_failure(outcome.error)
+                if outcome.error_flag or outcome.error is not None
+                else "success"
+            ),
+            error=_search_failure_message(outcome),
         )
         return self.__parse_subtitle_result(
             site=site,
@@ -612,6 +670,8 @@ class IndexerModule(_ModuleBase):
         result = []
         start_time = datetime.now()
         error_flag = False
+        error: Optional[Exception] = None
+        failure_detail: Optional[str] = None
 
         request = self.__create_search_request(
             site=site,
@@ -623,15 +683,31 @@ class IndexerModule(_ModuleBase):
             return []
 
         try:
-            error_flag, result, _ = await self.__async_execute_search(site, request)
+            error_flag, result, failure_detail = await self.__async_execute_search(site, request)
         except Exception as err:
+            error = err
             self.__log_search_error(site, "subtitles", err)
 
-        outcome = self.__create_search_outcome(start_time, error_flag, result)
+        outcome = self.__create_search_outcome(
+            start_time,
+            error_flag,
+            result,
+            error=error,
+            failure_detail=failure_detail,
+        )
         await self.__async_indexer_statistic(
             site=site,
             error_flag=outcome.error_flag,
             seconds=outcome.seconds,
+        )
+        report_site_search_outcome(
+            attempted=True,
+            outcome=(
+                _classify_search_failure(outcome.error)
+                if outcome.error_flag or outcome.error is not None
+                else "success"
+            ),
+            error=_search_failure_message(outcome),
         )
         return self.__parse_subtitle_result(
             site=site,

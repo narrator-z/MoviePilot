@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -6,7 +7,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Optional
 
-from Pinyin2Hanzi import DefaultHmmParams, is_pinyin
+import Pinyin2Hanzi
+from Pinyin2Hanzi import is_pinyin
 
 from app.domain.meta.metabase import MetaBase
 from app.domain.meta.runtime import get_metainfo_accelerator
@@ -298,6 +300,36 @@ _MUSIC_PAREN_SPEC_RE = re.compile(
     r"[\(（]\s*\d{1,3}\s*/\s*\d{1,3}\s*-?\s*bits?\s*[\)）]",
     re.IGNORECASE,
 )
+# 介质与音频格式相邻才构成发行规格，不能全局删除作品名中的 CD/Album。
+_MUSIC_CARRIER_RE = re.compile(
+    rf"(?<![\w])(?:CD|Vinyl)[ .]+(?=(?:{_MUSIC_FORMAT_TOKEN_ALT})(?![A-Za-z0-9]))",
+    re.IGNORECASE,
+)
+_MUSIC_CATALOG_SPEC_RE = re.compile(
+    rf"\s*\((?:CD|WEB|Vinyl)\s*-\s*(?:{_MUSIC_FORMAT_TOKEN_ALT})\s*-\s*Lossless\)"
+    r"(?:-\d{4,10})?\s*$", re.IGNORECASE,
+)
+_MUSIC_SCENE_TYPE_RE = re.compile(
+    rf"\.(?:Album|Single|EP)(?=\.(?:{_MUSIC_FORMAT_TOKEN_ALT})(?![A-Za-z0-9]))", re.IGNORECASE,
+)
+_MUSIC_RELEASE_LABEL_RE = re.compile(
+    r"\s*-\s*(?:Single|EP|Album)\s*(?=\((?:19|20)\d{2}\)\s*-\s*(?:WEB-DL|FLAC|ALAC|AAC)\b)",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_YEAR_RE = re.compile(
+    rf"\.(?P<year>(?:19|20)\d{{2}})\.(?=(?:{_MUSIC_FORMAT_TOKEN_ALT}|{_MUSIC_VIDEO_TOKEN_ALT})"
+    r"(?![A-Za-z0-9]))", re.IGNORECASE,
+)
+_MUSIC_EDITION_BRACKET_RE = re.compile(
+    r"\[([^\[\]]*\b(?:deluxe|expanded|special|limited|anniversary|remaster(?:ed)?)\b[^\[\]]*)\]",
+    re.IGNORECASE,
+)
+_MUSIC_AUDIO_EXTENSION_RE = re.compile(r"\.(?:flac|mp3|m4a|aac|wav|ape|ogg|opus|wma|aiff?|dsf|dff)$", re.I)
+_MUSIC_CLASSICAL_WORK_RE = re.compile(
+    r"\b(?:No\.|Op\.?|BWV|KV|Hob\.)\s*\d|"
+    r"\b(?:symphony|concerto|sonata|quartet|quintet|suite)\b.*(?:\d|\bin\b|\bfor\b)|"
+    r"^(?:polonaise|toccata|fugue)$", re.IGNORECASE,
+)
 _MUSIC_EMPTY_BRACKET_RE = re.compile(r"[\(（\[]\s*(?:[/+,\-]\s*)*[\)）\]]")
 # 尾部花括号通常是唱片目录号或发布标记，仅在末尾剔除，保护正文中的花括号文本。
 _MUSIC_TRAILING_CATALOG_RE = re.compile(r"\s*\{[A-Za-z0-9][^{}]{0,40}\}\s*$")
@@ -499,10 +531,38 @@ def _string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+MUSIC_CREDIT_FIELDS = ("composers", "conductors", "orchestras", "performers")
+
+
+def music_credit_values(value: Any) -> dict[str, Any]:
+    """复制明确角色证据，演奏者按乐器/声部保存；不从艺人显示署名猜测角色。"""
+    def read(name: str) -> Any:
+        """兼容JSON快照与领域对象，不共享输入列表。"""
+        return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+    def names(raw: Any) -> list[str]:
+        """保留人名原文及顺序，只消除空白和重复值。"""
+        return list(dict.fromkeys(text for item in _string_list(raw) if (text := item.strip())))
+
+    performers = read("performers")
+    normalized: dict[str, list[str]] = {}
+    if isinstance(performers, dict):
+        for role, people in performers.items():
+            key = str(role or "performer").strip().casefold() or "performer"
+            values = names([*normalized.get(key, []), *names(people)])
+            if values:
+                normalized[key] = values
+    return {
+        **{key: names(read(key)) for key in MUSIC_CREDIT_FIELDS if key != "performers"},
+        "performers": normalized,
+    }
+
+
 def _to_halfwidth(value: str) -> str:
     """全角字符归一为半角：FF01-FF5E 按偏移换算，全角空格与括号类字符查表替换。"""
 
     def _translate(char: str) -> str:
+        """仅映射全角标点和 ASCII 全角字符，其余字符保持原值。"""
         code = ord(char)
         if _FULLWIDTH_EXCLAMATION <= code <= _FULLWIDTH_TILDE:
             return chr(code - _HALFWIDTH_OFFSET)
@@ -717,9 +777,17 @@ class MusicNameRegistry:
 
 
 @lru_cache(maxsize=1)
-def _music_pinyin_parameters() -> DefaultHmmParams:
-    """按需复用已有拼音库的字音模型，仅校验副标题原文，不生成猜测名称。"""
-    return DefaultHmmParams()
+def _music_pinyin_states() -> dict[str, str]:
+    """按需读取拼音库的「音节 → 候选汉字」表，仅校验副标题原文，不生成猜测名称。
+
+    只读取 ``DefaultHmmParams.get_states()`` 依赖的 ``hmm_py2hz.json``（约 260KB）。
+    ``DefaultHmmParams()`` 会同时载入约 14MB JSON 的起始、发射与转移概率表，
+    常驻约 50MB 且这里用不到。数据文件路径随锁定的 pinyin2hanzi 版本固定。
+    """
+    path = Path(Pinyin2Hanzi.__file__).parent / "data" / "hmm_py2hz.json"
+    with path.open(encoding="utf-8") as file:
+        states: dict[str, str] = json.load(file)
+    return states
 
 
 class MetaMusic(MetaBase):
@@ -762,6 +830,10 @@ class MetaMusic(MetaBase):
         cue_filename: Optional[str] = None,
         cue_tracks: Optional[list[dict[str, Any]]] = None,
         organization_error: Optional[str] = None,
+        composers: Optional[list[str]] = None,
+        conductors: Optional[list[str]] = None,
+        orchestras: Optional[list[str]] = None,
+        performers: Optional[dict[str, list[str]]] = None,
     ):
         """初始化音乐标题、标签、音频规格和统一媒体身份。"""
         # 音乐无季集概念，仅复用 MetaBase 的基础字段初始化，不触发副标题季集识别
@@ -772,6 +844,12 @@ class MetaMusic(MetaBase):
         self.artists = list(artists) if artists else []
         self.album = album
         self.album_artist = album_artist
+        credits = music_credit_values(dict(composers=composers, conductors=conductors,
+                                          orchestras=orchestras, performers=performers))
+        self.composers: list[str] = credits["composers"]
+        self.conductors: list[str] = credits["conductors"]
+        self.orchestras: list[str] = credits["orchestras"]
+        self.performers: dict[str, list[str]] = credits["performers"]
         self.year = year if year is not None else release_year or original_year
         self.original_year = original_year
         self.release_year = release_year
@@ -809,6 +887,7 @@ class MetaMusic(MetaBase):
     def __setstate__(self, state: dict[str, Any]) -> None:
         """恢复旧版解析缓存时补齐发行事实和字段来源，避免丢失旧字段或共享字典。"""
         self.__dict__.update(state)
+        self.__dict__.update(music_credit_values(state))
         for key in ("musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id",
                     "original_year", "release_year"):
             self.__dict__.setdefault(key, None)
@@ -866,10 +945,8 @@ class MetaMusic(MetaBase):
                     # 不把厂牌目录号、营销文案中的无空格连字符当作艺术家署名。
                     if any(re.search(r"[^\W\d_]", item) for item in secondary.artists):
                         meta.artists = list(secondary.artists)
-            album = cls._resource_label(
-                subtitle, r"专辑(?:名|名称)?|專輯(?:名|名稱)?|album",
-                allow_unlabelled=True,
-            )
+                cls._remove_resource_artist_prefix(meta, secondary)
+            album = cls._resource_album_label(subtitle)
             if album and not meta.album:
                 meta.album = album
             elif not meta.album and secondary.album:
@@ -882,6 +959,7 @@ class MetaMusic(MetaBase):
                     # 日期可能独立位于后续字段；仅补年份，不采用整段文本的作品名。
                     meta.year = cls.parse_query(subtitle).year
             meta.apply_audio_quality(subtitle)
+        cls._restore_resource_album_number(meta, title, subtitle)
         if not meta.album and meta.title and not meta.track_number and cls._resource_is_album(title, subtitle):
             meta.album = meta.title
         if subtitle:
@@ -892,12 +970,62 @@ class MetaMusic(MetaBase):
                 meta.title = native_title
         if not meta.version:
             meta.version = cls._resource_version(title, subtitle)
+        meta.__dict__.update(cls._resource_credits(subtitle))
         meta.field_sources.update({
             key: "torrent" for key in ("title", "artists", "album", "year", "version",
-                                      "audio_format", "audio_lossless", "bit_depth", "sample_rate", "bitrate")
-            if getattr(meta, key) not in (None, "", [])
+                                      "audio_format", "audio_lossless", "bit_depth", "sample_rate", "bitrate", *MUSIC_CREDIT_FIELDS)
+            if getattr(meta, key) not in (None, "", [], {})
         })
         return meta
+
+    @classmethod
+    def _resource_album_label(cls, subtitle: str) -> Optional[str]:
+        """提取专辑标签，排除「专辑 FLAC 豪华版」这类以音频格式开头的说明。"""
+        labels = r"专辑(?:名|名称)?|專輯(?:名|名稱)?|album"
+        labelled = cls._resource_label(subtitle, labels)
+        if labelled:
+            return labelled
+        album = cls._resource_label(subtitle, labels, allow_unlabelled=True)
+        if album and re.match(rf"^(?:{_MUSIC_FORMAT_TOKEN_ALT})(?![A-Za-z0-9])", album, re.I):
+            return None
+        return album
+
+    @classmethod
+    def _remove_resource_artist_prefix(cls, meta: "MetaMusic", secondary: "MetaMusic") -> None:
+        """副标题独立确认艺人与作品后，去掉主标题中逐字重复的艺人前缀。"""
+        if not meta.title or not secondary.title or len(meta.artists) != 1:
+            return
+        artist = meta.artists[0]
+        prefix = re.match(rf"^{re.escape(artist)}\s+(.+)$", meta.title, re.I)
+        if prefix and cls.compact_text(prefix.group(1)) == cls.compact_text(secondary.title):
+            meta.title = prefix.group(1)
+
+    @classmethod
+    def _restore_resource_album_number(cls, meta: "MetaMusic", title: str, subtitle: Optional[str]) -> None:
+        """明确整专标签下保留作品名的数字前缀，避免把 12 Memories 当第 12 轨。"""
+        if not meta.track_number or not cls._resource_is_album(title, subtitle):
+            return
+        text = cls._strip_quality_tokens(cls._strip_spec_segments(cls._normalize_text(title)))
+        match = _MUSIC_ARTIST_TITLE_RE.match(text)
+        if not match:
+            return
+        name, _year = cls._parse_title_year(match.group("title"))
+        number, disc, remainder = cls.split_track_prefix(name)
+        if number == meta.track_number and disc is None and remainder == meta.title:
+            meta.title = name
+            meta.track_number = None
+
+    @classmethod
+    def _resource_credits(cls, subtitle: str) -> dict[str, Any]:
+        """只读取明确角色标签，不从姓名顺序、括号或语言推断作曲家和演奏者。"""
+        credits: dict[str, Any] = {}
+        for key, labels in (("composers", r"作曲家?|composer"), ("conductors", r"指挥|指揮|conductor"),
+                            ("orchestras", r"乐团|樂團|合唱团|合唱團|orchestra|ensemble")):
+            value = cls._resource_label(subtitle, labels)
+            credits[key] = cls._split_artists(value) if value else []
+        performer = cls._resource_label(subtitle, r"演奏者?|独奏|獨奏|performer")
+        credits["performers"] = {"performer": cls._split_artists(performer)} if performer else {}
+        return music_credit_values(credits)
 
     @classmethod
     def _normalize_resource_release(cls, title: str) -> str:
@@ -965,7 +1093,7 @@ class MetaMusic(MetaBase):
             if len(characters) != len(parts) or not re.fullmatch(r"[\u3400-\u9fff]+", characters):
                 continue
             try:
-                if all(char in _music_pinyin_parameters().get_states(part) for char, part in zip(characters, parts)):
+                if all(char in _music_pinyin_states()[part] for char, part in zip(characters, parts)):
                     return candidate
             except KeyError:
                 # 字音模型不覆盖的音节不提供名称替换证据。
@@ -1025,6 +1153,7 @@ class MetaMusic(MetaBase):
     def from_music_info(cls, info: Any) -> "MetaMusic":
         """把标准音乐信息转换为下载、整理和站点搜索使用的元数据。"""
         return cls(
+            **music_credit_values(info),
             title=info.title,
             artists=list(info.artists),
             album=info.album,
@@ -1150,7 +1279,10 @@ class MetaMusic(MetaBase):
         公共层先完成字符归一、音质与干扰信息剔除；随后由注册中心依次匹配
         命名模式和对应解析器，最后统一回填结构化字段并提取曲序前缀。
         """
-        raw = self._normalize_album_year(str(value or ""))
+        original = self._normalize_album_year(str(value or ""))
+        self.apply_audio_quality(original)
+        raw, file_title = self._prepare_release_input(original)
+        original_artists = list(self.artists)
         if not self.version:
             self.version = self._resource_version(raw, None)
         accelerator = get_metainfo_accelerator()
@@ -1161,6 +1293,7 @@ class MetaMusic(MetaBase):
                 year=self.year,
             )
             if rust_result and self._apply_rust_title_result(rust_result):
+                self._restore_numbered_file_title(file_title, original_artists)
                 return
         self.apply_audio_quality(raw)
         context = self._prepare_name_context(
@@ -1179,6 +1312,60 @@ class MetaMusic(MetaBase):
             return
         self._apply_name_result(context, parsed)
         self._apply_track_prefix()
+        self._restore_numbered_file_title(file_title, original_artists)
+
+    def _prepare_release_input(self, value: str) -> tuple[str, Optional[str]]:
+        """为两种解析引擎统一清理有格式证据的发行尾标与音频文件曲序。
+
+        点分发行类型只在音频规格前生效；版本括号保留语义，介质和目录编号
+        不进入检索。文件曲序先于艺人拆分，避免 ``01. Artist`` 成为艺人名。
+        """
+        text, file_title = self._prepare_filename_input(value)
+        text = _MUSIC_EDITION_BRACKET_RE.sub(r"(\1)", text)
+        text = _MUSIC_CATALOG_SPEC_RE.sub("", text)
+        if re.search(r"(?:19|20)\d{2}", text) and len(_SCENE_DOT_RE.findall(value)) >= 3:
+            text = _MUSIC_SCENE_TYPE_RE.sub("", text)
+        text = _MUSIC_CARRIER_RE.sub("", text)
+        text = _MUSIC_RELEASE_LABEL_RE.sub(" ", text)
+        if not re.search(r"-\d+\.(?:19|20)\d{2}", text):
+            text = _MUSIC_SCENE_YEAR_RE.sub(r" \g<year> ", text)
+        # 清理尾链会减少点号数量，场景命名的判定必须使用清理前的证据。
+        if len(_SCENE_DOT_RE.findall(value)) >= 3:
+            text = _SCENE_DOT_RE.sub(" ", text)
+        return text, file_title
+
+    def _prepare_filename_input(self, value: str) -> tuple[str, Optional[str]]:
+        """先按真实扩展名识别文件，再取曲序；数字开头的曲名不能被当作碟号。"""
+        if not _MUSIC_AUDIO_EXTENSION_RE.search(value):
+            return value, None
+        stem = Path(value).stem
+        track: Optional[int]
+        disc: Optional[int]
+        prefix = re.match(r"^(\d{1,3})(?:\.\s+|\.(?=[^\d\s])|\s+-\s+)(.+)$", stem)
+        if prefix:
+            track, disc, remainder = int(prefix.group(1)), None, prefix.group(2)
+        else:
+            track, disc, remainder = self.split_track_prefix(stem)
+        if track is None and disc is None:
+            # M4A 是容器，扩展名不能使底层解析器猜成 AAC；其他尾标仍参与场景识别。
+            return (stem if value.lower().endswith(".m4a") else value), None
+        self.track_number = self.track_number or track
+        self.disc_number = self.disc_number or disc
+        file_title = None
+        if remainder and re.match(r"^\d{1,3}\s+-\s+", stem):
+            # 保存原始曲名，供解析后根据作品编号等证据排除错误的乐章/艺人拆分。
+            file_title = self._strip_quality_tokens(remainder)
+        return remainder or stem, file_title
+
+    def _restore_numbered_file_title(self, title: Optional[str], artists: list[str]) -> None:
+        """保留数字曲名和有作品证据的古典乐章，同时兼容「曲序 - 艺人 - 曲名」。"""
+        if not title:
+            return
+        prefix = re.split(r"\s+-\s+", title, maxsplit=1)[0]
+        if self.artists and not _MUSIC_CLASSICAL_WORK_RE.search(prefix):
+            return
+        self.title = title
+        self.artists = artists
 
     def _apply_rust_title_result(self, parsed: dict[str, Any]) -> bool:
         """回填 Rust 音乐解析结果，并保留调用方已有的高可信字段。"""
@@ -1826,20 +2013,13 @@ class MetaMusic(MetaBase):
         stem = file_path.stem
         title_from_name = not self.title or (self.title == stem and self.field_sources.get("title") != "tag")
 
-        # 曲序/碟号前缀是文件路径的强结构，先于通用艺术家-标题模式剥离，
-        # 避免「01 - One More Time」把 01 误判为艺术家。
-        track_number, disc_number, filename_title = self.split_track_prefix(stem)
-        # 文件名解析使用独立对象，防止 apply_title 覆盖真实音频标签；这里只合并空字段。
+        # 独立解析完整文件名，让统一入口处理曲序；这里只合并空字段，保护真实音频标签。
         filename_meta = MetaMusic(
             org_string=file_path.name,
-            title=filename_title or stem,
+            title=file_path.name,
             audio_format=file_path.suffix.lstrip(".").upper() or None,
             parse_title=True,
         )
-        if filename_meta.track_number is None:
-            filename_meta.track_number = track_number
-        if filename_meta.disc_number is None:
-            filename_meta.disc_number = disc_number
         if title_from_name and filename_meta.title:
             self.title = filename_meta.title
             self.field_sources["title"] = "filename"
@@ -1954,6 +2134,7 @@ class MetaMusic(MetaBase):
             "original_year": self.original_year,
             "release_year": self.release_year,
             "field_sources": dict(self.field_sources),
+            **music_credit_values(self),
             "music_type": self.music_type,
             "album_type": self.album_type,
             "secondary_types": list(self.secondary_types),
@@ -1970,6 +2151,7 @@ class MetaMusic(MetaBase):
         if raw_type not in (None, MediaType.MUSIC, MediaType.MUSIC.value, "music"):
             raise ValueError(f"不支持的音乐媒体类型：{raw_type}")
         meta = cls(
+            **music_credit_values(data),
             org_string=data.get("org_string"),
             title=data.get("title"),
             artists=_string_list(data.get("artists") or data.get("artist")),

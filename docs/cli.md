@@ -14,6 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/scripts/bootst
 - 自动检查并尽量安装 `git`、`curl`、`uv 0.12.5+` 和 `Python 3.14+`
 - 克隆 `MoviePilot`
 - 安装后端依赖
+- 编译并验证 Agent 中文全文索引扩展；缺少编译器或 SQLite 扩展能力时明确告警并保留检索回退
 - 按当前仓库 `version.py` 中的 `FRONTEND_VERSION` 下载对应前端 release 的 `dist.zip`
 - 下载 `MoviePilot-Resources` 主分支资源
 - 将 `resources.v3/*` 同步到后端 `app/application/site/`
@@ -27,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/scripts/bootst
 - 如果系统里已经有可用的 `Python 3.14+`，脚本会优先直接复用本地解释器
 - 如果系统里没有可用解释器，脚本会通过最新稳定版 uv 安装 Python 3.14
 - Linux 下安装系统依赖时通常需要 `sudo`
-- 复用已有仓库时，脚本现在只会因为已跟踪源码改动而阻止自动更新，不会再被 `.DS_Store` 之类未跟踪文件卡住
+- 复用已有仓库时，如果检测到已跟踪源码改动，脚本会先询问是否清空本地改动；确认后才会继续更新，拒绝或非交互模式会取消更新，不会删除被 Git 忽略的配置和运行时文件
 
 如果安装完成后当前终端仍提示找不到 `moviepilot`：
 
@@ -40,6 +41,8 @@ curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/scripts/bootst
 
 - macOS：`~/Library/Application Support/MoviePilot`
 - Linux：`${XDG_CONFIG_HOME:-~/.config}/moviepilot`
+
+从程序目录内的旧 `config/` 迁移配置时，仅复制目标目录中缺失的文件或目录，不覆盖已有内容。只有实际复制了内容才显示“已将现有本地配置迁移到”提示；重复执行且无需复制时不再提示。
 
 如果在交互式终端中执行一键安装脚本，或直接执行 `moviepilot setup` / `moviepilot init` 且未传入 `--config-dir`，程序会先询问配置目录，并把上面的默认路径作为默认值展示出来。
 
@@ -125,6 +128,7 @@ moviepilot tool run moviepilot_api operation_id=scheduler.run 'query={"job_id":"
 
 ```text
 moviepilot install deps
+moviepilot install cjk
 moviepilot install frontend
 moviepilot install resources
 moviepilot init
@@ -164,6 +168,23 @@ moviepilot commands
 ```
 
 ## 安装命令
+
+Agent 中文全文索引扩展会随 `install deps`、`setup` 和后端更新安装到所选 venv 的
+`lib/moviepilot/libfts5_cjk.so`。重复安装先校验源码、架构和实际加载能力，无变化时不重复编译。
+一键安装会尝试准备 Linux C 编译器；手动安装需要预先准备 `build-essential`（Debian/Ubuntu）、
+Xcode Command Line Tools（macOS）或 MSVC/MinGW（Windows），且 Python 的 SQLite 支持扩展加载。
+
+已有环境可以单独补装或检查，不必重新安装所有依赖：
+
+```shell
+moviepilot install cjk
+moviepilot install cjk --venv /path/to/venv
+moviepilot install cjk --venv /path/to/venv --check
+```
+
+检查会在内存库中验证“订阅”两字搜索。失败返回非零退出码并显示原因；自动依赖安装中的
+扩展失败只告警，保留 trigram/LIKE 回退。扩展就绪后历史消息在后台分批建索引，
+实际 `session_search` 的 `search_path="cjk"` 表示该次查询已使用中文索引。
 
 安装后端依赖：
 
@@ -272,6 +293,11 @@ moviepilot setup --config-dir /path/to/moviepilot-config
 - 媒体服务器
 - 消息通知渠道
 
+`LLM_TEMPERATURE` 为可选配置，默认留空。设置页留空或清空配置后，LLM 请求不发送
+`temperature`，使用模型服务默认值；Google 原生运行时使用 SDK 的模型默认温度。
+显式填写 `0`、`1` 等数值仍按填写值发送。
+清空后保存、重新进入设置页及重启均保留这一语义。
+
 如果希望在自动化安装时直接预设超级管理员，也可以在一键安装脚本中透传：
 
 ```shell
@@ -355,6 +381,8 @@ moviepilot update all --skip-resources
 说明：
 
 - `update backend` 会更新 Git 仓库并重新安装后端依赖，包括 `moviepilot-rust` 加速扩展
+- 在线更新后端时会强制同步 `origin` 的全部标签，覆盖同名本地标签，以支持 Release 重建；仅存在于本地的标签会保留。分支仍仅允许快进更新，离线更新不同步标签
+- 后端更新前如果检测到已跟踪源码改动，CLI 会列出部分文件并询问是否清空；确认后执行清理并继续更新，拒绝或非交互模式会取消更新
 - `MOVIEPILOT_UPDATE_DEV=true` 时，`moviepilot update` 默认使用 DEV 模式；`--dev` / `--no-dev` 可临时覆盖，省略目标时更新全部组件。进程环境变量优先于配置目录中的 `app.env`
 - DEV 模式后端跟踪当前开发分支，处于 Release 的 detached HEAD 时回到 `v3`；前端下载最新 Release 的 `dist.zip`。显式 `--ref` / `--frontend-version` 优先于默认选择
 - DEV 模式每次更新前端都会重新下载并替换发布包，即使版本号相同或显式指定了 `--frontend-version`，以获取同版本重新打包的内容
@@ -400,6 +428,7 @@ moviepilot version
 说明：
 
 - `start` 会先启动后端，再启动前端；普通 `start` / `restart` 不检查、不下载、不安装更新，DEV 模式也不例外
+- 本地 CLI 会优先使用项目根目录 `venv/bin/moviepilot-python`；该入口不存在时回退到同一目录的 `venv/bin/python`，手工启动、更新和开机自启保持一致
 - `start --safe` 会以安全模式启动后端，本次启动跳过插件、调度器、监控、命令和工作流等后台扩展能力，不修改用户配置
 - `MOVIEPILOT_AUTO_UPDATE` 为布尔开关，默认 `false`；只有 `true` 启用后台 Release 检查和版本提醒，保存后定时服务热更新。`AUTO_UPDATE_RESOURCE` 独立控制站点资源检查和提醒；任一开关开启即启用检测服务，且只检查对应目标，两者均关闭才移除服务。`MOVIEPILOT_UPDATE_DEV` 为独立布尔开关，默认 `false`；设为 `true` 时手动 `moviepilot update` 默认使用 DEV 更新模式。旧 `dev/release` 值统一转换为 `MOVIEPILOT_AUTO_UPDATE=true`；旧 `dev` 在未显式配置新开关时迁移为 `MOVIEPILOT_UPDATE_DEV=true`
 - Release 更新由后台每 6 小时检查 GitHub Release；管理员确认后先静默下载安装包并显示进度，下载完成后再次确认重启，通过专门的内部更新入口安装已下载且通过 SHA-256 校验的包后再启动服务

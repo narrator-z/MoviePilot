@@ -15,20 +15,21 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, Union
 
 from jinja2 import Template
 
-from app.application.configuration import get_configured_system_config
+from app.application.configuration import get_chain_runtime_config_snapshot, get_configured_system_config
 from app.domain.context import MediaInfo, MusicInfo, TorrentInfo
 from app.domain.meta.metabase import MetaBase
 from app.domain.meta.metamusic import MetaMusic
 from app.foundation import size as size_tools
 from app.foundation.crypto import HashUtils
 from app.foundation.singleton import Singleton, SingletonClass
+from app.foundation.text import convert as zhconv_convert
 from app.runtime.cache import TTLCache
 from app.runtime.log import logger
 from app.runtime.stop import runtime_stop_state
 from app.schemas.message import Message
 from app.schemas.tmdb import TmdbEpisode
 from app.schemas.transfer import TransferInfo
-from app.schemas.types import MUSIC_ENTITY_ALBUM, SystemConfigKey
+from app.schemas.types import MUSIC_ENTITY_ALBUM, MessageType, SystemConfigKey
 
 # 专辑名尾部的括号年份标记；重命名模板会独立追加 `({{year}})`，
 # 标签或目录名中自带的尾部年份若不剥离，会生成重复年份的目录名（issue #6355）
@@ -36,6 +37,9 @@ _ALBUM_TRAILING_YEAR_RE = re.compile(
     r"(?:[\s\u3000]*[\(\[（【]\s*(?:19|20)\d{2}\s*[\)\]）】])+$"
 )
 _MESSAGE_QUEUE_STOP_TIMEOUT_SECONDS = 10.0
+# SSE 实时消息队列上限：前端关闭或切到后台时没有消费者，超出后丢弃最旧消息，
+# 避免长时间无人打开页面时队列无界增长，重新打开后又逐条补弹积压消息
+_SSE_QUEUE_MAXSIZE = 100
 
 
 class AsyncMessageQueryRepository(Protocol):
@@ -126,6 +130,7 @@ class TemplateContextBuilder:
 
         每次调用都新建本地 ``context`` 字典，依次填充各业务来源和当前实例的
         主机名后返回过滤掉 None 值的副本，调用之间互不影响。
+        音乐在字段取值完成后统一按开关转简体，避免原始标签覆盖在线转换结果。
 
         :param meta: 媒体元数据
         :param mediainfo: 识别的媒体信息
@@ -145,6 +150,8 @@ class TemplateContextBuilder:
         self._add_transfer_info(context, transferinfo)
         self._add_torrent_info(context, torrentinfo)
         self._add_file_info(context, file_extension)
+        if isinstance(meta, MetaMusic) or isinstance(mediainfo, MusicInfo):
+            self._simplify_music_context(context)
         context.update(kwargs, instance_name=socket.gethostname())
 
         if include_raw_objects:
@@ -152,6 +159,18 @@ class TemplateContextBuilder:
 
         # 移除空值
         return {k: v for k, v in context.items() if v is not None}
+
+    @staticmethod
+    def _simplify_music_context(context: Dict[str, Any]) -> None:
+        """只转换最终音乐展示字段，保留原始文件名、标签、媒体身份和取值优先级。"""
+        if not get_chain_runtime_config_snapshot().music_metadata_to_simplified:
+            return
+        for field_name in ("title", "name", "artist", "album", "album_artist", "title_year", "version"):
+            value = context.get(field_name)
+            if isinstance(value, str):
+                context[field_name] = zhconv_convert(value, "zh-hans")
+        if "artists" in context:
+            context["artists"] = [zhconv_convert(artist, "zh-hans") for artist in context["artists"]]
 
     @classmethod
     def _add_media_info(
@@ -1189,6 +1208,10 @@ class MessageQueueManager(metaclass=SingletonClass):
         return True
 
 
+# 实时通知严重级别：前端据此决定图标与颜色，error/warning 优先于业务类型展示
+NotificationLevel = Literal["info", "success", "warning", "error"]
+
+
 class MessageHelper(metaclass=Singleton):
     """
     消息队列管理器，负责系统和插件实时消息的 SSE 推送
@@ -1196,11 +1219,12 @@ class MessageHelper(metaclass=Singleton):
 
     def __init__(self) -> None:
         """初始化系统消息队列和通知去重缓存。"""
-        self.sys_queue: queue.Queue[str] = queue.Queue()
+        self.sys_queue: queue.Queue[str] = queue.Queue(maxsize=_SSE_QUEUE_MAXSIZE)
         self._recent_notification_keys = TTLCache(region="message:notification", maxsize=500, ttl=60)
 
     def close(self) -> None:
-        """关闭通知去重缓存；真实收敛后由生命周期释放单例身份。"""
+        """清空未推送的实时消息并关闭通知去重缓存；真实收敛后由生命周期释放单例身份。"""
+        self.drain()
         self._recent_notification_keys.close()
 
     @staticmethod
@@ -1234,13 +1258,24 @@ class MessageHelper(metaclass=Singleton):
         self._recent_notification_keys.set(key, True)
         return False
 
-    def put(self, message: Any, role: str = "plugin", title: str = None, note: Union[list, dict] = None):
+    def put(
+            self,
+            message: Any,
+            role: str = "plugin",
+            title: str = None,
+            note: Union[list, dict] = None,
+            mtype: Optional[MessageType] = None,
+            level: Optional[NotificationLevel] = None,
+    ):
         """
         存消息
         :param message: 消息
-        :param role: 消息通道 system：系统消息，plugin：插件消息
+        :param role: 消息通道 system：系统消息，plugin：插件消息；只表示来源，不表示严重程度
         :param title: 标题
         :param note: 附件json
+        :param mtype: 业务类型，前端据此选择业务图标，例如订阅消息显示订阅图标
+        :param level: 严重级别 info/success/warning/error；未设置时前端按普通通知展示，
+                      失败或需要用户处理的消息必须显式标记，才会显示为警示样式
         """
         if role not in ["system", "plugin"]:
             return
@@ -1249,22 +1284,58 @@ class MessageHelper(metaclass=Singleton):
             title = "插件通知"
         if self._is_recent_system_notification(message, role, title=title, note=note):
             return
-        self.sys_queue.put(json.dumps({
+        self._put_drop_oldest(json.dumps({
             "type": role,
             "title": title,
             "text": message,
             "date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "note": note
+            "note": note,
+            "mtype": mtype.value if mtype else None,
+            "level": level,
         }))
+
+    def _put_drop_oldest(self, payload: str) -> None:
+        """
+        入队实时消息，队列已满时丢弃最旧的一条再重试。
+
+        多个生产线程并发写入时，腾出的位置可能先被其他生产者占用而再次遇到队列已满；
+        每次重试前都有其他生产者写入成功，队列上限远大于并发生产者数，很快就能写入。
+        """
+        while True:
+            try:
+                self.sys_queue.put_nowait(payload)
+                return
+            except queue.Full:
+                try:
+                    self.sys_queue.get_nowait()
+                    logger.debug("实时消息队列已满，丢弃最旧的一条消息")
+                except queue.Empty:
+                    pass
 
     def get(self, role: str = "system") -> Optional[str]:
         """
         取消息
         :param role: 兼容旧参数，当前所有 SSE 消息共用一个队列
         """
-        if not self.sys_queue.empty():
-            return self.sys_queue.get(block=False)
-        return None
+        try:
+            return self.sys_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def drain(self, role: str = "system") -> list[str]:
+        """
+        按入队顺序取出当前积压的全部实时消息。
+
+        最多取出队列上限条，生产方持续写入时也能在有限次数内返回。
+        :param role: 兼容旧参数，当前所有 SSE 消息共用一个队列
+        """
+        messages: list[str] = []
+        for _ in range(_SSE_QUEUE_MAXSIZE):
+            detail = self.get(role)
+            if detail is None:
+                break
+            messages.append(detail)
+        return messages
 
 
 def stop_message(

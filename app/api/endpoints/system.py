@@ -39,6 +39,7 @@ from app.application.configuration import (
 from app.application.database import get_database_governance
 from app.application.image import ImageHelper
 from app.application.mediaserver import get_mediaserver_configs
+from app.application.messaging.image import verify_wechat_image_url
 from app.application.messaging.message import MessageHelper
 from app.application.network import get_configured_network_test_service
 from app.application.rules import RuleHelper
@@ -107,6 +108,17 @@ _PUBLIC_SYSTEM_CONFIG_KEYS = {
     )
 }
 _PUBLIC_SETTINGS_KEYS = {"PLUGIN_MARKET"}
+
+
+def _project_public_storages(value: Any) -> list[dict[str, Any]]:
+    """存储配置只公开名称和类型，与 /storage/options 一致，config 中的连接配置不返回。"""
+    if not isinstance(value, list):
+        return []
+    return [
+        {"name": item.get("name") or item["type"], "type": item["type"]}
+        for item in value
+        if isinstance(item, dict) and item.get("type")
+    ]
 
 
 async def _get_image_proxy_allowed_domains() -> set[str]:
@@ -331,6 +343,47 @@ async def cache_img(
     )
 
 
+@router.get(  # type: ignore[misc]
+    "/notification-image",
+    summary="通知图片代理",
+    response_model=None,
+    response_class=Response,
+    responses={
+        200: {
+            "description": "通知图片内容",
+            "content": {
+                "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                "image/png": {"schema": {"type": "string", "format": "binary"}},
+                "image/webp": {"schema": {"type": "string", "format": "binary"}},
+            },
+        },
+        304: {"description": "图片缓存未修改"},
+    },
+)
+async def notification_image(
+    url: str,
+    if_none_match: Annotated[str | None, Header()] = None,
+) -> Response:
+    """
+    返回带企业微信通知签名的外部图片。
+
+    企业微信取图请求不携带用户 Cookie，因此只接受绑定原图和用途的签名地址，
+    再复用统一图片代理的域名、DNS 和图片内容校验。
+    """
+    source_url = verify_wechat_image_url(url)
+    if not source_url:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    response = await fetch_image(
+        url=source_url,
+        use_cache=bool(get_runtime_settings().get("GLOBAL_IMAGE_CACHE")),
+        if_none_match=if_none_match,
+    )
+    if response is None:
+        raise HTTPException(status_code=502, detail="Failed to fetch the image")
+    return response
+
+
 @router.get(
     "/global",
     summary="查询非敏感系统设置",
@@ -393,6 +446,7 @@ async def get_user_global_setting(
             "LLM_SUPPORT_AUDIO_OUTPUT",
             "RECOGNIZE_SOURCE",
             "SEARCH_SOURCE",
+            "MUSIC_CUE_ENABLE",
             "AI_RECOMMEND_ENABLED",
         }
     )
@@ -618,7 +672,7 @@ async def get_progress(
 )
 async def get_public_setting(key: str, _: ApiPrincipal = Depends(get_current_active_user_async)) -> _SchemaResponse:
     """
-    查询普通用户可读取的非敏感系统设置
+    查询普通用户可读取的非敏感系统设置，存储配置只返回名称和类型
     """
     if key in _PUBLIC_SETTINGS_KEYS:
         return _SchemaResponse(
@@ -627,7 +681,10 @@ async def get_public_setting(key: str, _: ApiPrincipal = Depends(get_current_act
         )
     if key not in _PUBLIC_SYSTEM_CONFIG_KEYS:
         raise HTTPException(status_code=404, detail="配置项不存在")
-    value = get_configured_system_config().get(_PUBLIC_SYSTEM_CONFIG_KEYS[key])
+    config_key = _PUBLIC_SYSTEM_CONFIG_KEYS[key]
+    value = get_configured_system_config().get(config_key)
+    if config_key is SystemConfigKey.Storages:
+        value = _project_public_storages(value)
     return _SchemaResponse(success=True, data={"value": value})
 
 
@@ -679,8 +736,14 @@ async def get_message(
             while not runtime_stop_state.is_system_stopped:
                 if await request.is_disconnected():
                     break
-                detail = message.get(role)
-                yield f"data: {detail or ''}\n\n"
+                # 一次推送全部积压消息，避免页面重新打开后按 3 秒一条逐条补弹
+                details = message.drain(role)
+                if details:
+                    for detail in details:
+                        yield f"data: {detail}\n\n"
+                else:
+                    # 空消息作为心跳，维持连接并定期检测客户端是否断开
+                    yield "data: \n\n"
                 await asyncio.sleep(3)
         except asyncio.CancelledError:
             return

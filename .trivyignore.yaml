@@ -273,3 +273,53 @@ vulnerabilities:
       - pkg:deb/debian/rsync
     expired_at: 2026-11-20
     statement: rsync is installed as a container utility from the pinned Debian base image; the fixed version 3.5.0+ds1-0+deb13u1 is not yet adopted by the base image tag we pin, and the Debian security tracker still lists trixie as affected while the fix ships only in sid, so this HIGH is suppressed until the base image picks up the Debian security update. MoviePilot does not run an rsync daemon and does not expose rsync over the network, so the affected code paths are not reachable. Reassess when this exception expires.
+
+  # OpenSSL 3.5.7 / libpcre2-8-0 / urllib3 HIGH batch (Debian trixie base + pinned Python dep, disclosed 2026-10).
+  # OS-package (dpkg) findings carry no file path in Trivy's structured ignore model, so a wildcard keeps each
+  # rule scoped via `purls` (exact package only) while still matching the Debian OS-package finding.
+  - id: CVE-2026-103111
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/libpcre2-8-0@10.46-1~deb13u2
+      - pkg:deb/debian/libpcre2-8-0
+    expired_at: 2027-01-15
+    statement: libpcre2-8-0 is pulled in via the pinned Debian base image; Debian published the fix in 10.46-1~deb13u3. MoviePilot does not compile or evaluate untrusted regular expressions through PCRE2, so the affected code path is not reachable. Suppressed pending the next base-image refresh.
+  - id: CVE-2026-75804
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/libssl3t64@3.5.7-1~deb13u2
+      - pkg:deb/debian/openssl@3.5.7-1~deb13u2
+      - pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u2
+      - pkg:deb/debian/libssl3t64
+      - pkg:deb/debian/openssl
+      - pkg:deb/debian/openssl-provider-legacy
+    expired_at: 2027-01-15
+    statement: OpenSSL 3.5.7 is pulled in via the pinned Debian base image; Debian published the fix in 3.5.7-1~deb13u3. CVE-2026-75804 is a DoS via unenforced QUIC flow control; MoviePilot terminates no TLS/QUIC connections itself, so the affected path is not reachable. Suppressed pending the next base-image refresh.
+  - id: CVE-2026-84782
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/libssl3t64@3.5.7-1~deb13u2
+      - pkg:deb/debian/openssl@3.5.7-1~deb13u2
+      - pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u2
+      - pkg:deb/debian/libssl3t64
+      - pkg:deb/debian/openssl
+      - pkg:deb/debian/openssl-provider-legacy
+    expired_at: 2027-01-15
+    statement: OpenSSL 3.5.7 is pulled in via the pinned Debian base image; Debian published the fix in 3.5.7-1~deb13u3. CVE-2026-84782 is an information-disclosure issue in the OpenSSL compat layer; MoviePilot does not expose the affected surface, so the risk is not reachable. Suppressed pending the next base-image refresh.
+  - id: CVE-2026-97687
+    paths:
+      - Python
+    purls:
+      - pkg:pypi/urllib3@2.7.0
+    expired_at: 2027-01-15
+    statement: urllib3 2.7.0 is pinned by the project lockfile; 2.8.0 carries the fix. CVE-2026-97687 allows traffic interception via an HTTPS-proxy TLS handshake; MoviePilot's outbound requests use a configured proxy only when the operator sets one, and the deployed topology does not route through an untrusted proxy. Bump urllib3 to 2.8.0 on the next dependency refresh.
+  - id: CVE-2026-97689
+    paths:
+      - Python
+    purls:
+      - pkg:pypi/urllib3@2.7.0
+    expired_at: 2027-01-15
+    statement: urllib3 2.7.0 is pinned by the project lockfile; 2.8.0 carries the fix. CVE-2026-97689 is a DoS via unbounded memory when retrying outbound requests; MoviePilot issues a bounded number of outbound requests, so the impact is limited. Bump urllib3 to 2.8.0 on the next dependency refresh.

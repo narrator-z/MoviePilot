@@ -84,8 +84,10 @@ def test_remote_version_selects_v3(release_http, getter, repository, tags, expec
     response.json.return_value = [{"tag_name": tag} for tag in tags]
 
     assert getter() == expected
+    # 后端版本检查走 fork 自有仓库（narrator-z/MoviePilot），前端仍对照上游
+    owner = "narrator-z" if repository == "MoviePilot" else "jxxghp"
     release_http.get.assert_called_once_with(
-        f"https://api.github.com/repos/jxxghp/{repository}/releases",
+        f"https://api.github.com/repos/{owner}/{repository}/releases",
         proxies=None,
         headers={},
     )

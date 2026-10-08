@@ -32,6 +32,7 @@ ALLOWED_ACTION_REFS = {
     "actions/upload-artifact@v7",
     "actions/download-artifact@v8",
     "docker://ghcr.io/infinitypacer/pr-review-runner:latest",
+    "aquasecurity/trivy-action@v0.36.0",
 }
 
 
@@ -425,8 +426,8 @@ def test_publish_refreshes_base_and_preserves_build_cache() -> None:
 
     assert workflow["on"]["workflow_dispatch"] is None
     assert publish["push"] is True
-    assert publish["pull"] is True
-    assert "scope=moviepilot-v3-standard-docker," in publish["cache-to"]
+    assert publish["pull"] is False
+    assert "scope=moviepilot-v3-standard-docker-amd64" in publish["cache-from"]
 
 
 def test_release_publishes_free_threaded_image_with_separate_metadata_and_cache() -> None:

@@ -287,17 +287,24 @@ async def test_invalid_source_is_rejected(manual_owner):
 @pytest.mark.parametrize("season,expected", [(None, [0, 1, 2]), (0, [0]), (1, [1]), (2, [2])])
 async def test_media_page_keeps_original_season_filter(manual_owner, monkeypatch, season, expected):
     """手动精确搜索复用原季范围；过滤后的条数不改变原始页事实。"""
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
 
-    from app.chain.media import MediaChain
+    from app.chain.search import manual as manual_module
     from app.domain.context import MediaInfo
     from app.schemas.types import MediaSource
 
     owner, _, _ = manual_owner
     media = MediaInfo(media_source=MediaSource.TMDB, media_id="1", tmdb_id=1, type=MediaType.TV,
                       title="Example Show", original_title="Example Show", names=["Example Show"])
-    monkeypatch.setattr(MediaChain, "async_recognize_media", AsyncMock(return_value=media))
-    monkeypatch.setattr(MediaChain, "async_supplement_media_info", AsyncMock(return_value=media))
+    # 在 manual 模块命名空间直接替换 MediaChain 构造入口，而不是只 patch 类方法：
+    # 大分片并行执行时若其它用例 reload 了 app.chain.media 而未同步 reload manual，
+    # 类对象身份会漂移，类方法 monkeypatch 无法拦截 manual.py 的真实识别调用，
+    # 被网络守卫拦截后抛 ValueError，事件列表仅 1 项导致 result[-2] 越界。
+    # 在调用点替换可彻底隔离识别依赖，符合零真实出站契约。
+    recognizer = MagicMock()
+    recognizer.async_recognize_media = AsyncMock(return_value=media)
+    recognizer.async_supplement_media_info = AsyncMock(return_value=media)
+    monkeypatch.setattr(manual_module, "MediaChain", MagicMock(return_value=recognizer))
     def request(**_params):
         report_site_search_outcome(attempted=True, outcome="success")
         report_site_search_page(raw_count=3, has_more=True)

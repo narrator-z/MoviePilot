@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional, cast
 from uuid import uuid4
 
 from app.application.configuration import get_configured_system_config
+from app.application.subscription.activity import current_activity_run, subscription_activity_scope
 from app.application.subscription.contract import (
     SubscriptionRepository,
     SubscriptionSnapshot,
@@ -29,6 +30,7 @@ from app.application.subscription.observability import (
     batch_finished_count,
     batch_progress_text,
     inline_search_result,
+    subscription_log_scope,
 )
 from app.application.subscription.query import SubscriptionQueryService, subscription_search_due
 from app.application.subscription.sitebudget import (
@@ -48,6 +50,7 @@ from app.chain.subscribe.metadata import (
 from app.chain.subscribe.searchtask import (
     SubscriptionSearchTaskRunner,
     retry_at_after,
+    subscription_search_cancelled,
 )
 from app.domain.context import (
     Context,
@@ -70,7 +73,7 @@ _NEW_SUBSCRIPTION_EDIT_SECONDS = 60
 
 def _finish_paged_subscription(owner: _SubscribeOwnerBase, subscribe: SubscriptionSnapshot,
                                target: SubscriptionSearchTarget) -> None:
-    """按当前订阅只读对账缺集，不用搜索开始时的媒体快照回写总集数；暂停与原流程一致，已接纳的搜索照常结算。"""
+    """按当前订阅对账缺集，不回写搜索开始时的总集数；显式补搜暂停后仍正常结算。"""
     current = owner.subscription_repository.get(subscribe.id)
     if current is None or owner._SubscribeChain__candidate_contract_changed(subscribe, current):
         return
@@ -106,7 +109,9 @@ def _process_paged_subscription(owner: _SubscribeOwnerBase, subscribe: Subscript
     repository = getattr(getattr(owner, "subscription_search_repository", None), "sessions", None) if execution_context else None
     snapshot = repository.get(task_id=execution_context.task_id) if repository and execution_context and execution_context.task_id else None
     strategy = _subscription_search_strategy(bool(subscribe.best_version))
-    scan = SearchScan(owner=searchchain, plan=plan, full=strategy == "full",
+    prefer_initial_pack = bool(cast(Any, owner)._SubscribeChain__build_full_pack_first_no_exists(
+        subscribe, target.media_key, target.missing))
+    scan = SearchScan(owner=searchchain, plan=plan, full=strategy == "full" or prefer_initial_pack,
                       page_limit=1 if strategy == "single_page" else None,
                       execution=execution_context, repository=repository, snapshot=snapshot,
                       target_scope=(subscribe.start_episode or 1, subscribe.total_episode or 0))
@@ -114,9 +119,11 @@ def _process_paged_subscription(owner: _SubscribeOwnerBase, subscribe: Subscript
         execution_context.incremental_search = True
 
     def submit(contexts: list[Context], ready: set[str]) -> set[str]:
+        """仅下载已就绪目标，并记录本页候选和实际提交结果。"""
         _ensure_execution_active(execution_context)
         if execution_context:
             execution_context.report_phase("preparing")
+        logger.scoped_info(f"本页可选资源 {len(contexts)} 个，开始检查下载条件")
         downloads, lefts = owner._SubscribeChain__download_best_version_with_full_pack_first(
             contexts=contexts, no_exists=deepcopy(target.missing),
             subscribe=subscribe, mediakey=target.media_key, username=subscribe.username,
@@ -124,6 +131,11 @@ def _process_paged_subscription(owner: _SubscribeOwnerBase, subscribe: Subscript
             source=owner.get_subscribe_source_keyword(subscribe), execution_context=execution_context,
             eligible_targets=ready,
         )
+        activity = current_activity_run()
+        if activity:
+            for download in downloads or []:
+                activity.resource(download, "submitted")
+        logger.scoped_info(f"本页新增下载 {len(downloads or [])} 个")
         if target.media.type == MediaType.MOVIE:
             settled = ready if downloads else set()
         else:
@@ -249,7 +261,7 @@ class _SubscribeSearchQueueCoordinator(_SubscribeOwnerBase):
         执行订阅搜索。
 
         scheduled_interval 仅供定时调度传入系统间隔；手动和指定目标搜索不受周期限制。
-        指定目标可对暂停订阅搜索一次，已接纳的搜索不因暂停中断，也不会仅因搜索而恢复订阅。
+        暂停会阻止自动搜索及下载；手动或指定目标补搜可以执行一次，也不会仅因搜索而恢复订阅。
         """
         return self._execute_search(
             sid=sid,
@@ -300,6 +312,16 @@ class _SubscribeSearchQueueCoordinator(_SubscribeOwnerBase):
             scheduled_interval=scheduled_interval,
         )
         return None
+
+    def _reset_new_subscription(self, subscribe: SubscriptionSnapshot) -> SubscriptionSnapshot:
+        """搜索收尾前重读状态，避免旧的新建快照撤销用户暂停。"""
+        current = self.subscription_repository.get(subscribe.id)
+        if current and current.state == "N":
+            return cast(
+                SubscriptionSnapshot,
+                self._SubscribeChain__apply_subscribe_update(current, {"state": "R"}, scene="search_reset"),
+            )
+        return current or subscribe
 
     def _execute_inline_search(
         self,
@@ -356,18 +378,25 @@ class _SubscribeSearchQueueCoordinator(_SubscribeOwnerBase):
                     logger.debug(f"订阅《{subscribe.name}》正在处理，本次搜索先不重复执行")
                     summary.record("skipped", "admission_conflict")
                     continue
+                allow_paused_search = source in {"manual", "targeted"}
                 execution_context = SubscriptionExecutionContext(
                     lease=lease,
                     admission=self._subscription_execution_admission,
-                    cancel_requested=lambda: runtime_stop_state.is_system_stopped,
+                    cancel_requested=partial(
+                        subscription_search_cancelled,
+                        self.subscription_repository,
+                        subscribe.id,
+                        allow_paused_search,
+                        lambda: runtime_stop_state.is_system_stopped,
+                    ),
+                    allow_paused_search=allow_paused_search,
                 )
                 current = None
                 outcome: SearchTaskOutcome = "skipped"
                 reason: Optional[str] = "not_eligible"
                 try:
                     current = self.subscription_repository.get(subscribe.id)
-                    # 与持久队列保持一致，暂停不取消本轮已选取的搜索。
-                    if current is None:
+                    if current is None or (current.state == "S" and not allow_paused_search):
                         continue
                     processed_result = self._process_search_subscription(
                         current,
@@ -398,11 +427,7 @@ class _SubscribeSearchQueueCoordinator(_SubscribeOwnerBase):
                 finally:
                     try:
                         if current and current.state == "N":
-                            self._SubscribeChain__apply_subscribe_update(
-                                current,
-                                {"state": "R"},
-                                scene="search_reset",
-                            )
+                            self._reset_new_subscription(current)
                     except Exception as err:
                         logger.error(
                             f"订阅《{subscribe.name}》搜索结束后没有恢复到正常状态，"
@@ -592,11 +617,7 @@ class _SubscribeSearchQueueOwner(_SubscribeSearchQueueCoordinator):
             execution_ttl=self._SUBSCRIPTION_EXECUTION_TTL,
             recent_retry_at=self._recent_subscription_retry_at,
             process_subscription=self._process_search_subscription,
-            reset_subscription=partial(
-                self._SubscribeChain__apply_subscribe_update,
-                update_data={"state": "R"},
-                scene="search_reset",
-            ),
+            reset_subscription=self._reset_new_subscription,
             report_progress=self._report_search_progress,
             stop_state=stop_state,
         )
@@ -808,6 +829,26 @@ class SubscribeSearchOwner(_SubscribeSearchQueueOwner):
         execution_context: Optional[SubscriptionExecutionContext] = None,
     ) -> Optional[SubscriptionSnapshot]:
         """处理单个订阅，并返回下载后重新读取的状态快照。"""
+        with subscription_log_scope(subscribe.id, "inline"), subscription_activity_scope(
+            getattr(self, "subscription_activity", None), subscribe, "search",
+            getattr(execution_context, "source", None) or "automatic",
+            getattr(execution_context, "task_id", None),
+        ):
+            logger.scoped_info(f"开始搜索订阅：{subscribe.name}")
+            result = self._search_subscription(subscribe, searchchain, execution_context)
+            if result is not None:
+                logger.scoped_info("本轮搜索结束，订阅继续等待")
+            else:
+                logger.scoped_info("本轮搜索结束，订阅状态已更新；请以完成记录为准")
+            return result
+
+    def _search_subscription(
+        self,
+        subscribe: SubscriptionSnapshot,
+        searchchain: Optional[SearchChain],
+        execution_context: Optional[SubscriptionExecutionContext] = None,
+    ) -> Optional[SubscriptionSnapshot]:
+        """在订阅日志作用域内执行既有搜索、下载和完成判定。"""
         _ensure_execution_active(execution_context)
         # 站点补查属于同一轮搜索，不能反复推迟下一轮健康站点的完整检查。
         if execution_context is None or not execution_context.resuming_sites:
@@ -882,6 +923,10 @@ class SubscribeSearchOwner(_SubscribeSearchQueueOwner):
             source=self.get_subscribe_source_keyword(subscribe),
             execution_context=execution_context,
         )
+        activity = current_activity_run()
+        if activity:
+            for download in downloads or []:
+                activity.resource(download, "submitted")
         current = self.subscription_repository.get(subscribe.id)
         if current:
             self.finish_subscribe_or_not(
@@ -902,8 +947,11 @@ class SubscribeSearchOwner(_SubscribeSearchQueueOwner):
     ) -> list[Any]:
         """过滤不满足洗版范围或优先级的搜索候选，并释放原结果列表。"""
         matched = []
+        activity = current_activity_run()
         try:
             for context in contexts:
+                if activity:
+                    activity.resource(context, "rejected", "不符合洗版范围或升级优先级")
                 if runtime_stop_state.is_system_stopped:
                     break
                 torrent_meta = context.meta_info
@@ -943,6 +991,8 @@ class SubscribeSearchOwner(_SubscribeSearchQueueOwner):
                 if subscribe.episode_group:
                     media.episode_group = subscribe.episode_group
                 matched.append(context)
+                if activity:
+                    activity.resource(context, "qualified")
         finally:
             contexts.clear()
         return matched

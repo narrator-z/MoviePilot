@@ -66,7 +66,7 @@ OPERATION_DESCRIPTIONS = {
     "plugin.source.install": "Install an unbound plugin from one explicitly selected online source.",
     "plugin.source.options": "Inspect source candidates and the current immutable source identity before installation or source change.",
     "plugin.uninstall": "Uninstall one plugin and remove it from the installed set.",
-    "recommendation.list": "Read personalized media or music recommendations.",
+    "recommendation.list": "Read public media or music charts and recommendations.",
     "scheduler.list": "List registered scheduler jobs and their current state.",
     "scheduler.run": "Run one registered scheduler job immediately.",
     "search.results": "Read the most recent torrent-search context and result set.",
@@ -90,9 +90,9 @@ OPERATION_DESCRIPTIONS = {
     "subscription.shares": "List shared subscriptions with filters and pagination.",
     "subscription.update": "Update one existing movie, TV, or music subscription.",
     "system.restart": "Restart the running MoviePilot process.",
-    "system.update.check": "Check for the latest stable MoviePilot v3 application release and current-platform site resources.",
-    "system.update.download": "Start downloading and verifying one selected application or site-resource update in the background.",
-    "system.update.install": "Install one selected already downloaded and verified application or site-resource update, then restart MoviePilot.",
+    "system.update.check": "Check for the highest stable MoviePilot v3 version and site resources, refreshing older prepared targets when a newer version exists.",
+    "system.update.download": "Download and verify an application or site-resource update in the background. Set target=all to prepare all latest updates together.",
+    "system.update.install": "Install downloaded and verified updates, then restart MoviePilot. Set target=all to require all updates ready and install them with one restart.",
     "system.update.status": "Read application and site-resource update checks, downloads, verification, or install state.",
     "system.upgrade.dev": "Update to the current v3 development branch and restart MoviePilot.",
     "system.versions": "List available MoviePilot GitHub releases.",
@@ -390,6 +390,7 @@ FIELD_DESCRIPTIONS = {
     "mode": "Operation mode; music.explore accepts chart or fresh, while transfer history records move, copy, link, or softlink.",
     "modify_time": "Storage item modification timestamp.",
     "mtype": "MoviePilot media type or subscription-history category required by the operation.",
+    "music_cue_enable": "Optional per-subscription CUE organization setting; omit to inherit the system default.",
     "music_type": "Music identity level: recording, album, or artist where supported.",
     "include_candidates": "Include unconfirmed music resources and related albums for manual review. Defaults to false; candidates have no target media identity and must not be used for automatic download.",
     "name": "Human-readable name of the site, storage item, subscription, or rule group.",
@@ -692,7 +693,7 @@ MODEL_DESCRIPTIONS = {
     "SiteCookieSet": "Browser-obtained site authentication cookie and optional User-Agent to persist without changing other site settings.",
     "Subscribe": "Movie, TV, or music subscription input model.",
     "SystemSettingsUpdateRequest": "One registered system-setting update request.",
-    "SystemUpdateRequest": "Selected MoviePilot application or site-resource update target.",
+    "SystemUpdateRequest": "Selected update target: application, resources, or all for combined preparation and installation with one restart.",
     "SubscriptionExecutionStatus": "Subscription refresh execution status and progress summary.",
     "TorrentInfo": "One torrent candidate returned by MoviePilot search.",
     "TransferHistory-Input": "One MoviePilot file-transfer history record.",
@@ -1266,7 +1267,8 @@ def build_api_mcp_input_schema(
             "title": operation_id,
             "description": (
                 f"{summary} Method: {route.method}. Path: {route.path}. "
-                f"Effect: {spec.effect.value}.{collection_guidance}"
+                f"Effect: {spec.effect.value}. Identity scope: {spec.identity_scope.value}. "
+                f"Required role: {spec.required_role.value}.{collection_guidance}"
             ),
             "properties": properties,
             "required": required,

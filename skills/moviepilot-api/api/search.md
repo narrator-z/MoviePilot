@@ -7,6 +7,7 @@ Title and torrent search result discovery and recommendation search.
 ### `search.recommend`
 `POST /api/v1/search/recommend`; policy effect: `external_side_effect`.
 Purpose: Use the configured recommendation model to rank or recommend torrent search results.
+Identity scope: `bound_user`; required role: `user`.
 - `path_params`: none
 - `query`: none
 - `body`: `check_only` (boolean; default `False`): Validate or preview the recommendation without applying search-result filtering.; `filtered_indices` (array<integer>|null): Zero-based search-result indices selected by the recommendation model.; `force` (boolean; default `False`): Force a marketplace refresh or plugin installation when true.
@@ -14,6 +15,7 @@ Purpose: Use the configured recommendation model to rank or recommend torrent se
 ### `search.results`
 `GET /api/v1/search/last/context`; policy effect: `safe_read`.
 Purpose: Read the most recent torrent-search context and result set.
+Identity scope: `bound_user`; required role: `user`.
 - `path_params`: none
 - `query`: none
 - `body`: none
@@ -21,19 +23,29 @@ Purpose: Read the most recent torrent-search context and result set.
 ### `search.title`
 `GET /api/v1/search/title`; policy effect: `external_side_effect`.
 Purpose: Search torrent sites directly from a free-form title and optional media filters.
+Identity scope: `bound_user`; required role: `user`.
 - `response`: `data` remains a list and `collection.result_count` reports the returned items. `collection.total_count` is omitted because this endpoint or its upstream source does not expose a total.
 - `path_params`: none
-- `query`: `keyword` (string|null): Case-insensitive substring used to discover settings or filter storage entries.; `mtype` (string|null): MoviePilot media type or subscription-history category required by the operation.; `page` (integer|null; default `0`): One-based result page number.; `sites` (string|null): Exact site IDs included in the search or subscription scope.
+- `query`: `keyword` (string|null): Case-insensitive substring used to discover settings or filter storage entries.; `mtype` (string(movie,tv,music)|null): MoviePilot media type or subscription-history category required by the operation. Agent-facing values: movie,tv,music. Use this exact field name in its documented bucket.; `page` (integer|null; default `0`): One-based result page number.; `sites` (string|null): Exact site IDs included in the search or subscription scope.
 - `body`: none
 
 ### `search.torrents`
 `GET /api/v1/search/media/{media_id}`; policy effect: `safe_read`.
 Purpose: Search torrent sites for one canonical media identity.
+Identity scope: `bound_user`; required role: `user`.
 - `response`: `data` remains a list; omitting both `page` and `count` keeps the complete legacy result. `collection.result_count` reports the returned items and `collection.total_count` reports the exact pre-pagination total. For counts or summaries, send `page=1,count=1`, read `collection.total_count`, and do not fall back to a database query because the item preview was truncated.
 - `execution`: Searches may run multiple title/alias rounds across configured sites. The inner Agent API request may wait up to 290 seconds and the Agent tool call is capped at 300 seconds, leaving 10 seconds for timeout handling and returning the result; the V3 MCP wrapper uses its existing configured timeout (600 seconds by default). `page` / `count` paginate the completed result and do not shorten site-search execution; do not issue a duplicate call while one is pending.
 - `path_params`: `media_id*` (string): Source-native media ID. Always pair it with the exact media_source returned by search.
-- `query`: `area` (string|null; default `title`): Optional region filter applied by the torrent search workflow.; `count` (integer|null): Optional page size for a legacy full-list endpoint. Supplying page or count activates pagination; an omitted count then uses 50.; `include_candidates` (boolean; default `False`): Include unconfirmed music resources and related albums for manual review. Defaults to false; candidates have no target media identity and must not be used for automatic download.; `media_source*` (MediaSource): Metadata source identifier. Preserve the exact value returned with media_id.; `mtype` (string|null): MoviePilot media type or subscription-history category required by the operation.; `music_type` (string|null): Music identity level: recording, album, or artist where supported.; `page` (integer|null): Optional one-based page for a legacy full-list endpoint. Omit both page and count to keep the original unpaginated full result.; `season` (string|null): Season number used by the media, search, subscription, or transfer operation.; `sites` (string|null): Exact site IDs included in the search or subscription scope.
+- `query`: `area` (string|null; default `title`): Optional region filter applied by the torrent search workflow.; `count` (integer|null): Optional page size for a legacy full-list endpoint. Supplying page or count activates pagination; an omitted count then uses 50.; `include_candidates` (boolean; default `False`): Include unconfirmed music resources and related albums for manual review. Defaults to false; candidates have no target media identity and must not be used for automatic download.; `media_source*` (MediaSource): Metadata source identifier. Preserve the exact value returned with media_id.; `mtype` (string(movie,tv,music)|null): MoviePilot media type or subscription-history category required by the operation. Agent-facing values: movie,tv,music. Use this exact field name in its documented bucket.; `music_type` (string|null): Music identity level: recording, album, or artist where supported.; `page` (integer|null): Optional one-based page for a legacy full-list endpoint. Omit both page and count to keep the original unpaginated full result.; `season` (string|null): Season number used by the media, search, subscription, or transfer operation.; `sites` (string|null): Exact site IDs included in the search or subscription scope.
 - `body`: none
+- **Agent note:** `media_id` is a **path** parameter and MUST be nested under `path_params`. Never flatten it to the top level or place it inside `query`, otherwise the gateway rejects with `invalid_input`. The same rule applies to every `*`-marked path parameter across this document set (`media_type`, `site_id`, …).
+
+#### Candidate Selection and Empty-Result Retries
+
+- When `media.search` returns multiple candidates, select based on **title matching the user's request AND `type` (movie/series) matching**; do not mechanically pick the first or an arbitrary candidate without comparison. If the first candidate happens to exactly match and its type is correct, you may use it directly; when several are close, prefer the higher-ranked / more popular one.
+- `search.torrents` must be called with `media_source` + `media_id`, and both must come from the **same** recognition result — do not mix `source`/`id` from different candidates.
+- Do not repeat an unchanged empty or failed search without new evidence. On failure, inspect and report the error; an unavailable source does not prove there are no resources.
+- After a successful empty search, try another credible title/type/year match or `search.title` with the original title keywords, preserving the user's site and media constraints. Report the actual search scope and outcome without claiming exhaustive coverage.
 
 ## Body Models
 

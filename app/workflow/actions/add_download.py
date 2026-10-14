@@ -1,15 +1,21 @@
-from typing import Optional
+from dataclasses import fields
+from typing import Any, Iterator, Optional
 
 from pydantic import Field
 
 from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
+from app.domain.context import Context as DownloadContext
+from app.domain.context import MediaInfo as DownloadMediaInfo
+from app.domain.meta.metabase import MetaBase
+from app.domain.meta.metamusic import MetaMusic
 from app.domain.metainfo import MetaInfo
 from app.runtime.log import logger
 from app.runtime.stop import runtime_stop_state
+from app.schemas.context import Context as WorkflowTorrentContext
 from app.schemas.types import MediaType
 from app.schemas.workflow import ActionContext, ActionParams, DownloadTask
-from app.workflow.actions import BaseAction
+from app.workflow.actions import BaseAction, domain_media_info_from_dict, domain_torrent_info_from_dict
 
 
 class AddDownloadParams(ActionParams):
@@ -34,6 +40,7 @@ class AddDownloadAction(BaseAction):
     }
 
     def __init__(self, action_id: str):
+        """初始化下载结果集合和动作错误状态。"""
         super().__init__(action_id)
         self._added_downloads = []
         self._has_error = False
@@ -44,17 +51,16 @@ class AddDownloadAction(BaseAction):
 
     @property
     def success(self) -> bool:
+        """返回本次动作是否未遇到下载失败。"""
         return not self._has_error
 
     def execute(self, workflow_id: int, params: dict, context: ActionContext) -> ActionContext:
         """
-        将上下文中的torrents添加到下载任务中
+        将工作流资源还原为下载链所需的领域上下文并添加下载任务。
         """
         params = AddDownloadParams(**params)
         _started = False
-        for t in context.torrents:
-            if runtime_stop_state.is_workflow_stopped(workflow_id):
-                break
+        for t in self._iter_resources(workflow_id, context):
             # 检查缓存
             cache_key = f"{t.torrent_info.site}-{t.torrent_info.title}"
             if self.check_cache(workflow_id, cache_key):
@@ -71,10 +77,12 @@ class AddDownloadAction(BaseAction):
                 self._has_error = True
                 logger.warning(f"{t.torrent_info.title} 未识别到媒体信息，无法下载")
                 continue
-            if params.only_lack:
-                exists_info = DownloadChain().media_exists(t.media_info)
+            download_context = self._to_domain_context(t)
+            download_media_info = download_context.media_info
+            if params.only_lack and isinstance(download_media_info, DownloadMediaInfo):
+                exists_info = DownloadChain().media_exists(download_media_info)
                 if exists_info:
-                    if t.media_info.type == MediaType.MOVIE:
+                    if download_media_info.type == MediaType.MOVIE:
                         # 电影
                         logger.warning(f"{t.torrent_info.title} 媒体库中已存在，跳过")
                         continue
@@ -99,7 +107,7 @@ class AddDownloadAction(BaseAction):
                                     continue
 
             _started = True
-            did = DownloadChain().download_single(context=t,
+            did = DownloadChain().download_single(context=download_context,
                                                   downloader=params.downloader,
                                                   save_path=params.save_path,
                                                   label=params.labels)
@@ -118,3 +126,84 @@ class AddDownloadAction(BaseAction):
 
         self.job_done(f"已添加 {len(self._added_downloads)} 个下载任务")
         return context
+
+    def _iter_resources(
+            self, workflow_id: int, context: ActionContext,
+    ) -> Iterator[WorkflowTorrentContext | DownloadContext]:
+        """恢复节点输出字典并保留实时领域对象；历史文本提示重跑并保留动作失败状态。"""
+        for resource in context.torrents or []:
+            if runtime_stop_state.is_workflow_stopped(workflow_id):
+                break
+            if isinstance(resource, str):
+                # 旧版文本无法可靠还原，避免把丢失资源报告为成功。
+                self._has_error = True
+                logger.warning("工作流历史资源已保存为文本，无法恢复，跳过该资源；请重新运行工作流获取资源")
+                continue
+            if isinstance(resource, dict):
+                resource = WorkflowTorrentContext.model_validate(resource)
+            yield resource
+
+    @staticmethod
+    def _to_domain_context(
+            context: WorkflowTorrentContext | DownloadContext | dict[str, Any],
+    ) -> DownloadContext:
+        """复用 RSS 领域上下文，或把恢复的节点输出字典及传输模型还原为下载链领域对象。"""
+        if isinstance(context, dict):
+            return AddDownloadAction._to_domain_context(WorkflowTorrentContext.model_validate(context))
+        if context.media_info is None or context.torrent_info is None:
+            raise ValueError("工作流下载上下文缺少媒体或种子信息")
+
+        if isinstance(context, DownloadContext):
+            return context
+
+        context_data: dict[str, Any] = context.model_dump()
+        media_data = context_data.get("media_info")
+        if not isinstance(media_data, dict):
+            raise ValueError("工作流下载上下文缺少有效媒体信息")
+        domain_media_info = domain_media_info_from_dict(media_data)
+
+        torrent_data = context_data.get("torrent_info")
+        if not isinstance(torrent_data, dict):
+            raise ValueError("工作流下载上下文缺少有效种子信息")
+        domain_torrent_info = domain_torrent_info_from_dict(torrent_data)
+
+        domain_meta_info: MetaBase | None = None
+        meta_data = context_data.get("meta_info")
+        if isinstance(meta_data, dict):
+            meta_type = meta_data.get("type")
+            if meta_type == MediaType.MUSIC.value:
+                domain_meta_info = MetaMusic.from_dict(meta_data)
+            else:
+                title = meta_data.get("org_string") or meta_data.get("title") or torrent_data.get("title")
+                video_meta_info = MetaInfo(
+                    title=title if isinstance(title, str) else "",
+                    subtitle=meta_data.get("subtitle"),
+                    mtype=MediaType(meta_type) if meta_type else None,
+                )
+                for item in fields(video_meta_info):
+                    if item.name not in meta_data:
+                        continue
+                    value = meta_data[item.name]
+                    if item.name == "type" and value:
+                        value = MediaType(value)
+                    if item.name == "title" and value is None:
+                        continue
+                    setattr(video_meta_info, item.name, value)
+                name = meta_data.get("name")
+                if isinstance(name, str) and name:
+                    video_meta_info.name = name
+                domain_meta_info = video_meta_info
+
+        return DownloadContext(
+            meta_info=domain_meta_info,
+            media_info=domain_media_info,
+            torrent_info=domain_torrent_info,
+            resource_source=context.resource_source or "unknown",
+            match_source=context.match_source or "unknown",
+            candidate_recognized=bool(context.candidate_recognized),
+            media_info_is_target=bool(context.media_info_is_target),
+            match_status=context.match_status,
+            match_reason=context.match_reason,
+            confirmed_full_coverage=bool(context.confirmed_full_coverage),
+            music_track_keys=list(context.music_track_keys) if context.music_track_keys else None,
+        )

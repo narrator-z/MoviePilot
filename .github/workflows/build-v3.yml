@@ -527,7 +527,6 @@ jobs:
       - name: Get existing release body
         id: get_release_body
         env:
-          CHANGELOG: ${{ env.CHANGELOG }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag_name="v${{ env.app_version }}"
@@ -552,20 +551,25 @@ jobs:
           fi
           echo "exists=$release_exists" >> "$GITHUB_OUTPUT"
 
-          # 如果已有手动编写的 release body，则保留；否则使用自动生成的 changelog
-          if [ -n "$release_body" ] && [ "$release_body" != "null" ] && [ "$release_body" != "" ]; then
-            {
-              echo "RELEASE_BODY<<EOF"
-              echo "$release_body"
-              echo "EOF"
-            } >> "$GITHUB_ENV"
-          else
-            {
-              echo "RELEASE_BODY<<EOF"
-              echo "$CHANGELOG"
-              echo "EOF"
-            } >> "$GITHUB_ENV"
+          # 随机分隔符避免手工正文中的 EOF 等独立行截断工作流环境变量。
+          delimiter="RELEASE_NOTES_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+          if [ "$release_body" = "null" ]; then
+            release_body=""
           fi
+          {
+            printf 'RELEASE_BODY<<%s\n' "$delimiter"
+            printf '%s\n' "$release_body"
+            printf '%s\n' "$delimiter"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate Release Notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/release_notes.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "v${{ env.app_version }}" \
+            --source "$SOURCE_COMMIT"
 
       - name: Publish Release Tag
         env:

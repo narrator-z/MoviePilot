@@ -101,7 +101,6 @@ def _run_release_script(
             "GITHUB_REPOSITORY": "jxxghp/MoviePilot",
             "GITHUB_ENV": str(tmp_path / "github.env"),
             "GITHUB_OUTPUT": str(tmp_path / "github.output"),
-            "CHANGELOG": "generated changelog",
         }
     )
     env.update(extra_env or {})
@@ -337,7 +336,8 @@ def test_release_uses_github_cli_for_tag_and_release_lifecycle() -> None:
     ("response", "exit_code", "expected_exists", "expected_body"),
     [
         ("HTTP/2.0 200 OK\nHeader: value\n\nmanual body\n", 0, "true", "manual body"),
-        ("HTTP/2.0 404 Not Found\n\n", 1, "false", "generated changelog"),
+        ("HTTP/2.0 200 OK\n\nmanual\nEOF\nMORE=value\n", 0, "true", "manual\nEOF\nMORE=value"),
+        ("HTTP/2.0 404 Not Found\n\n", 1, "false", ""),
     ],
 )
 def test_release_query_preserves_existing_body_or_handles_explicit_404(
@@ -358,6 +358,9 @@ def test_release_query_preserves_existing_body_or_handles_explicit_404(
     environment = (tmp_path / "github.env").read_text(encoding="utf-8")
     assert f"exists={expected_exists}" in output
     assert expected_body in environment
+    delimiter = environment.splitlines()[0].split("<<")[1]
+    assert delimiter.startswith("RELEASE_NOTES_")
+    assert environment.splitlines()[-1] == delimiter
 
 
 def test_release_query_fails_closed_on_non_404_error(tmp_path: Path) -> None:

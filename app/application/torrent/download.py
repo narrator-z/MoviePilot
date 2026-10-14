@@ -1,11 +1,15 @@
 import datetime
+import json
 import re
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
+from lxml import html
 from torrentool.api import Torrent
+from torrentool.exceptions import TorrentoolException
 
 from app.application.configuration import get_chain_runtime_config_snapshot, get_configured_system_config
 from app.application.site.query import get_configured_site_query_service
@@ -24,6 +28,11 @@ from app.schemas.types import MediaType, SystemConfigKey
 _SIZE_UNIT = 1024 * 1024
 
 
+def _is_transient_torrent_status(status: int) -> bool:
+    """403 和服务端错误可能来自站点前置代理，不能据此认定种子已失效。"""
+    return status == 403 or 500 <= status <= 599
+
+
 class TorrentResponsePort(Protocol):
     """声明种子下载用例实际读取的 HTTP 响应字段。"""
 
@@ -32,6 +41,24 @@ class TorrentResponsePort(Protocol):
     content: bytes
     text: str
     reason: str
+
+
+def _torrent_rate_limit_error(response: Optional[TorrentResponsePort]) -> Optional[str]:
+    """在种子解析前提取明确的 JSON 限流提示；HTTP 429 保留既有流控错误。"""
+    if response is None:
+        return None
+    content = response.content
+    if content.lstrip().startswith(b"{"):
+        try:
+            payload = json.loads(content)
+        except (ValueError, UnicodeError):
+            payload = {}
+        message = payload.get("message") or payload.get("msg")
+        if isinstance(message, str) and torrent_rules.rate_limit_cooldown(message) is not None:
+            return f"站点限流：{message}"
+    if response.status_code == 429:
+        return "触发站点流控，请稍后重试"
+    return None
 
 
 class TorrentHttpPort(Protocol):
@@ -132,6 +159,91 @@ def _cache_valid_torrent_content(
     return folder_name, file_list
 
 
+def _first_download_form(text: str, url: str) -> Optional[Tuple[str, dict[str, Any]]]:
+    """解析下载确认表单，仅向当前下载端点提交有效控件，避免泄露站点凭据。"""
+    try:
+        forms = html.fromstring(text).forms
+    except (ValueError, html.etree.ParserError):
+        return None
+    for form in forms:
+        action = form.get("action", "").strip()
+        target = url if action in ("", "?") else urljoin(url, action)
+        origin, destination = urlsplit(url), urlsplit(target)
+        if (destination[:2] != origin[:2] or destination.path != origin.path
+                or form.get("method", "post").lower() != "post"):
+            continue
+        data = dict(form.form_values())
+        # form_values 不包含用户点击的提交控件，首次下载确认可能依赖该字段。
+        submits = form.xpath(
+            './/input[@name and not(@disabled) and translate(@type, "SUBMIT", "submit")="submit"]'
+            ' | .//button[@name and not(@disabled) and (not(@type) or @type="submit")]'
+        )
+        if submits:
+            data[submits[0].get("name")] = submits[0].get("value", "")
+        if data:
+            return target, data
+    return None
+
+
+def _text_filter_failure(torrent: TorrentInfo, params: Dict[str, Any], content: str) -> Optional[Tuple[str, str]]:
+    """按原有顺序检查包含、排除、质量等正则，并返回业务原因和运行诊断。"""
+    for key, label, subject, expected in (
+        ("include", "包含", content, True), ("exclude", "排除", content, False),
+        ("quality", "质量", torrent.title, True), ("resolution", "分辨率", torrent.title, True),
+        ("effect", "特效", torrent.title, True),
+    ):
+        pattern = params.get(key)
+        if pattern and _filter_pattern_search(pattern, subject) != expected:
+            diagnostic = f"{subject} {'不匹配' if expected else '匹配'}{label}规则 {pattern}"
+            return f"不符合{label}条件：{pattern}", diagnostic
+    return None
+
+
+def _audio_minimum_failure(specs: Dict[str, Any], params: Dict[str, Any]) -> Optional[Tuple[str, Any]]:
+    """检查音乐最低技术参数，不把缺失的参数当作达到要求。"""
+    for key, spec_key, label in (
+        ("min_bitrate", "bitrate", "码率"), ("min_bit_depth", "bit_depth", "位深"),
+        ("min_sample_rate", "sample_rate", "采样率"),
+    ):
+        minimum, actual = params.get(key), specs.get(spec_key)
+        if minimum is not None and (actual is None or int(actual) < int(minimum)):
+            return label, minimum
+    return None
+
+
+def _audio_filter_failure(torrent: TorrentInfo, params: Dict[str, Any], content: str) -> Optional[Tuple[str, str]]:
+    """从标题、副标题和标签统一解析音质，再解释第一个未满足的音乐条件。"""
+    filters = {key: params.get(key) for key in ("audio_quality", "audio_format", "min_bitrate", "min_bit_depth", "min_sample_rate")
+               if params.get(key) not in (None, "")}
+    if not filters:
+        return None
+    specs = parse_audio_quality(content)
+    tier = audio_quality_tier(**specs)
+    quality = filters.get("audio_quality")
+    pattern = "hires|lossless" if str(quality).casefold() == "lossless" else quality
+    if quality and (not tier or not _filter_pattern_search(pattern, tier)):
+        return f"不符合音乐音质条件：{quality}", f"{torrent.title} 不匹配音乐音质规则 {quality}"
+    audio_format = filters.get("audio_format")
+    normalized = normalize_audio_format(specs.get("audio_format"))
+    if audio_format and (not normalized or not _filter_pattern_search(audio_format, normalized)):
+        return f"不符合音频格式条件：{audio_format}", f"{torrent.title} 不匹配音频格式规则 {audio_format}"
+    minimum = _audio_minimum_failure(specs, filters)
+    if minimum:
+        label, value = minimum
+        return f"{label}不足，要求至少 {value}", f"{torrent.title} 不满足最低{label} {value}"
+    return None
+
+
+def _size_filter_failure(torrent: TorrentInfo, size_range: Optional[str]) -> Optional[str]:
+    """解释大小范围判断，继续沿用原有 MB 单位和未知规则放行语义。"""
+    if not size_range:
+        return None
+    rule, minimum, maximum = _parse_filter_size_range(size_range)
+    outside = (rule == "between" and maximum is not None and (torrent.size < minimum or torrent.size > maximum)) \
+        or (rule == "gte" and torrent.size < minimum) or (rule == "lte" and maximum is not None and torrent.size > maximum)
+    return f"资源大小不符合条件：{size_range}" if outside else None
+
+
 class TorrentHelper:
     """
     种子帮助类
@@ -140,6 +252,32 @@ class TorrentHelper:
     def __init__(self):
         """初始化种子失败地址缓存"""
         self._invalid_torrents = TTLCache(region="invalid_torrents", maxsize=128, ttl=3600 * 24)
+
+    def _request_torrent_get(self, http_port: TorrentHttpPort, retry: bool,
+                             **request_options: Any) -> Optional[TorrentResponsePort]:
+        """普通种子 GET 瞬时失败时退避 1、2 秒；签名换票和确认 POST 不在此重试。"""
+        for attempt in range(3 if retry else 1):
+            response = http_port.request(method="GET", **request_options)
+            if not retry or attempt == 2 or not self._should_retry_torrent_response(response):
+                return response
+            logger.warning(f"种子下载遇到瞬时失败，将进行第 {attempt + 1} 次重试")
+            time.sleep(attempt + 1)
+        return None
+
+    def _should_retry_torrent_response(self, response: Optional[TorrentResponsePort]) -> bool:
+        """保留重定向、磁力和首次确认页，明确限流不得消耗瞬时重试预算。"""
+        if response is None:
+            return True
+        if _torrent_rate_limit_error(response):
+            return False
+        if response.status_code != 200:
+            return _is_transient_torrent_status(response.status_code)
+        content = response.content
+        if content.startswith(b"magnet:"):
+            return False
+        if self.get_fileinfo_from_torrent_content(content)[1]:
+            return False
+        return "下载种子文件".encode("utf-8") not in content
 
     def download_torrent(self, url: str,
                          cookie: Optional[str] = None,
@@ -155,13 +293,14 @@ class TorrentHelper:
         :param ua: 请求 User-Agent
         :param referer: 请求来源地址
         :param proxy: 是否使用系统代理
-        :param cache_invalid: 是否缓存失败地址；短时凭证地址必须关闭
+        :param cache_invalid: 是否缓存失败地址并启用普通 GET 重试；短时凭证及换票地址必须关闭
         :return: 种子缓存相对路径【用于索引缓存】, 种子内容、种子主目录、种子文件清单、错误信息
         """
         if url.startswith("magnet:"):
             return None, url, "", [], "磁力链接"
         # 构建 torrent 种子文件的缓存路径
         cache_path = Path(HashUtils.md5(url)).with_suffix(".torrent")
+        original_url = url
         # 种子二进制固定落 TEMP_PATH/torrents 不进 Redis，下载器与提交链须按同一路由读取
         cache_backend = FileCache(local_only=True)
         # 读取缓存的种子文件
@@ -181,19 +320,23 @@ class TorrentHelper:
         # 下载种子文件
         config = get_chain_runtime_config_snapshot()
         http_port = _require_torrent_port()
-        req = http_port.request(
-            method="GET", url=url, cookie=cookie, ua=ua, referer=referer,
+        retry = cache_invalid and not torrent_rules.is_expiring_download_url(url)
+        req = self._request_torrent_get(
+            http_port, retry, url=url, cookie=cookie, ua=ua, referer=referer,
             proxies=config.proxy if proxy else None, allow_redirects=False,
         )
-        while req and req.status_code in [301, 302]:
+        while req is not None and req.status_code in [301, 302]:
             url = req.headers['Location']
             if url and url.startswith("magnet:"):
                 return None, url, "", [], "获取到磁力链接"
-            req = http_port.request(
-                method="GET", url=url, cookie=cookie, ua=ua, referer=referer,
+            req = self._request_torrent_get(
+                http_port, retry and not torrent_rules.is_expiring_download_url(url),
+                url=url, cookie=cookie, ua=ua, referer=referer,
                 proxies=config.proxy if proxy else None, allow_redirects=False,
             )
-        if req and req.status_code == 200:
+        if rate_limit_error := _torrent_rate_limit_error(req):
+            return cache_path, None, "", [], rate_limit_error
+        if req is not None and req.status_code == 200:
             if not req.content:
                 return cache_path, None, "", [], "未下载到种子数据"
             # 解析内容格式
@@ -209,41 +352,26 @@ class TorrentHelper:
                 return cache_path, req.content, folder_name, file_list, ""
             if "下载种子文件".encode("utf-8") in req.content:
                 # 首次下载提示页面
-                skip_flag = False
-                try:
-                    forms = re.findall(r'<form.*?action="(.*?)".*?>(.*?)</form>', req.text, re.S)
-                    for form in forms:
-                        action = form[0]
-                        if action != "?":
-                            continue
-                        action = url
-                        inputs = re.findall(r'<input.*?name="(.*?)".*?value="(.*?)".*?>', form[1], re.S)
-                        if inputs:
-                            data = {}
-                            for item in inputs:
-                                data[item[0]] = item[1]
-                            # 改写req
-                            req = http_port.request(
-                                method="POST", url=action, cookie=cookie, ua=ua,
-                                referer=referer, proxies=config.proxy if proxy else None,
-                                data=data,
-                            )
-                            if req and req.status_code == 200:
-                                # 检查是不是种子文件，如果不是抛出异常
-                                Torrent.from_string(req.content)
-                                # 跳过成功
-                                logger.info("触发了站点首次种子下载，已自动跳过")
-                                skip_flag = True
-                            elif req is not None:
-                                logger.warn(f"触发了站点首次种子下载，且无法自动跳过，"
-                                            f"返回码：{req.status_code}，错误原因：{req.reason}")
-                            else:
-                                logger.warn("触发了站点首次种子下载，且无法自动跳过")
-                        break
-                except Exception as err:
-                    logger.warn(f"触发了站点首次种子下载，尝试自动跳过时出现错误：{str(err)}")
-                if not skip_flag:
+                confirmation = _first_download_form(req.text, url)
+                if confirmation is None:
+                    logger.warning("触发首次种子下载，但未找到可安全提交的确认表单")
+                    if cache_invalid:
+                        self.add_invalid(original_url)
                     return cache_path, None, "", [], "种子数据有误，请确认链接是否正确，如为PT站点则需手工在站点下载一次种子"
+                action, data = confirmation
+                req = http_port.request(
+                    method="POST", url=action, cookie=cookie, ua=ua,
+                    referer=url, proxies=config.proxy if proxy else None, data=data,
+                )
+                if rate_limit_error := _torrent_rate_limit_error(req):
+                    return cache_path, None, "", [], rate_limit_error
+                if req is None:
+                    return cache_path, None, "", [], "无法打开链接"
+                if req.status_code != 200:
+                    return cache_path, None, "", [], f"下载种子出错，状态码：{req.status_code}"
+                if not req.content:
+                    return cache_path, None, "", [], "未下载到种子数据"
+                logger.info("已提交站点首次种子下载确认，正在校验种子内容")
             # 首次下载提示页面完成后，重新按原始二进制解析 POST 响应。
             assert req is not None
             if req.content:
@@ -254,15 +382,15 @@ class TorrentHelper:
                     # 成功拿到种子数据
                     return cache_path, req.content, folder_name, file_list, ""
             # 解析失败时终止，避免把 HTML 继续下沉到下载器或缓存。
+            if cache_invalid:
+                self.add_invalid(original_url)
             return cache_path, None, "", [], "种子数据有误，请确认链接是否正确"
         elif req is None:
             return cache_path, None, "", [], "无法打开链接"
-        elif req.status_code == 429:
-            return cache_path, None, "", [], "触发站点流控，请稍后重试"
         else:
             # 把错误的种子记下来，避免重复使用
-            if cache_invalid:
-                self.add_invalid(url)
+            if cache_invalid and not _is_transient_torrent_status(req.status_code):
+                self.add_invalid(original_url)
             return cache_path, None, "", [], f"下载种子出错，状态码：{req.status_code}"
 
     def get_torrent_info(self, torrent_path: Path) -> Tuple[str, List[str]]:
@@ -334,6 +462,22 @@ class TorrentHelper:
         except Exception as err:
             logger.error(f"种子内容解析失败：{str(err)}")
             return "", []
+
+    @staticmethod
+    def get_torrent_hash(content: Union[str, bytes]) -> Optional[str]:
+        """从实际种子内容或磁力链接读取任务身份，不信任搜索卡片中的可能缺失 hash。"""
+        try:
+            if torrent_rules.is_magnet_link(content):
+                url = content.decode() if isinstance(content, bytes) else content
+                values = parse_qs(urlsplit(url).query).get("xt", [])
+                for value in values:
+                    match = re.fullmatch(r"urn:btih:([a-fA-F0-9]{40})", value)
+                    if match:
+                        return match.group(1).lower()
+                return None
+            return str(Torrent.from_string(content).info_hash).lower()
+        except (ValueError, TypeError, UnicodeError, KeyError, TorrentoolException):
+            return None
 
     @staticmethod
     def get_url_filename(req: Any, url: str) -> str:
@@ -739,101 +883,29 @@ class TorrentHelper:
     @staticmethod
     def filter_torrent(torrent_info: TorrentInfo,
                        filter_params: Dict[str, Any]) -> bool:
+        """检查种子是否匹配订阅条件，保留既有布尔 API 和运行日志行为。"""
+        return TorrentHelper.filter_torrent_reason(torrent_info, filter_params, log_failure=True) is None
+
+    @staticmethod
+    def filter_torrent_reason(torrent_info: TorrentInfo,
+                              filter_params: Dict[str, Any], *, log_failure: bool = False) -> Optional[str]:
         """
-        检查种子是否匹配订阅过滤规则
+        返回首个未满足的订阅条件；布尔筛选复用同一判断，活动不重复写运行日志。
         """
 
         if not filter_params:
-            return True
-
-        # 匹配内容
-        content = (f"{torrent_info.title} "
-                   f"{torrent_info.description} "
-                   f"{' '.join(torrent_info.labels or [])} "
-                   f"{torrent_info.volume_factor}")
-
-        # 包含
-        include = filter_params.get("include")
-        if include:
-            if not _filter_pattern_search(include, content):
-                logger.info(f"{content} 不匹配包含规则 {include}")
-                return False
-        # 排除
-        exclude = filter_params.get("exclude")
-        if exclude:
-            if _filter_pattern_search(exclude, content):
-                logger.info(f"{content} 匹配排除规则 {exclude}")
-                return False
-        # 质量
-        quality = filter_params.get("quality")
-        if quality:
-            if not _filter_pattern_search(quality, torrent_info.title):
-                logger.info(f"{torrent_info.title} 不匹配质量规则 {quality}")
-                return False
-        # 分辨率
-        resolution = filter_params.get("resolution")
-        if resolution:
-            if not _filter_pattern_search(resolution, torrent_info.title):
-                logger.info(f"{torrent_info.title} 不匹配分辨率规则 {resolution}")
-                return False
-        # 特效
-        effect = filter_params.get("effect")
-        if effect:
-            if not _filter_pattern_search(effect, torrent_info.title):
-                logger.info(f"{torrent_info.title} 不匹配特效规则 {effect}")
-                return False
-
-        # 音乐音质。技术参数从标题、副标题和标签统一解析，避免只靠用户正则筛选。
-        audio_filters = {
-            key: filter_params.get(key)
-            for key in ("audio_quality", "audio_format", "min_bitrate", "min_bit_depth", "min_sample_rate")
-            if filter_params.get(key) not in (None, "")
-        }
-        if audio_filters:
-            specs = parse_audio_quality(content)
-            tier = audio_quality_tier(**specs)
-            audio_quality = audio_filters.get("audio_quality")
-            quality_pattern = "hires|lossless" \
-                if str(audio_quality).casefold() == "lossless" else audio_quality
-            if audio_quality and (not tier or not _filter_pattern_search(quality_pattern, tier)):
-                logger.info(f"{torrent_info.title} 不匹配音乐音质规则 {audio_quality}")
-                return False
-            audio_format = audio_filters.get("audio_format")
-            normalized_format = normalize_audio_format(specs.get("audio_format"))
-            if audio_format and (
-                    not normalized_format or not _filter_pattern_search(audio_format, normalized_format)
-            ):
-                logger.info(f"{torrent_info.title} 不匹配音频格式规则 {audio_format}")
-                return False
-            for key, spec_key, label in (
-                ("min_bitrate", "bitrate", "码率"),
-                ("min_bit_depth", "bit_depth", "位深"),
-                ("min_sample_rate", "sample_rate", "采样率"),
-            ):
-                minimum = audio_filters.get(key)
-                actual = specs.get(spec_key)
-                if minimum is not None and (actual is None or int(actual) < int(minimum)):
-                    logger.info(f"{torrent_info.title} 不满足最低{label} {minimum}")
-                    return False
-
-        # 大小
-        size_range = filter_params.get("size")
-        if size_range:
-            size_rule, size_min, size_max = _parse_filter_size_range(size_range)
-            if size_rule == "between":
-                # 区间
-                if torrent_info.size < size_min or torrent_info.size > size_max:
-                    return False
-            elif size_rule == "gte":
-                # 大于
-                if torrent_info.size < size_min:
-                    return False
-            elif size_rule == "lte":
-                # 小于
-                if torrent_info.size > size_max:
-                    return False
-
-        return True
+            return None
+        content = (f"{torrent_info.title} {torrent_info.description} "
+                   f"{' '.join(torrent_info.labels or [])} {torrent_info.volume_factor}")
+        failure = _text_filter_failure(torrent_info, filter_params, content)
+        if failure is None:
+            failure = _audio_filter_failure(torrent_info, filter_params, content)
+        if failure is not None:
+            reason, diagnostic = failure
+            if log_failure:
+                logger.info(diagnostic)
+            return reason
+        return _size_filter_failure(torrent_info, filter_params.get("size"))
 
     @staticmethod
     def match_season_episodes(torrent: TorrentInfo, meta: MetaBase, season_episodes: Dict[int, list]) -> bool:

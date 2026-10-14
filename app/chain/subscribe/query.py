@@ -19,6 +19,7 @@ from app.chain.subscribe.verification import finish_or_continue_subscription
 from app.chain.tmdb import TmdbChain
 from app.domain.context import (
     MediaInfo,
+    MusicInfo,
 )
 from app.domain.meta.metabase import MetaBase
 from app.domain.metainfo import MetaInfo
@@ -33,6 +34,7 @@ from app.schemas.subscribe import SubscribeEpisodeInfo as _SchemaSubscribeEpisod
 from app.schemas.subscribe import SubscribeLibraryFileInfo as _SchemaSubscribeLibraryFileInfo
 from app.schemas.subscribe import compute_subscribe_completed_tracks
 from app.schemas.types import (
+    MUSIC_ENTITY_ALBUM,
     MediaSource,
     MediaType,
     SystemConfigKey,
@@ -525,6 +527,12 @@ class SubscribeQueryOwner(_SubscribeOwnerBase):
             - exist_flag (bool): 布尔值，表示媒体是否已经完全下载或已存在
             - no_exists (dict): 缺失的媒体信息，包含缺失的集数或其他相关信息
         """
+        if isinstance(mediainfo, MusicInfo) and subscribe.music_type == MUSIC_ENTITY_ALBUM:
+            subscribe = self._reconcile_music_album_progress(subscribe, mediainfo)
+            if not subscribe.best_version and self._is_music_download_complete(subscribe, mediainfo, None):
+                self.finish_subscribe_or_not(subscribe=subscribe, meta=meta, mediainfo=mediainfo)
+                return True, {}
+
         subscribe = self._SubscribeChain__refresh_total_episode_before_completion(
             subscribe=subscribe,
             mediainfo=mediainfo,
@@ -542,6 +550,14 @@ class SubscribeQueryOwner(_SubscribeOwnerBase):
         # 如果已下载完毕：先过媒体库二次核验守卫，通过才 force 完成订阅
         if exist_flag:
             return finish_or_continue_subscription(self, subscribe, meta, mediainfo, no_exists)
+
+        # 手动下载不会写入订阅 note，检查到部分入库时也需同步卡片进度。
+        if subscribe.type == MediaType.TV.value and not subscribe.best_version and no_exists:
+            self._SubscribeChain__refresh_subscribe_progress_with_no_exists(
+                subscribe=subscribe,
+                no_exists=no_exists,
+                scene="existing_media",
+            )
 
         # 返回结果，表示媒体未完全下载或存在
         return False, no_exists

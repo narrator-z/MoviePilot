@@ -182,14 +182,20 @@ def _verify_log_resource_superuser(
     return token_payload
 
 
-async def _build_log_zip_response(name: str, runtime: HostRuntime) -> StreamingResponse:
+async def _build_log_zip_response(
+    name: str,
+    runtime: HostRuntime,
+    allow_empty: bool = False,
+) -> StreamingResponse:
     """读取受限日志条目并生成兼容 ZIP 响应。"""
     try:
         entries = await runtime.system.collect_logs(name)
     except LogNotFoundError as error:
-        raise HTTPException(status_code=404, detail="Not Found") from error
+        if not allow_empty:
+            raise HTTPException(status_code=404, detail="Not Found") from error
+        entries = [LogFileData(name="README.txt", content="暂无执行日志，下一次搜索或 RSS 匹配后开始记录。".encode("utf-8"))]
     zip_data, zip_stem = await anyio.to_thread.run_sync(_build_log_zip_data, name, entries)
-    headers = {"Content-Disposition": f'attachment; filename="{zip_stem}.zip"'}
+    headers = {"Content-Disposition": f'attachment; filename="{zip_stem}.zip"', "Cache-Control": "no-store"}
     return StreamingResponse(
         iter([zip_data]),
         media_type="application/zip",
@@ -197,11 +203,14 @@ async def _build_log_zip_response(name: str, runtime: HostRuntime) -> StreamingR
     )
 
 
-def _build_log_zip_data(name: str, entries: list[LogFileData]) -> tuple[bytes, str]:
+def _build_log_zip_data(
+    name: str,
+    entries: list[LogFileData],
+) -> tuple[bytes, str]:
     """只负责把应用服务提供的日志内容编码为 ZIP framing。"""
     zip_buffer = io.BytesIO()
     filename_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-    safe_name = (name or "logs").strip().lower() or "logs"
+    safe_name = (name or "logs").strip().lower().replace("/", "-") or "logs"
     zip_stem = f"{safe_name}-logs-{filename_time}"
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for entry in entries:
@@ -440,6 +449,7 @@ async def get_user_global_setting(
         include={
             "AI_AGENT_ENABLE",
             "AI_AGENT_HIDE_ENTRY",
+            "AI_AGENT_PET",
             "BANGUMI_PROXY_ENABLE",
             "BANGUMI_IMAGE_DOMAIN",
             "LLM_SUPPORT_AUDIO_INPUT",
@@ -1039,7 +1049,7 @@ def check_system_update(
     _: ApiPrincipal = Depends(get_current_active_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
 ):
-    """立即查询 GitHub Release（仅管理员）。"""
+    """查询最高正式 V3 版本和站点资源，可刷新旧待安装目标（仅管理员）。"""
     return _SchemaResponse(success=True, data=runtime.system.check_update())
 
 
@@ -1053,7 +1063,7 @@ def download_system_update(
     runtime: HostRuntime = Depends(get_host_runtime),
     request: Annotated[_SchemaSystemUpdateRequest | None, Body()] = None,
 ):
-    """启动指定类型的后台下载并立即返回当前状态（仅管理员）。"""
+    """单类或合并下载更新并立即返回状态；all 准备全部最新制品（仅管理员）。"""
     result = runtime.system.download_update(request.target if request else "application")
     return _SchemaResponse(success=result.success, data=result.data, message=result.message)
 
@@ -1068,7 +1078,7 @@ def install_system_update(
     runtime: HostRuntime = Depends(get_host_runtime),
     request: Annotated[_SchemaSystemUpdateRequest | None, Body()] = None,
 ):
-    """确认消费指定类型的已校验制品，并重启进入安装阶段（仅管理员）。"""
+    """校验所选制品后重启安装；all 要求全部更新就绪并只重启一次（仅管理员）。"""
     result = runtime.system.install_update(request.target if request else "application")
     return _SchemaResponse(success=result.success, message=result.message)
 

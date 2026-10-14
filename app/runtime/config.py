@@ -204,7 +204,7 @@ class ConfigModel(BaseModel):
     SECRET_KEY: str = secrets.token_urlsafe(32)
     # RESOURCE密钥
     RESOURCE_SECRET_KEY: str = secrets.token_urlsafe(32)
-    # 允许的域名
+    # 允许的跨域来源；为 "*" 时浏览器跨域请求不携带凭据，需要跨域带 Cookie 请列出显式来源
     ALLOWED_HOSTS: list = Field(default_factory=lambda: ["*"])
     # TOKEN过期时间
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
@@ -406,6 +406,8 @@ class ConfigModel(BaseModel):
     ACOUSTID_API_KEY: str = "b1auxfOzAg"
     # 是否将识别到的音乐标题、艺术家、专辑等标准元数据转换为简体中文
     MUSIC_METADATA_TO_SIMPLIFIED: bool = True
+    # 是否将写入 LRC/TXT 的歌词正文转为简体中文；保留时间轴、LRC 标签和来源 Lyricsfile
+    MUSIC_LYRICS_TO_SIMPLIFIED: bool = False
     # 是否读取关联 CUE；已分轨音频可关闭以忽略错误索引，整轨专辑应保持开启
     MUSIC_CUE_ENABLE: bool = True
     # MusicBrainz 发行地区优先级，按 ISO 3166-1 两位代码从高到低排列
@@ -817,6 +819,8 @@ class ConfigModel(BaseModel):
     AI_AGENT_GLOBAL: bool = False
     # 是否隐藏前端全局智能体入口
     AI_AGENT_HIDE_ENTRY: bool = False
+    # 默认助手形象，格式为 插件ID:形象key，留空使用内置机器人；用户个人选择优先
+    AI_AGENT_PET: str = ""
     # 内置智能助手输出语言，默认使用简体中文
     AI_AGENT_OUTPUT_LANGUAGE: str = "zh-CN"
     # LLM提供商（支持内置 provider，以及从 models.dev 动态补充的平台）
@@ -874,6 +878,8 @@ class ConfigModel(BaseModel):
     AI_AGENT_RETRY_TRANSFER: bool = False
     # 是否按媒体聚合整理失败通知，关闭时保持逐条发送
     TRANSFER_FAILURE_NOTIFICATION_AGGREGATION: bool = True
+    # 是否按批次聚合电影、电视剧和音乐的整理成功通知
+    TRANSFER_SUCCESS_NOTIFICATION_AGGREGATION: bool = True
 
     # 音频输入提供商：openai/openai_chat_audio/mimo/minimax
     AUDIO_INPUT_PROVIDER: str = "openai"

@@ -1,25 +1,24 @@
 import json
 import re
 import xml.dom.minidom
-from typing import Optional, Union, List, Tuple, Any, Dict
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote
 
-from app.domain.context import Context, MediaInfo
+from app.adapters.external.wechat import WXBizMsgCrypt
 from app.application.messaging.channel.admin import (
     matches_channel_admin,
     register_channel_admin_resolver,
     resolve_config_principal_ids,
 )
-from app.runtime.log import logger
+from app.domain.context import Context, MediaInfo
+from app.foundation.dom import DomUtils
 from app.modules._base.notification import _MessageChannelModuleBase
-from app.adapters.external.wechat import WXBizMsgCrypt
 from app.modules.wechat.wechat import WeChat
 from app.modules.wechat.wechatbot import WeChatBot
+from app.runtime.log import logger
+from app.schemas.message import IncomingMessage, Message
 from app.schemas.notification import NotificationChannel
-from app.schemas.message import IncomingMessage
-from app.schemas.message import Message
 from app.schemas.types import ModuleType
-from app.foundation.dom import DomUtils
 
 
 def _resolve_wechat_admin_ids(config: Optional[dict]) -> set[str]:
@@ -36,6 +35,7 @@ register_channel_admin_resolver(NotificationChannel.Wechat, _resolve_wechat_admi
 class WechatModule(_MessageChannelModuleBase[WeChat]):
 
     # 管理员配置键，与渠道 resolver 保持一致
+    """按企业微信实例模式处理应用和智能机器人消息。"""
     _admin_config_key = "WECHAT_ADMINS"
     _notification_user_target_keys = ("wechat_userid",)
     _notification_admin_default_config_keys = ("WECHAT_BOT_CHAT_ID",)
@@ -52,6 +52,7 @@ class WechatModule(_MessageChannelModuleBase[WeChat]):
 
     @staticmethod
     def get_name() -> str:
+        """返回渠道的显示名称。"""
         return "企业微信"
 
     @staticmethod
@@ -81,15 +82,18 @@ class WechatModule(_MessageChannelModuleBase[WeChat]):
 
     @staticmethod
     def _is_bot_mode(config: dict) -> bool:
+        """区分 Markdown 智能机器人与原有企业微信应用消息协议。"""
         return (config or {}).get("WECHAT_MODE", "app") == "bot"
 
     @classmethod
     def _create_client(cls, conf):
+        """按实例模式创建企业微信应用或智能机器人客户端。"""
         if cls._is_bot_mode(conf.config):
             return WeChatBot(name=conf.name, **conf.config)
         return WeChat(name=conf.name, **conf.config)
 
     def init_setting(self) -> Tuple[str, Union[str, bool]]:
+        """保留设置初始化钩子，实例配置由通知服务管理。"""
         pass
 
     def message_parser(self, source: str, body: Any, form: Any,
@@ -126,7 +130,7 @@ class WechatModule(_MessageChannelModuleBase[WeChat]):
                                   sReceiveId=client_config.config.get('WECHAT_CORPID'))
             # 报文数据
             if not body:
-                logger.debug(f"微信请求数据为空")
+                logger.debug("微信请求数据为空")
                 return None
             logger.debug(f"收到微信请求：{body}")
             ret, sMsg = wxcpt.DecryptMsg(sPostData=body,
@@ -168,7 +172,7 @@ class WechatModule(_MessageChannelModuleBase[WeChat]):
             user_id = DomUtils.tag_value(root_node, "FromUserName")
             # 没的消息类型和用户ID的消息不要
             if not msg_type or not user_id:
-                logger.warn(f"解析不到消息类型和用户ID")
+                logger.warn("解析不到消息类型和用户ID")
                 return None
             # 解析消息内容
             content = None
@@ -244,6 +248,7 @@ class WechatModule(_MessageChannelModuleBase[WeChat]):
         return None
 
     def _parse_bot_message(self, source: str, body: Any, client_config) -> Optional[IncomingMessage]:
+        """解析智能机器人私聊消息，并携带用户授权和附件信息。"""
         try:
             if isinstance(body, bytes):
                 msg_json = json.loads(body)
@@ -330,16 +335,17 @@ class WechatModule(_MessageChannelModuleBase[WeChat]):
             userid = self.get_notification_userid(message, "wechat_userid")
             client: WeChat = self.get_instance(conf.name)
             if client:
+                text = message.channel_text(NotificationChannel.Wechat, conf.config) or message.text
                 if message.voice_path and hasattr(client, "send_voice"):
                     sent = client.send_voice(
                         voice_path=message.voice_path,
                         userid=userid,
                     )
                     if not sent:
-                        client.send_msg(title=message.title, text=message.text,
+                        client.send_msg(title=message.title, text=text,
                                         image=message.image, userid=userid, link=message.link)
                 else:
-                    client.send_msg(title=message.title, text=message.text,
+                    client.send_msg(title=message.title, text=text,
                                     image=message.image, userid=userid, link=message.link)
 
     def download_wechat_image_to_data_url(self, image_ref: str, source: str) -> Optional[str]:

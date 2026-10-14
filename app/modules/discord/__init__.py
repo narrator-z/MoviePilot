@@ -1,22 +1,20 @@
 import json
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import quote, unquote
 
-from app.domain.context import MediaInfo, Context
+from app.adapters.network.http import RequestUtils
 from app.application.messaging.channel.admin import (
     matches_channel_admin,
     register_channel_admin_resolver,
     resolve_config_principal_ids,
 )
-from app.runtime.log import logger
+from app.domain.context import Context, MediaInfo
 from app.modules._base.notification import _MessageChannelModuleBase
+from app.runtime.log import logger
 from app.schemas.event import CommandRegisterEventData
-from app.schemas.message import IncomingMessage
+from app.schemas.message import IncomingMessage, Message, MessageResponse
 from app.schemas.notification import NotificationChannel
-from app.schemas.message import MessageResponse
-from app.schemas.message import Message
 from app.schemas.types import ModuleType
-from app.adapters.network.http import RequestUtils
 
 try:
     from app.modules.discord.discord import Discord
@@ -33,6 +31,7 @@ register_channel_admin_resolver(
 
 class DiscordModule(_MessageChannelModuleBase[Discord]):
     # 管理员配置键，与渠道 resolver 保持一致
+    """处理 Discord 消息收发、附件和通知路由。"""
     _admin_config_key = "DISCORD_ADMINS"
     _notification_user_target_keys = ("discord_userid",)
     _notification_admin_default_config_keys = ("DISCORD_CHANNEL_ID",)
@@ -75,6 +74,7 @@ class DiscordModule(_MessageChannelModuleBase[Discord]):
 
     @staticmethod
     def get_name() -> str:
+        """返回渠道的显示名称。"""
         return "Discord"
 
     @staticmethod
@@ -103,6 +103,7 @@ class DiscordModule(_MessageChannelModuleBase[Discord]):
         return self._stop_service_instances()
 
     def init_setting(self) -> Tuple[str, Union[str, bool]]:
+        """保留设置初始化钩子，实例配置由通知服务管理。"""
         pass
 
     @staticmethod
@@ -376,17 +377,19 @@ class DiscordModule(_MessageChannelModuleBase[Discord]):
                         original_chat_id=message.original_chat_id,
                     )
                 else:
-                    result = client.send_msg(
-                        title=message.title,
-                        text=message.text,
-                        image=message.image,
-                        userid=userid,
-                        link=message.link,
-                        buttons=message.buttons,
-                        original_message_id=message.original_message_id,
-                        original_chat_id=message.original_chat_id,
-                        mtype=message.mtype,
-                    )
+                    texts: Sequence[Optional[str]] = message.channel_text_chunks(NotificationChannel.Discord) or [message.text]
+                    for text in texts:
+                        result = client.send_msg(
+                            title=message.title,
+                            text=text,
+                            image=message.image,
+                            userid=userid,
+                            link=message.link,
+                            buttons=message.buttons,
+                            original_message_id=message.original_message_id,
+                            original_chat_id=message.original_chat_id,
+                            mtype=message.mtype,
+                        )
                 logger.debug(f"[Discord] send_msg 返回结果: {result}")
             else:
                 logger.warning(

@@ -225,6 +225,7 @@ class ChainRuntimeConfig:
     download_subtitle: bool = True
     lyrics_batch_timeout: int = 120
     music_metadata_to_simplified: bool = True
+    music_lyrics_to_simplified: bool = False
     music_cue_enable: bool = True
     music_release_region_priority: tuple[str, ...] = ()
     music_release_script_priority: tuple[str, ...] = ()
@@ -244,6 +245,7 @@ class ChainRuntimeConfig:
     search_threadpool_size: int = 1
     transfer_threads: int = 1
     transfer_failure_notification_aggregation: bool = True
+    transfer_success_notification_aggregation: bool = True
     transfer_task_timeout: int = 120
     scrape_follow_tmdb: bool = True
     metadata_cache_ttl: int = 3600

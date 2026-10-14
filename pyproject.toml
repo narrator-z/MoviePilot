@@ -47,7 +47,7 @@ dependencies = [
     "langgraph-checkpoint~=4.2.0",
     # 宿主飞书渠道已改用自研 OpenAPI 与长连接客户端，此 SDK 暂时保留给插件使用。
     "lark-oapi~=1.6.8",
-    "moviepilot-rust~=0.3.7",
+    "moviepilot-rust~=0.3.8",
     "mutagen~=1.47.0",
     "openai~=2.41.1",
     "orjson==3.12.0",
@@ -136,6 +136,11 @@ exclude = ["app/plugins"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# 启动入口必须先完成缓存装配 / 导入路径与标准流重定向，再导入业务模块，晚导入是启动契约
+"app/startup/lifecycle/__init__.py" = ["E402"]
+"app/main.py" = ["E402"]
 
 [tool.uv]
 package = false

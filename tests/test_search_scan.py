@@ -1,6 +1,7 @@
 """完整页驱动验证实际补集、过滤兜底和逐页识别成本。"""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -8,7 +9,7 @@ from app.application.site.observation import report_site_search_outcome, report_
 from app.chain.search.execution import MediaSearchPlan
 from app.chain.search.facade import SearchChain
 from app.chain.search.result import TorrentHelper
-from app.chain.search.scan import SearchScan, SearchSources
+from app.chain.search.scan import AUTOMATIC_REQUEST_INTERVAL, SearchScan, SearchSources
 from app.domain.context import MediaInfo, TorrentInfo
 from app.schemas.mediaserver import NotExistMediaInfo
 from app.schemas.types import MediaSource, MediaType
@@ -178,13 +179,122 @@ def test_movie_smart_boundary_and_complete_upgrade_search(owner, monkeypatch, fu
 
 
 def test_whole_season_uses_trusted_range_or_complete_scan(owner):
+    """整季展开为真实集号后仍保留完整搜索，未知集数沿用整季目标。"""
     from app.chain.search.scan import search_targets
     season_plan = plan([])
     season_plan.no_exists["tmdb:1"][1].total_episode = 1200
     assert len(search_targets(season_plan)) == 1200
+    assert SearchScan(owner=owner, plan=season_plan).full
     season_plan.no_exists["tmdb:1"][1].total_episode = 9999
     assert search_targets(season_plan) == {"1:season"}
     assert SearchScan(owner=owner, plan=season_plan).full
+
+
+def test_whole_season_waits_for_late_pack_across_sites_and_checkpoint(owner, monkeypatch):
+    """散集关闭、站点冷却和检查点恢复都不能先于后页整季包提交。"""
+    from app.application.search.session import SearchSessionSnapshot, encode_search_state
+    from app.application.site.observation import SiteSearchObservation
+    from app.chain.search.scan import ScanPage
+
+    monkeypatch.setattr(owner, "_sync_indexers", lambda _sites: [
+        {"id": 1, "name": "A"}, {"id": 2, "name": "B"}])
+    season_plan = plan([])
+    season_plan.no_exists["tmdb:1"][1].total_episode = 3
+    pack = TorrentInfo(site=2, description="complete", title="Show 2026 S01 Complete 1080p",
+                       enclosure="https://site.example/download?id=complete")
+    data = {"1:Show": {0: [torrent(1)], 1: [torrent(2)]},
+            "2:Show": {0: [torrent(1)], 1: [torrent(2)], 2: [pack]}}
+    calls = []
+    cooling = {"active": True}
+
+    def fetch(_sources, key, page, **_params):
+        """第二站点下一页暂时冷却，其他来源可继续推进到末页。"""
+        if key == "2:Show" and page == 1 and cooling["active"]:
+            retry = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(timespec="seconds")
+            return ScanPage([], SiteSearchObservation(), retry, "cooldown")
+        calls.append((key, page))
+        items = data.get(key, {}).get(page, [])
+        return ScanPage(items, SiteSearchObservation(True, "success", raw_count=len(items)))
+
+    monkeypatch.setattr(SearchSources, "fetch", fetch)
+    initial = SearchScan(owner=owner, plan=season_plan)
+    submitted = []
+
+    def submit(items, ready):
+        """所有来源搜完才统一交给既有下载择优入口。"""
+        assert all(source.exhausted for source in scan.collection.sources.values())
+        submitted.append(({item.torrent_info.description for item in items}, ready))
+        return ready
+
+    scan = initial
+    scan.run(submit)
+    assert submitted == []
+    assert scan.collection.sources["1:Show"].exhausted
+    assert scan.collection.sources["2:Show"].next_page == 1
+    snapshot = SearchSessionSnapshot("round", 0, encode_search_state(scan.state()))
+    scan = SearchScan(owner=owner, plan=season_plan, snapshot=snapshot)
+    assert not scan.restart
+    cooling["active"] = False
+    scan.retry.clear()
+    scan.run(submit)
+    assert len(submitted) == 1
+    assert submitted[0][0] == {"1-1", "2-1", "complete"}
+    assert submitted[0][1] == {"1:1", "1:2", "1:3"}
+    assert calls.count(("2:Show", 0)) == 1
+    assert not scan.collection.remaining
+
+
+def test_whole_season_without_complete_pack_still_submits_parts_at_the_end(owner, monkeypatch):
+    """搜完没有整季包时照常下载散集，保留逐集结算而不丢弃候选。"""
+    season_plan = plan([])
+    season_plan.no_exists["tmdb:1"][1].total_episode = 2
+    calls = pages(owner, monkeypatch, {0: [torrent(1)], 1: [torrent(2)]})
+    submitted = []
+    scan = SearchScan(owner=owner, plan=season_plan)
+    scan.run(lambda items, ready: submitted.append((calls[-1], len(items), ready)) or ready)
+    assert submitted == [(2, 2, {"1:1", "1:2"})]
+    assert not scan.collection.remaining
+
+
+def test_full_mode_checks_aliases_when_first_name_only_has_older_episodes(owner, monkeypatch):
+    """前一名称只找到旧集时，完整模式仍须翻完并尝试后续名称。"""
+    monkeypatch.setattr(owner, "_prepare_params", lambda **_params: (None, ["First", "Alias"]))
+    calls = []
+
+    def request(**params):
+        """第一个名称没有目标集，第二个名称才找到它。"""
+        calls.append((params["keyword"], params["page"]))
+        items = [] if params["page"] else [torrent(1 if params["keyword"] == "First" else 3)]
+        report_site_search_outcome(attempted=True, outcome="success")
+        report_site_search_page(raw_count=len(items))
+        return items
+
+    monkeypatch.setattr(owner, "search_site_torrents", request)
+    scan = SearchScan(owner=owner, plan=plan([3]), full=True)
+    scan.run(lambda _items, ready: ready)
+    assert calls == [("First", 0), ("First", 1), ("Alias", 0), ("Alias", 1)]
+    assert not scan.collection.remaining
+
+
+def test_whole_season_restarts_old_smart_checkpoint_and_keeps_submitted_targets(owner, monkeypatch):
+    """旧智能模式检查点需重搜以补齐整季候选，已经提交的集数仍保留。"""
+    from app.application.search.session import SearchSessionSnapshot, encode_search_state
+
+    old = SearchScan(owner=owner, plan=plan([1, 2]))
+    old.collection.settle({"1:1"})
+    old.submitted.add("1:1")
+    season_plan = plan([])
+    season_plan.no_exists["tmdb:1"][1].total_episode = 2
+    scan = SearchScan(owner=owner, plan=season_plan,
+                      snapshot=SearchSessionSnapshot("round", 0, encode_search_state(old.state())))
+    assert scan.restart and scan.full
+    assert scan.collection.settled == {"1:1"}
+    calls = pages(owner, monkeypatch, {0: [torrent(1), torrent(2)]})
+    batches = []
+    scan.run(lambda _items, ready: batches.append(ready) or ready)
+    assert calls == [0, 1]
+    assert batches == [{"1:2"}]
+    assert scan.submitted == {"1:1", "1:2"}
 
 
 def test_no_candidate_filter_drives_full_fallback_from_current_cursor(owner, monkeypatch):
@@ -214,25 +324,27 @@ def test_unchanged_resource_recognized_once_even_when_repeated(owner, monkeypatc
 
 
 def test_twelve_hundred_episodes_with_multiple_versions(owner, monkeypatch):
-    data = {page: [torrent(episode, version) for episode in range(page * 40 + 1, (page + 1) * 40 + 1)
-                   for version in (1, 2)] for page in range(30)}
+    """20 页范围内仍能收集 1200 集的多版本候选，不在最后一页遗漏提交。"""
+    data = {page: [torrent(episode, version) for episode in range(page * 60 + 1, (page + 1) * 60 + 1)
+                   for version in (1, 2)] for page in range(20)}
     calls = pages(owner, monkeypatch, data)
     scan = SearchScan(owner=owner, plan=plan(list(range(1, 1201))))
     scan.run(lambda _items, ready: ready)
-    assert len(calls) == 31
+    assert calls == list(range(20))
     assert not scan.collection.remaining
     assert len(scan.identity) == 2400
 
 
-def test_one_hundred_page_cap_ends_the_round_and_does_not_repeat(owner, monkeypatch):
+def test_twenty_page_cap_ends_the_round_and_does_not_repeat(owner, monkeypatch):
+    """达到 20 页后结束本轮，仍缺集也不会重新扫描已达上限的来源。"""
     # 页面出现更新的集，缺失的 1200 属于站点已收录范围，需要一直翻到上限。
     calls = pages(owner, monkeypatch, {page: [torrent(1300, page + 1)] for page in range(125)})
     scan = SearchScan(owner=owner, plan=plan([1200]))
     scan.run(lambda _items, ready: ready)
-    assert calls == list(range(100))
+    assert calls == list(range(20))
     assert scan.collection.remaining == {"1:1200"}
     scan.run(lambda _items, ready: ready)
-    assert len(calls) == 100
+    assert len(calls) == 20
 
 
 def test_full_mode_collects_late_candidates_after_a_gap(owner, monkeypatch):
@@ -329,6 +441,52 @@ def test_site_window_wait_keeps_cursor(owner, monkeypatch):
     assert not scan.collection.sources[key].failed
     assert not scan.collection.sources[key].exhausted
     assert scan.collection.sources[key].error == "站点窗口限流"
+
+
+def test_defer_ignores_expired_retries_and_terminal_sources(owner, monkeypatch):
+    """失败或耗尽来源的检查点残留不能覆盖仍活跃来源的冷却时间。"""
+    from app.application.subscription.sitebudget import SubscriptionSearchDeferred
+
+    monkeypatch.setattr(owner, "_sync_indexers", lambda _sites: [
+        {"id": site_id, "name": f"test-{site_id}", "parser": "mTorrent"} for site_id in (1, 2, 3)
+    ])
+    scan = SearchScan(owner=owner, plan=plan([1]))
+    failed_key, exhausted_key, active_key = (f"{site_id}:Show" for site_id in (1, 2, 3))
+    scan.collection.sources[failed_key].failed = True
+    scan.collection.sources[exhausted_key].exhausted = True
+    now = datetime.now(timezone.utc)
+    expired = (now - timedelta(minutes=1)).isoformat(timespec="seconds")
+    active_retry = (now + timedelta(minutes=5)).isoformat(timespec="seconds")
+    scan.retry = {failed_key: expired, exhausted_key: expired, active_key: active_retry}
+    scan.retry_reasons = {failed_key: "cooldown", exhausted_key: "cooldown", active_key: "busy"}
+
+    with pytest.raises(SubscriptionSearchDeferred) as error:
+        scan._defer()
+
+    assert error.value.retry_at == active_retry
+    assert error.value.wait_reason == "busy"
+    assert scan.retry == {active_key: active_retry}
+    assert scan.retry_reasons == {active_key: "busy"}
+
+
+def test_defer_uses_request_interval_when_all_retries_expired(owner):
+    """所有冷却都已过期时至少等待一个请求间隔再交还订阅队列。"""
+    from app.application.subscription.sitebudget import SubscriptionSearchDeferred
+
+    scan = SearchScan(owner=owner, plan=plan([1]))
+    key = next(key for key in scan.collection.active_sources() if not key.startswith("plugin:"))
+    scan.retry[key] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(timespec="seconds")
+    scan.retry_reasons[key] = "cooldown"
+    before = datetime.now(timezone.utc)
+
+    with pytest.raises(SubscriptionSearchDeferred) as error:
+        scan._defer()
+
+    retry_at = datetime.fromisoformat(error.value.retry_at)
+    assert retry_at >= before + timedelta(seconds=AUTOMATIC_REQUEST_INTERVAL)
+    assert error.value.wait_reason == "slice"
+    assert not scan.retry
+    assert not scan.retry_reasons
 
 
 def test_all_sources_failing_is_not_reported_as_exhausted(owner, monkeypatch):

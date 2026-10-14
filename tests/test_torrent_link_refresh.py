@@ -126,8 +126,12 @@ def download_chain(monkeypatch):
     chain.post_message = Mock()
     chain.search_site_torrents = Mock(return_value=[])
     helper = Mock()
+    helper.is_invalid.return_value = False
     helper.download_torrent.return_value = FAILED
     monkeypatch.setattr(submission, "TorrentHelper", Mock(return_value=helper))
+    cache = Mock()
+    cache.get.return_value = None
+    monkeypatch.setattr(submission, "FileCache", Mock(return_value=cache))
     sites = Mock()
     sites.get_indexers.return_value = [SITE]
     monkeypatch.setattr(submission, "SitesHelper", Mock(return_value=sites), raising=False)
@@ -279,7 +283,7 @@ def test_real_torrent_parse_and_cooldown_follow_final_attempt(monkeypatch, final
     content = b"d4:infod4:name10:Series.mkv6:lengthi1eee"
     port = Mock()
     port.request.side_effect = [
-        SimpleNamespace(status_code=404),
+        SimpleNamespace(status_code=404, content=b""),
         SimpleNamespace(status_code=final_status, content=content),
     ]
     monkeypatch.setattr(torrent_download, "_require_torrent_port", Mock(return_value=port))
@@ -306,7 +310,7 @@ def test_real_torrent_parse_and_cooldown_follow_final_attempt(monkeypatch, final
         assert cache.set.call_args.args[1] == content
     else:
         assert prepared is None
-        assert error == "下载种子内容为空"
+        assert error == f"下载种子出错，状态码：{final_status}"
         chain._record_download_failure.assert_called_once()
         chain.post_message.assert_called_once()
         cache.set.assert_not_called()
@@ -386,8 +390,8 @@ def test_no_cache_rule_only_matches_explicit_nonempty_keywords(monkeypatch, keys
     assert chain._is_no_cache_site(domain) is expected
 
 
-def test_cached_mteam_request_obtains_new_token_for_each_download(download_chain, monkeypatch):
-    """同一缓存换票请求连续下载时，每次均从接口获取新的临时链接。"""
+def test_uncached_mteam_content_obtains_new_token_for_each_download(download_chain, monkeypatch):
+    """种子内容缓存未命中时，同一换票请求每次获取新链接，不复用旧签名。"""
     chain, helper = download_chain
     request = {"method": "post", "params": {"id": "39"}, "result": "data"}
     encoded = base64.b64encode(json.dumps(request).encode()).decode()

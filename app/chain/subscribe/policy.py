@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from app.application.download.admission import SubscriptionDownloadGovernance
 from app.application.subscription import priority as _priority
+from app.application.subscription.activity import current_activity_run
 from app.application.subscription.contract import (
     SubscriptionSnapshot,
 )
@@ -272,7 +273,7 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
         subscribe: SubscriptionSnapshot,
         priority: int,
     ) -> bool:
-        """判断分集洗版是否应优先下载整包。"""
+        """判断分集洗版或首次下载的整包候选是否通过按集优先级门槛。"""
         result: bool = _priority.should_prefer_full_pack_for_episode_best_version(subscribe, priority)
         return result
 
@@ -281,10 +282,11 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
         cls,
         subscribe: SubscriptionSnapshot,
         mediakey: Union[int, str],
+        no_exists: Optional[Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]] = None,
     ) -> Optional[Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]]:
-        """构造分集洗版优先全集时使用的整季缺失范围。"""
+        """构造分集洗版或普通电视剧首次下载优先全集时使用的完整目标范围。"""
         result: Optional[Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]] = (
-            _priority.build_full_pack_first_no_exists(subscribe, mediakey)
+            _priority.build_full_pack_first_no_exists(subscribe, mediakey, no_exists)
         )
         return result
 
@@ -310,8 +312,9 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
         eligible_targets: Optional[set[str]] = None,
     ) -> Tuple[List[Context], Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]]:
         """
-        TV 分集洗版先尝试覆盖目标范围的全集资源，失败后回退到按集下载。
+        TV 分集洗版及尚无已有剧集的普通订阅先尝试完整包，失败后回退到按集下载。
         """
+        activity = current_activity_run()
         governance: Optional[SubscriptionDownloadGovernance] = None
         repository = getattr(self, "subscription_repository", None)
         get_current = getattr(repository, "get", None)
@@ -327,9 +330,10 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
             if current is None:
                 logger.info(f"订阅 {subscribe.id} 已删除，放弃本轮下载提交")
                 return [], no_exists
-            # 已接纳的 Search 可完成本次下载；无搜索上下文的 Match 等路径仍遵守暂停状态。
+            # 只有显式补搜可为暂停订阅提交下载，自动搜索不能借入队时的状态绕过暂停。
             if current.state == "S" and not (
                 execution_context and execution_context.lease.operation == "search"
+                and execution_context.allow_paused_search
             ):
                 logger.info(f"订阅 {current.name} 已暂停，放弃本轮下载提交")
                 return [], no_exists
@@ -359,12 +363,13 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
             governance = SubscriptionDownloadGovernance(
                 cancelled=execution_context.should_stop if execution_context else None,
                 mark_started=execution_context.mark_download_started if execution_context else None,
+                decision_observer=activity.resource if activity else None,
             )
         if eligible_targets is not None:
             no_exists = _prepare_batch_missing(no_exists, mediakey, eligible_targets)
         allowed_episodes = _ready_episodes(no_exists, mediakey, eligible_targets)
         full_pack_no_exists = self._SubscribeChain__build_full_pack_first_no_exists(
-            subscribe=subscribe, mediakey=mediakey
+            subscribe=subscribe, mediakey=mediakey, no_exists=no_exists
         )
         full_season_contexts = (
             [
@@ -395,10 +400,10 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
                 full_pack_contexts.append(context)
 
         if full_season_contexts and not full_pack_contexts:
-            logger.info(f"{subscribe.name} 全集候选优先级未高于全部目标集，回退到分集洗版")
+            logger.info(f"{subscribe.name} 全集候选优先级未高于全部目标集，回退到按集下载")
 
         if full_pack_contexts:
-            logger.info(f"{subscribe.name} 分集洗版优先尝试全集资源，共匹配到 {len(full_pack_contexts)} 个候选")
+            logger.info(f"{subscribe.name} 优先尝试全集资源，共匹配到 {len(full_pack_contexts)} 个候选")
             downloads, lefts = DownloadChain().batch_download(
                 contexts=full_pack_contexts,
                 no_exists=full_pack_no_exists,
@@ -412,7 +417,7 @@ class SubscribePolicyOwner(_SubscribePriorityPolicyOwner):
             )
             if downloads:
                 return downloads, lefts
-            logger.info(f"{subscribe.name} 未下载到全集资源，回退到分集洗版")
+            logger.info(f"{subscribe.name} 未下载到全集资源，回退到按集下载")
 
         result: Tuple[List[Context], Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]] = (
             DownloadChain().batch_download(

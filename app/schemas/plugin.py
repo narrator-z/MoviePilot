@@ -9,6 +9,7 @@ from pydantic import BeforeValidator as _BeforeValidator
 from pydantic import PrivateAttr as _PrivateAttr
 from pydantic import computed_field as _computed_field
 
+from app.domain.plugin import is_physical_plugin_id as _is_physical_plugin_id
 from app.schemas.common import JsonData
 
 
@@ -49,14 +50,16 @@ def validate_plugin_id(value: str) -> str:
 
     公开可调用：凡是把实例 ID 拼进文件系统路径、模块名或路由段的入口都应当先过这道
     校验，而不是各自另写一套字符白名单——多套规则之间迟早出现缝隙。
+    实例与源插件复用安装侧的 ASCII 身份规则，兼容既有下划线 ID；不改写大小写，
+    以免改变配置、数据和路由命名空间。
     :param value: 待校验的插件实例 ID
     :return: 原样返回的合法 ID
-    :raise ValueError: ID 为空、不以字母开头、含字母数字以外的字符或超长
+    :raise ValueError: ID 为空、不以字母开头、含 ASCII 字母数字及下划线以外的字符或超长
     """
-    if not value or not value[0].isalpha() or not value.isalnum():
-        raise ValueError("插件 ID 必须以字母开头且只能包含字母和数字")
     if len(value) > 128:
         raise ValueError("插件 ID 长度不能超过 128 个字符")
+    if not _is_physical_plugin_id(value):
+        raise ValueError("插件 ID 必须以字母开头且只能包含 ASCII 字母、数字或下划线")
     return value
 
 
@@ -545,6 +548,47 @@ class PluginSidebarNavItem(BaseModel):
         description="权限：subscribe / discovery / search / manage / admin",
     )
     order: int = Field(default=0, description="同组内排序，越小越靠前")
+
+
+class PluginAgentPet(BaseModel):  # type: ignore[misc]
+    """
+    插件声明的 Agent 助手形象（前端按 plugin_id + key 选择并挂载联邦组件）
+    """
+
+    plugin_id: str = Field(description="插件实例 ID，分身为分身自身 ID")
+    source_plugin_id: str = Field(description="提供前端产物的源插件 ID，非分身时等于 plugin_id")
+    plugin_name: str = Field(description="插件展示名")
+    key: str = Field(description="形象 key，插件内唯一，匹配 [a-z0-9_-]{1,32}")
+    name: str = Field(description="形象展示名")
+    description: Optional[str] = Field(default=None, description="形象一句话说明")
+    mode: Literal["stage", "renderer"] = Field(
+        description="渲染模式：stage（插件拥有角色与视口图层）/ renderer（宿主负责入口行为，插件只绘制）",
+    )
+    component: str = Field(default="AgentPet", description="联邦暴露名，不含 ./ 前缀")
+    api_version: int = Field(default=1, description="形象契约版本，前端忽略不认识的版本")
+    plugin_version: Optional[str] = Field(
+        default=None,
+        description="提供形象的插件版本；前端据此判断插件是否升级，以决定是否重试加载失败的形象",
+    )
+    remote_url: str = Field(
+        description="插件联邦入口 remoteEntry.js 地址，规则同 GET /plugin/remotes 的 url；前端据此直接注册远程入口",
+    )
+    preview_url: Optional[str] = Field(
+        default=None,
+        description="预览图 URL：相对路径已解析为与 remoteEntry 同源的插件静态文件地址，或原样的 http(s)/data URL",
+    )
+    avatar_url: Optional[str] = Field(
+        default=None,
+        description="方形头像 URL，用于 Agent 面板头部与消息头像；解析规则同 preview_url，未声明为空",
+    )
+    bubbles: Optional[Literal["host", "self"]] = Field(
+        default=None,
+        description="气泡归属，仅 stage 模式：host（宿主按锚点绘制）/ self（插件自绘）；renderer 模式为空",
+    )
+    random_actions: Optional[List[str]] = Field(
+        default=None,
+        description="宿主随机动作候选，仅 renderer 模式；为空表示使用宿主动作全集",
+    )
 
 
 class PluginRatingRequest(BaseModel):

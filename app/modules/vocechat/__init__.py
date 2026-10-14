@@ -1,21 +1,19 @@
 import json
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import quote, unquote
-from typing import Optional, Union, List, Tuple, Any, Dict
 
-from app.domain.context import Context, MediaInfo
 from app.application.messaging.channel.admin import (
     matches_channel_admin,
     register_channel_admin_resolver,
     resolve_config_principal_ids,
 )
-from app.runtime.log import logger
+from app.domain.context import Context, MediaInfo
 from app.modules._base.notification import _MessageChannelModuleBase
 from app.modules.vocechat.vocechat import VoceChat
+from app.runtime.log import logger
+from app.schemas.message import IncomingMessage, Message
 from app.schemas.notification import NotificationChannel
-from app.schemas.message import IncomingMessage
-from app.schemas.message import Message
 from app.schemas.types import ModuleType
-
 
 register_channel_admin_resolver(
     NotificationChannel.VoceChat,
@@ -340,8 +338,10 @@ class VoceChatModule(_MessageChannelModuleBase[VoceChat]):
             userid = self.get_notification_userid(message, "vocechat_userid")
             client: VoceChat = self.get_instance(conf.name)
             if client:
-                client.send_msg(title=message.title, text=message.text,
-                                image=message.image, userid=userid, link=message.link)
+                texts: Sequence[Optional[str]] = message.channel_text_chunks(NotificationChannel.VoceChat) or [message.text]
+                for text in texts:
+                    client.send_msg(title=message.title, text=text,
+                                    image=message.image, userid=userid, link=message.link)
 
     def post_medias_message(self, message: Message, medias: List[MediaInfo]) -> None:
         """

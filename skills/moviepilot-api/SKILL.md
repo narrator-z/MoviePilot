@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 46
+version: 55
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -66,6 +66,12 @@ allowed-api-operations: >-
 ---
 
 # MoviePilot API
+
+Unhandled exceptions outside the durable transfer step ledger stop automatic
+replay and create an `unhandled_execution_review` diagnostic. Repair or disable
+the failing plugin and inspect the files before resolving it as `not_applied`;
+roll back untracked effects first when needed. This diagnostic rejects `applied`
+and does not replace the evidence for any recorded file operations.
 
 For relevant prior conversations or previous tool evidence, use the host-provided
 `session_search` tool when available. Discover a session, then read its anchored
@@ -163,6 +169,10 @@ are separate operation contracts, not interchangeable parameter templates.
 subscription executions use `limit`, not `page` or `count`. `site.rss` lists
 RSS-enabled sites; it does not accept a `site_id` filter.
 
+`media.detail` and `transfer.file` accept `movie`, `tv`, or `music` in
+`type_name`; `subscription.add` accepts the same values in `type`. The
+corresponding Chinese labels remain supported.
+
 ## API Category Index
 
 Each category file contains the complete operation contracts for its namespace.
@@ -199,6 +209,10 @@ frontmatter allowlist, and the matching gateway contract together.
 
 ## API Surface Scope
 
+Operations declare an identity scope: `public` reads external public metadata without requiring a channel account binding; `bound_user` uses the active MoviePilot user bound to the stable channel sender ID (Web uses its authenticated user ID); `admin` requires administrator authority. Read-only does not mean public. Channel nicknames never establish identity. Personal records and subscription writes retain their existing ownership and permission checks.
+
+When identity resolution fails, relay the gateway's actual remediation message and sender ID. Channel users bind their own MoviePilot account via avatar > Personal Information > Account Binding, fill the named channel field, and save. Do not invent a Settings > Users binding page, substitute nicknames/group/bot IDs, diagnose an ambiguous binding failure as a network issue, or ask Web users to bind a notification channel. Public operations do not require binding.
+
 This Skill is the complete callable MoviePilot business API surface for the
 Agent. Every operation in `allowed-api-operations` has one exact parameter
 contract in a category file and one matching MCP `tools/list` branch. There is
@@ -228,6 +242,11 @@ Agent operation. It clears corrupt task state while retaining the history record
 
 ## Calling Contract
 
+Setting a subscription to state `S` stops queued and running automatic searches at safe
+boundaries, including new-subscription and site-retry tasks. An explicit subscription search
+can still search and download once while paused; cancel its execution batch to stop that run.
+Pausing or cancelling does not remove tasks already submitted to the downloader.
+
 Call the gateway with this shape:
 
 ```json
@@ -250,7 +269,22 @@ Select the operation for the task first, then send only fields declared by that 
 | `download.tasks.active` | none | optional `page`, `count`, `name` |
 | `site.list` | none | optional `page`, `count`, `name`, `status=all\|active\|inactive` |
 
+Subscription execution logs are browser resource endpoints:
+`GET /api/v1/subscribe/{subscription_id}/logs` (SSE, or text with `length=-1`)
+and `/logs/download` (ZIP). They require the existing resource Cookie and enforce
+subscription ownership; they are not JSON gateway or MCP tools. Do not pass a
+logfile path or try to call them through `call_api`. Read subscription status
+through the supported subscription operations; completion of a search task does
+not prove completion of the subscription.
+
 The `download.add` body must contain `torrent_in` (at least `title` and `enclosure`) plus sibling `media_source` and `media_id`; do not put a magnet URI in `url`, or move media identity and filters into `query`. When a write returns `unknown`, never retry it; verify the actual state with a supported read operation first.
+
+Preserve the candidate's `site` ID and download URL. For direct HTTP(S) torrents,
+`site_cookie` may be omitted: the backend fills a missing Cookie and User-Agent
+from the configured site only when the download URL matches its scheme, host,
+and port. Without a site ID, this requires exactly one matching configured site.
+Explicit credentials and proxy selection are preserved. Magnet and two-step
+token exchange downloads retain their existing credential rules.
 
 - Put route placeholders such as `subscribe_id`, `hashString`, `plugin_id`,
   `workflow_id`, `media_id`, `storage`, `rule_id`, and `name` in `path_params`.
@@ -275,7 +309,9 @@ The `download.add` body must contain `torrent_in` (at least `title` and `enclosu
 ## Collection Counts And Pagination
 
 - Search SSE `manual_paging=true` is a Web-only page-by-page mode and adds no Agent
-  operations; keep using the documented `search.*` operations.
+  operations; keep using the documented `search.*` operations. Web streams search
+  sites concurrently and emit `append` previews before the final filtered page;
+  only the completed result carries source state for advancing page numbers.
 - For list inspection, explicitly send the operation's documented pagination
   fields instead of requesting an unbounded legacy result. For optional legacy
   pagination, start with `query={"page":1,"count":20}`.

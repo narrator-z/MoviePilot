@@ -1,23 +1,22 @@
 import json
 import posixpath
-from typing import List, Union, Optional, Dict, Generator, Tuple, Any
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 from requests import Response
 
+from app.adapters.network.http import RequestUtils
+from app.application.mediaserver import MediaServerIdentityHelper, format_emby_family_item
+from app.foundation.url import UrlUtils
+from app.runtime.cache import MemoryBackend
+from app.runtime.log import logger
+from app.runtime.settings import get_runtime_setting
 from app.schemas.dashboard import Statistic as _SchemaStatistic
+from app.schemas.mediaserver import MediaServerItem
 from app.schemas.mediaserver import MediaServerItem as _SchemaMediaServerItem
 from app.schemas.mediaserver import MediaServerLibrary as _SchemaMediaServerLibrary
 from app.schemas.mediaserver import MediaServerPlayItem as _SchemaMediaServerPlayItem
 from app.schemas.mediaserver import WebhookEventInfo as _SchemaWebhookEventInfo
-from app.runtime.settings import get_runtime_setting
-
-from app.application.mediaserver import MediaServerIdentityHelper, format_emby_family_item
-from app.runtime.log import logger
-from app.schemas.types import MediaType
-from app.schemas.types import MediaSource
-from app.adapters.network.http import RequestUtils
-from app.foundation.url import UrlUtils
-from app.schemas.mediaserver import MediaServerItem
+from app.schemas.types import MediaSource, MediaType
 
 
 class Jellyfin:
@@ -28,6 +27,9 @@ class Jellyfin:
     _playhost: Optional[str] = None
     _sync_libraries: List[str] = []
     user: Optional[Union[str, int]] = None
+    # 删除后无法反查条目；缓存按服务器隔离，并限制容量和存活时间。
+    _webhook_paths = MemoryBackend(maxsize=10000, ttl=30 * 24 * 60 * 60)
+    _webhook_path_region = "jellyfin.webhook.paths"
 
     def __init__(self, host: Optional[str] = None, apikey: Optional[str] = None, play_host: Optional[str] = None,
                  sync_libraries: list = None, **kwargs):
@@ -87,10 +89,10 @@ class Jellyfin:
             if res:
                 return res.json()
             else:
-                logger.error(f"Library/SelectableMediaFolders 未获取到返回数据")
+                logger.error("Library/SelectableMediaFolders 未获取到返回数据")
                 return []
         except Exception as e:
-            logger.error(f"连接Library/SelectableMediaFolders 出错：" + str(e))
+            logger.error("连接Library/SelectableMediaFolders 出错：" + str(e))
             return []
 
     def get_jellyfin_virtual_folders(self) -> List[dict]:
@@ -128,10 +130,10 @@ class Jellyfin:
                         })
                 return librarys
             else:
-                logger.error(f"Library/VirtualFolders 未获取到返回数据")
+                logger.error("Library/VirtualFolders 未获取到返回数据")
                 return []
         except Exception as e:
-            logger.error(f"连接Library/VirtualFolders 出错：" + str(e))
+            logger.error("连接Library/VirtualFolders 出错：" + str(e))
             return []
 
     def __get_jellyfin_librarys(self, username: Optional[str] = None) -> Optional[List[dict]]:
@@ -157,10 +159,10 @@ class Jellyfin:
                 items = res.json().get("Items")
                 return items if isinstance(items, list) else None
             else:
-                logger.error(f"Users/Views 未获取到返回数据")
+                logger.error("Users/Views 未获取到返回数据")
                 return None
         except Exception as e:
-            logger.error(f"连接Users/Views 出错：" + str(e))
+            logger.error("连接Users/Views 出错：" + str(e))
             return None
 
     def get_librarys(
@@ -230,10 +232,10 @@ class Jellyfin:
             if res:
                 return len(res.json())
             else:
-                logger.error(f"Users 未获取到返回数据")
+                logger.error("Users 未获取到返回数据")
                 return 0
         except Exception as e:
-            logger.error(f"连接Users出错：" + str(e))
+            logger.error("连接Users出错：" + str(e))
             return 0
 
     def get_user(self, user_name: Optional[str] = None) -> Optional[Union[str, int]]:
@@ -290,9 +292,9 @@ class Jellyfin:
                 )
                 return best_admin_id
             else:
-                logger.error(f"Users 未获取到返回数据")
+                logger.error("Users 未获取到返回数据")
         except Exception as e:
-            logger.error(f"连接Users出错：" + str(e))
+            logger.error("连接Users出错：" + str(e))
         return None
 
     def authenticate(self, username: str, password: str) -> Optional[str]:
@@ -327,9 +329,9 @@ class Jellyfin:
                     logger.info(f"用户 {username} Jellyfin认证成功")
                     return auth_token
             else:
-                logger.error(f"Users/AuthenticateByName 未获取到返回数据")
+                logger.error("Users/AuthenticateByName 未获取到返回数据")
         except Exception as e:
-            logger.error(f"连接Users/AuthenticateByName出错：" + str(e))
+            logger.error("连接Users/AuthenticateByName出错：" + str(e))
         return None
 
     def get_server_id(self) -> Optional[str]:
@@ -347,9 +349,9 @@ class Jellyfin:
             if res:
                 return res.json().get("Id")
             else:
-                logger.error(f"System/Info 未获取到返回数据")
+                logger.error("System/Info 未获取到返回数据")
         except Exception as e:
-            logger.error(f"连接System/Info出错：" + str(e))
+            logger.error("连接System/Info出错：" + str(e))
         return None
 
     def get_medias_count(self) -> _SchemaStatistic:
@@ -383,10 +385,10 @@ class Jellyfin:
                     or result.get("SongCount") or 0,
                 )
             else:
-                logger.error(f"Items/Counts 未获取到返回数据")
+                logger.error("Items/Counts 未获取到返回数据")
                 return _SchemaStatistic()
         except Exception as e:
-            logger.error(f"连接Items/Counts出错：" + str(e))
+            logger.error("连接Items/Counts出错：" + str(e))
         return _SchemaStatistic()
 
     def __count_medias_by_librarys(self) -> Optional[_SchemaStatistic]:
@@ -445,7 +447,7 @@ class Jellyfin:
                                 not year or str(res_item.get('ProductionYear')) == str(year)):
                             return res_item.get('Id')
         except Exception as e:
-            logger.error(f"连接Items出错：" + str(e))
+            logger.error("连接Items出错：" + str(e))
             return None
         return ""
 
@@ -495,7 +497,7 @@ class Jellyfin:
                                 ret_movies.append(mediaserver_item)
                     return ret_movies
         except Exception as e:
-            logger.error(f"连接Items出错：" + str(e))
+            logger.error("连接Items出错：" + str(e))
             return None
         return None
 
@@ -599,7 +601,7 @@ class Jellyfin:
                     season_episodes[season_index].append(episode_index)
                 return item_id, season_episodes
         except Exception as e:
-            logger.error(f"连接Shows/Id/Episodes出错：" + str(e))
+            logger.error("连接Shows/Id/Episodes出错：" + str(e))
             return None, None
         return None, {}
 
@@ -656,9 +658,9 @@ class Jellyfin:
                 # TMDB 无匹配时回退本地图片
                 logger.info(f"未找到 TMDB {image_type}，回退本地图片")
             else:
-                logger.info(f"Items/RemoteImages 未获取到返回数据，采用本地图片")
+                logger.info("Items/RemoteImages 未获取到返回数据，采用本地图片")
         except Exception as e:
-            logger.error(f"连接Items/Id/RemoteImages出错：" + str(e))
+            logger.error("连接Items/Id/RemoteImages出错：" + str(e))
         return self.generate_image_link(item_id, image_type, True)
 
     def get_item_path_by_id(self, item_id: str) -> Optional[str]:
@@ -684,6 +686,29 @@ class Jellyfin:
             logger.error("连接Items/Id/PlaybackInfo出错：" + str(e))
             return None
         return None
+
+    def _get_webhook_item_path(self, message: dict[str, Any]) -> Optional[str]:
+        """优先读取负载路径；删除事件仅使用已知路径，不反查已删除条目。
+
+        入库及播放等非删除事件刷新缓存，删除时消费对应条目缓存。
+        缓存仅在进程内有效；重启、过期或未观察过的条目可能仍无路径。
+        """
+        item_id = message.get("ItemId")
+        path = message.get("Path")
+        path = path if isinstance(path, str) and path.strip() else None
+        if not item_id:
+            return path
+        key = f"{self._host}:{item_id}"
+        if message.get("NotificationType") == "ItemDeleted":
+            cached_path = self._webhook_paths.consume(key, region=self._webhook_path_region)
+            path = path or cached_path
+            if not path:
+                logger.warning(f"Jellyfin 删除条目 {item_id} 的路径未知，不能据此定位文件版本")
+            return path
+        path = path or self.get_item_path_by_id(item_id)
+        if path:
+            self._webhook_paths.set(key, path, region=self._webhook_path_region)
+        return path
 
     def generate_image_link(self, item_id: str, image_type: str, host_type: bool) -> Optional[str]:
         """
@@ -714,7 +739,7 @@ class Jellyfin:
                 logger.error("Items/Id/Images 未获取到返回数据或无该影片{}图片".format(image_type))
                 return None
         except Exception as e:
-            logger.error(f"连接Items/Id/Images出错：" + str(e))
+            logger.error("连接Items/Id/Images出错：" + str(e))
             return None
 
     def get_itemId_ancestors(self, item_id: str, index: int, key: str) -> Optional[Union[str, list, int, dict, bool]]:
@@ -734,10 +759,10 @@ class Jellyfin:
             if res:
                 return res.json()[index].get(key)
             else:
-                logger.error(f"Items/Id/Ancestors 未获取到返回数据")
+                logger.error("Items/Id/Ancestors 未获取到返回数据")
                 return None
         except Exception as e:
-            logger.error(f"连接Items/Id/Ancestors出错：" + str(e))
+            logger.error("连接Items/Id/Ancestors出错：" + str(e))
             return None
 
     def refresh_root_library(self) -> Optional[bool]:
@@ -755,9 +780,9 @@ class Jellyfin:
             if res:
                 return True
             else:
-                logger.info(f"刷新媒体库失败，无法连接Jellyfin！")
+                logger.info("刷新媒体库失败，无法连接Jellyfin！")
         except Exception as e:
-            logger.error(f"连接Library/Refresh出错：" + str(e))
+            logger.error("连接Library/Refresh出错：" + str(e))
             return False
 
     def get_webhook_message(self, body: Any) -> Optional[_SchemaWebhookEventInfo]:
@@ -828,7 +853,7 @@ class Jellyfin:
         try:
             message = json.loads(body)
         except Exception as e:
-            logger.debug(f"解析Jellyfin Webhook报文出错：" + str(e))
+            logger.debug("解析Jellyfin Webhook报文出错：" + str(e))
             return None
         if not message:
             return None
@@ -883,14 +908,13 @@ class Jellyfin:
             eventItem.percentage = playback_position_ticks / runtime_ticks * 100
 
         # 获取消息图片
-        if eventItem.item_id:
+        if eventItem.item_id and eventType != "ItemDeleted":
             # 根据返回的item_id去调用媒体服务器获取
             eventItem.image_url = self.get_remote_image_by_id(
                 item_id=eventItem.item_id,
                 image_type="Backdrop"
             )
-            # jellyfin 的 webhook 不含 item_path，需要单独获取
-            eventItem.item_path = self.get_item_path_by_id(eventItem.item_id)
+        eventItem.item_path = self._get_webhook_item_path(message)
 
         eventItem.json_object = message
 
@@ -993,7 +1017,7 @@ class Jellyfin:
                 elif item.get("Type") in ["Movie", "Series", "MusicAlbum"]:
                     yield self.__format_item_info(item)
         except Exception as e:
-            logger.error(f"连接Users/Items出错：" + str(e))
+            logger.error("连接Users/Items出错：" + str(e))
 
     def get_data(self, url: str) -> Optional[Response]:
         """
@@ -1008,7 +1032,7 @@ class Jellyfin:
         try:
             return self._request(accept_type="application/json").get_res(url=url)
         except Exception as e:
-            logger.error(f"连接Jellyfin出错：" + str(e))
+            logger.error("连接Jellyfin出错：" + str(e))
             return None
 
     def post_data(self, url: str, data: Optional[str] = None, headers: dict = None) -> Optional[Response]:
@@ -1028,7 +1052,7 @@ class Jellyfin:
                 headers=headers
             ).post_res(url=url, data=data)
         except Exception as e:
-            logger.error(f"连接Jellyfin出错：" + str(e))
+            logger.error("连接Jellyfin出错：" + str(e))
             return None
 
     def get_play_url(self, item_id: str) -> str:
@@ -1133,9 +1157,9 @@ class Jellyfin:
                     ))
                 return ret_resume
             else:
-                logger.error(f"Users/Items/Resume 未获取到返回数据")
+                logger.error("Users/Items/Resume 未获取到返回数据")
         except Exception as e:
-            logger.error(f"连接Users/Items/Resume出错：" + str(e))
+            logger.error("连接Users/Items/Resume出错：" + str(e))
         return None
 
     def get_latest(self, num=20, username: Optional[str] = None) -> Optional[List[_SchemaMediaServerPlayItem]]:
@@ -1188,9 +1212,9 @@ class Jellyfin:
                     ))
                 return ret_latest
             else:
-                logger.error(f"Users/Items/Latest 未获取到返回数据")
+                logger.error("Users/Items/Latest 未获取到返回数据")
         except Exception as e:
-            logger.error(f"连接Users/Items/Latest出错：" + str(e))
+            logger.error("连接Users/Items/Latest出错：" + str(e))
         return None
 
     def get_user_library_folders(self):

@@ -31,6 +31,17 @@ MCP 使用系统配置中的 `API_TOKEN` 作为认证密钥，文档中的 API K
 域名放行后仍执行 DNS/私网校验，
 Fake-IP 等非公网解析地址需要通过 `IMAGE_PROXY_ALLOWED_PRIVATE_RANGES` 明确允许。
 
+### 单订阅执行日志（浏览器资源接口）
+
+- `GET /api/v1/subscribe/{subscription_id}/logs`：默认返回 SSE，先读取最近 100 行，随后实时输出；`length=1..600` 调整历史行数，`length=-1` 返回当前文件的原始文本。
+- `GET /api/v1/subscribe/{subscription_id}/logs/download`：下载该订阅当前日志及滚动备份 ZIP。
+- 使用现有资源 Cookie 验证当前有效账号，普通用户仅能查看自己创建的订阅，管理员可查看所有现存订阅。未知或越权 ID 返回 404，接口不接受文件路径。
+- SSE 每 5 秒重新确认账号和订阅归属，每次数据库检查使用独立短会话；账号失效、订阅删除或归属改变后停止输出。首次无日志时保持空流等待，不触发搜索。
+- 日志按订阅 ID 隔离，搜索任务复用 task ID，RSS 按轮次关联；过滤详情与每轮结果摘要可用于解释未完成原因。共享 RSS 抓取日志不归入某一条订阅，任务执行完成不等于订阅完成。
+- 订阅日志独立接收 DEBUG，写入、查看和下载均保留原始日志内容（包括链接及凭据字段），访问仍受订阅归属和管理员权限限制；每轮最多 300 条 DEBUG，每条重复内容最多 3 次，省略数量写入摘要。
+- 每份日志 1 MiB，保留 2 个滚动备份，最多缓存 32 个订阅文件处理器；后续写入时回收空闲 60 秒的句柄。目录总容量以 64 MiB 为清理目标，定期淘汰最旧订阅日志。日志只从升级后的执行开始记录，清理后历史不可回溯。
+- 这些文本、SSE 和 ZIP 接口供前端使用，不属于 JSON envelope 的 Agent/MCP 工具。
+
 ## 2. 标准 MCP 协议 (JSON-RPC 2.0)
 
 ### 端点
@@ -52,6 +63,8 @@ Fake-IP 等非公网解析地址需要通过 `IMAGE_PROXY_ALLOWED_PRIVATE_RANGES
 MCP 当前不会主动发送工具列表变更通知（`listChanged=false`）。如果客户端缓存了工具列表，插件状态变化后需要让客户端重新请求 `tools/list`；无法手动刷新的客户端应重新连接 MCP 服务或新建会话。
 
 `execute_code` 仅在已绑定宿主会话的管理员 Agent 中提供，不发布到外部 HTTP/MCP 工具目录。内部只读 RPC 仍经过同一个 API/Skill/身份边界，默认直接执行，不要求用户逐次确认；外部客户端不能通过直接调用为自己创建 Python 会话身份。持久状态和回收语义见 [Python 只读工具编排](agent.md#python-只读工具编排)。
+
+Python 内核继承宿主部署环境（含数据库配置与连接凭据），移除宿主 `PYTHONPATH` 并固定 UTF-8 输出。配置在内核启动时读取；变更后使用 `reset=true` 重新加载，环境变量不会自动返回给模型。
 
 内置 Agent 通过渠道调用业务 API 时，QQ 的 `qq_userid` / `qq_openid`、飞书的
 `feishu_userid` / `feishu_openid` 都是候选绑定字段，任一字段与当前渠道标识一致即可
@@ -408,10 +421,12 @@ FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返�
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/system/update/status` | 查询聚合状态、实时提醒开关 `auto_update` / `auto_update_resource` 及 `updates` 中两类升级明细的 `idle`、`available`、`downloading`、`ready`、`installing` 或 `failed` 状态，以及版本、字节数和进度 |
-| POST | `/api/v1/system/update/check` | 立即检查最新稳定版 v3 Release 和当前平台站点资源包 |
-| POST | `/api/v1/system/update/download` | 请求体可传 `{"target":"application"}` 或 `{"target":"resources"}`；后台下载并校验对应制品 |
-| POST | `/api/v1/system/update/install` | 请求体可传 `{"target":"application"}` 或 `{"target":"resources"}`；再次校验对应制品，写入安装意图并重启 |
+| POST | `/api/v1/system/update/check` | 分页检查版本号最高的稳定 V3 Release 和当前平台站点资源；存在更高版本时刷新旧待安装目标，失败或无更高版本时保留已下载包 |
+| POST | `/api/v1/system/update/download` | `target` 可为 `application`、`resources` 或 `all`（默认 `application`）；`all` 检查并顺序准备全部最新更新，复用仍有效的已下载包 |
+| POST | `/api/v1/system/update/install` | `target` 可为 `application`、`resources` 或 `all`；`all` 要求全部已发现更新完成下载及校验，原子写入合并安装意图，一次重启应用全部更新 |
 | POST | `/api/v1/system/upgrade` | 保留 Dev 更新并重启，请求体只能为 `"dev"` |
+
+定时检查保留正在下载、已下载待安装及安装中的状态；手动检查只在发现更高版本时替换请求开始时的旧待安装目标，并保留另一类制品。检查请求返回时会再次核对，避免覆盖请求期间发生的状态转换。若旧检查已把资源包状态覆盖为 `available`，状态查询会校验同一目标包版本的完整暂存文件与摘要，恢复 `ready`、完整进度及安装入口，无需重复下载。下载完成后仍需确认重启安装。
 
 #### 媒体识别 / 整理
 
@@ -419,7 +434,11 @@ FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返�
 
 媒体来源列表 `/api/v1/media/source` 仅预置上述九个来源，其余来源由启用插件注册后提供。哔哩哔哩、芒果 TV、咪咕视频、腾讯视频、爱奇艺不再占用内置来源标识，宿主也不再转换这些插件来源的旧别名；调用方应使用插件声明的准确来源 ID。
 
+媒体详情的 `type_name`、新增订阅和媒体库缺失查询的 `type`、手动整理的 `type_name` 均兼容 `movie`、`tv`、`music` 及对应中文值 `电影`、`电视剧`、`音乐`。TMDB 的相似、推荐和演员接口，以及豆瓣的推荐和演员接口同样兼容英文类型，但仍只提供电影和电视剧结果；传入音乐类型返回空列表。
+
 影视自动识别在未指定来源时只使用 TMDB，未命中时不会继续查询其它影视源。音乐路径识别严格按 AcoustID 音频指纹、文件标签、文件名三级依次执行；指纹或标签直接提供 MusicBrainz Recording ID 时，会直接查询 MusicBrainz 详情，未绑定身份的音乐标题及目录识别按 `SEARCH_SOURCE` 中内置音乐来源的配置顺序回退（MusicBrainz、TheAudioDB、豆瓣音乐），未选择音乐来源时兼容默认 MusicBrainz。显式 `media_source` / 主身份或 MusicBrainz 发行标签固定所属来源；来源之间不转换或拼接 ID。`MediaInfo` 响应仍可能包含 `tmdb_id`、`douban_id`、`bangumi_id`、`anilist_id` 等跨源映射辅助字段，但这些字段不是通用请求入口。明确归属 `/tmdb`、`/douban`、`/bangumi`、`/anilist` 的接口，以及固定使用 TMDB 的剧集组和排期接口，仍可按其单数据源契约接收原生 ID。
+
+整理目录的 `notify` 保持布尔类型；成功通知聚合统一由全局开关控制。开启 `TRANSFER_SUCCESS_NOTIFICATION_AGGREGATION`，明确批次完成后一次发送，外部无批次任务使用三十秒静默窗口。详见 [整理成功通知粒度](transfer-notifications.md)。
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
@@ -434,6 +453,11 @@ FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返�
 | GET | `/api/v1/transfer/tasks/manual-reviews` | 管理员分页查询 durable 人工复核任务；`state` 仅允许 `manual_review`（默认）或已经人工判定、等待调度恢复的 `retry_wait`，支持 `page` 与 `page_size`。响应只公开任务、源文件、状态、步骤意图/证据/错误和复核修订号，不返回 lease 或 attempt 身份 |
 | GET | `/api/v1/transfer/tasks/{task_id}/manual-review` | 管理员查询单个 durable 人工复核任务详情；仅可读取 `manual_review` 或已经人工判定的 `retry_wait` 任务，其余状态按不存在处理 |
 | POST | `/api/v1/transfer/tasks/{task_id}/manual-review` | 管理员判定处于 `manual_review` 的 durable 整理步骤；请求包含 `operation_id`、`decision=not_applied|applied`，`reason` 选填，省略或空白时记为空字符串，最多 2000 字符；`applied` 还必须提供 `result_payload`。`failed` 不属于公开决策，失败终态只能由持租约的 durable 结算写入；响应仅返回任务、操作、决策、后续状态和复核修订号 |
+
+步骤账本之外的未处理异常（例如插件替换整理入口后在 `finally` 抛错）会记一次失败，
+并立即进入 `manual_review` 停止自动回放。详情中的 `unhandled_execution_review` 是诊断凭据，
+不代表某个文件操作已执行；应先修复或关闭异常插件并确认文件状态，必要时人工回滚，
+再以 `not_applied` 交回调度器。该凭据不接受 `applied`，既有真实步骤仍按原证据恢复。
 
 #### SMB 下载器监控与服务端整理
 
@@ -602,6 +626,16 @@ MusicBrainz 从实际 Recording/Work 关系补充角色，不凭作品名推断�
 额外返回待确认资源及关联专辑：`match_status=candidate`、`match_reason` 描述原因，
 且 `media_info` 为空、不绑定目标 ID；精确结果为 `match_status=exact`。自动订阅和批量下载
 不采用待确认项。单曲的关联专辑不代表已经确认包含该单曲；专辑资源可以先下载，订阅会累计其中可识别的独立曲目并在全部曲目收齐后完成。
+
+普通专辑订阅在搜索前会对账该订阅媒体身份下下载历史关联的本地成功整理文件。
+曲目合并接受同发行组，缺少组身份时须同时核验专辑名和艺人；明确冲突的发行组或专辑名
+不会被同名降级覆盖；两个明确不同发行版的数值曲序也不直接拼接，须等待完整入库对账。
+拒绝合并会记录订阅/资源身份和被丢弃的曲目键数量。
+当标签或有效 CUE 能证明某个实际发行版所有盘的曲序完整覆盖时，按该版逻辑曲目数修正
+完成上界；不同发行版不会拼接覆盖。缺曲、缺盘、缺少总数、无真实标签、已删除文件和
+远端存储的历史记录不足以触发这一对账完成。洗版仍按本轮音质升级规则处理。
+音乐订阅提交下载前还会按实际种子 hash 核验该媒体身份的全部音频成功整理记录及仍存在的本地目标，
+已完整整理的资源不重复调用下载器、写历史或发送下载通知；人工下载和部分/失败整理仍可重试。
 SSE 的 `candidate_items` 是站点原始返回数量，`match_counts` 记录身份、分类及规则淘汰原因。
 只有完整过滤后还有精确结果时才会按多名称设置提前停止；音乐元数据多来源结果先各自去重再公平合并。
 
@@ -629,8 +663,10 @@ SSE 的 `candidate_items` 是站点原始返回数量，`match_counts` 记录身
 `remote` 或 `manual` 等来源，缺失表示来源未记录；该说明不等于远端身份已验证，也不用于绕过整理准入。
 
 `MUSIC_CUE_ENABLE` 默认开启，可在“设置 → 系统 → 高级设置 → 媒体 → 音乐 CUE 识别”关闭。
-已分轨专辑附带错误 CUE 时，关闭后重新预览或重新提交整理，系统只按音频标签和文件名识别，
-不读取、校验或自动归档 CUE。全局开关作为自动整理与手动整理的默认值。
+已分轨专辑附带结构损坏的 CUE 时，只要 CUE 为目录中多个真实音频分别建立了单轨 `FILE` 块，
+系统自动按该文件的标签和文件名识别，无需关闭开关；整轨镜像仍需要关闭开关后重新预览或
+重新提交整理，才能只按音频标签和文件名识别。两种情况下系统都不读取、校验或自动归档损坏 CUE。
+全局开关作为自动整理与手动整理的默认值。
 手动整理弹窗提供“本次识别 CUE”，默认采用系统设置，可直接覆盖本次预览、立即整理和队列整理，
 不修改全局设置。`POST /api/v1/transfer/manual` 接受 `music_cue_enable: boolean | null`，
 省略或 `null` 继承全局值；`false` 忽略 CUE，`true` 启用 CUE。
@@ -642,8 +678,10 @@ SSE 的 `candidate_items` 是站点原始返回数量，`match_counts` 记录身
 一个音频文件包含多个逻辑音轨，`music_type=album`，不使用开头的 Recording 指纹替代整张专辑。
 整轨归档会保留音频及 `cue_filename` 的原名，只规范专辑目录，避免破坏 `FILE` 引用；不自动切轨。
 `cue_tracks` 保留逻辑曲目及每秒 75 帧的索引。`tracks_cue` 的分轨索引仅辅助元数据，
-原 CUE 不随改名自动复制。绝对/跨目录引用、冲突索引、超出音频时长等问题通过
-`organization_error` 返回，并在实际文件操作前阻止整理；原始文件内容不被修改。
+原 CUE 不随改名自动复制。绝对/跨目录引用、整轨的冲突索引、超出音频时长等问题通过
+`organization_error` 返回，并在实际文件操作前阻止整理；索引损坏但 CUE 已把目录中多个
+真实音频分别声明为单轨 `FILE` 时，曲目边界来自文件本身，按该文件标签继续整理并保留日志。
+原始文件内容不被修改。
 
 音乐刮削补写标签或内嵌封面时，如果本地目标是硬链接或软链接，会先写入独立副本，
 全部成功后原子替换目标；源文件字节与权限保持不变。实际发生写入后，目标成为普通文件，
@@ -719,9 +757,16 @@ AMLL 使用无需鉴权的原生搜索与获取接口，先尝试 ISRC，再核�
 
 插件可通过 `get_module()` 注册 `music_lyrics_candidates(music)`，负责匹配并下载歌词内容，返回 `list[MusicLyrics]` 参与宿主择优；`MetaMusic`、`MusicInfo` 和 `MusicLyrics` 均可从 `app.sdk.media` 导入。该接口不需要注册 HTTP 路由，歌词文件仍由刮削链统一写入。完整契约和示例见[歌词插件开发说明](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/faq/21-register-lyrics-provider.md)。
 
+`MUSIC_LYRICS_TO_SIMPLIFIED` 默认关闭，独立于音乐元数据转简体设置。开启后，统一写入流程将本地或远端 `.lrc` / `.txt` 的正文转换为简体，保留时间轴、LRC 标签、候选对象和来源 Lyricsfile；AMLL TTML 派生的 LRC 同样适用。已有歌词继续遵循质量升级和覆盖策略，需转换时选择“总是刮削”重新刮削。
+
 音乐订阅可使用 `audio_quality=hires|lossless|lossy`（支持正则组合）、`audio_format`、`min_bitrate`、`min_bit_depth`、`min_sample_rate` 过滤资源。`best_version=1` 开启音质洗版，系统按格式、无损属性、位深、采样率和码率换算 0-100 优先级，只下载高于 `current_priority` 的候选；DSD 或 24-bit/192 kHz 无损资源达到终态 100。内置规则 `HIRES`、`LOSSLESS`、`FLAC`、`ALAC`、`APE`、`WAV`、`DSD`、`MP3`、`AAC`、`OPUS`、`BITRATE320`、`BITRATE256`、`BITRATE192` 可用于自定义过滤规则组。
 
 #### 下载
+
+提交种子时应保留搜索结果的站点 ID、下载地址及其他资源字段。普通 HTTP(S) 种子下载省略或传空
+`site_cookie` 时，后端优先按 `site` 查询配置；未提供 `site` 时，仅使用与下载地址同来源的唯一站点配置。
+下载地址与配置站点的协议、主机和端口必须一致，才补齐 Cookie 及缺失的 `site_ua`；显式凭据和代理选择保持原样。
+未匹配配置、配置有歧义或站点没有 Cookie 时沿用原有下载行为。磁力链和两段式换票下载保持原有凭据规则。
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
@@ -801,6 +846,8 @@ TMDB 缓存查询响应的 `data` 包含 `count`、`recognized`、`unrecognized`
 | `subscription.execution.cancel` | PUT | `/api/v1/subscribe/execution/batches/{batch_id}/cancel` | 在下载副作用边界前请求取消一个批次 |
 
 取消是幂等的状态请求，不会撤销已经提交到下载器的任务；批次详情中的状态和任务结果才是最终事实。
+将订阅状态设为 `S` 会阻止已入队的新订阅、定时及站点恢复自动搜索，并在自动下载提交前生效。
+手动或指定订阅补搜仍可对暂停订阅执行一次，需要停止该补搜时使用批次取消接口。
 
 ### 跨来源订阅回显
 
@@ -957,6 +1004,24 @@ API KEY 集成签发短期本机令牌，并按 operation 执行权限、确认�
 网关按后端监听配置 `HOST` / `PORT` 通过 HTTP 直连本机 API，并绕过环境代理。
 `0.0.0.0` / `::` 通配监听分别使用 `127.0.0.1` / `::1` 回环地址，显式 IPv6 地址按 URL 规范加方括号。
 `APP_DOMAIN` 用于 Passkey 等对外地址，不作为网关基址；反代域名在容器内不可达时无需清空该配置。
+每个 Agent operation 声明 `identity_scope`，完整 231 项清单见
+[Agent API 身份审查表](refactor/agent-api-surface-audit.md#gateway-identity-audit)：
+
+- `public`：已审计的公共影视搜索、人物作品、影片详情、季/集信息、音乐元数据及关联浏览、榜单、社区订阅分享/热门/统计和全站插件安装统计，无需绑定渠道用户。
+- `bound_user`：个人数据、实例信息和普通用户写操作，必须解析真实有效用户；仍由具体端点执行归属及管理权限校验。渠道只接受稳定发送者 ID 的唯一有效绑定，昵称不作为认证依据；Web 使用当前持久化用户 ID，旧会话用户名不能切换到其他账号。
+- `admin`：保留已有管理员授权及经验证的渠道/API 管理员集成语义。插件评分含当前安装实例的评分，查询和提交均与 REST 的超级管理员要求对齐。
+
+公共查询由宿主完成本机 API 认证，执行器只能调用声明为 `public` 的固定操作；
+不会开放匿名 REST 访问，也不会将该身份复用于个人数据或写入。
+`safe_read` 不等于公共数据：片名识别的 Context 可包含本地应用的识别词，文件识别、
+媒体源启用情况、搜索结果、媒体库、存储、规则和普通用户可见配置继续要求用户身份。
+
+需要绑定的渠道操作失败时，网关会返回当前发送者 ID 及对应前端字段：登录要使用的
+MoviePilot 账号，进入右上角头像 → 个人信息 → 账号绑定，填写对应渠道字段后保存。
+不要填写昵称、群 ID 或机器人 ID。仓储未找到唯一启用用户时，仅提示未绑定、停用或
+重复绑定的可能性，不臆断具体原因；管理员需检查用户状态及重复绑定。Web 账号失效则
+提示重新登录，不要求绑定通知渠道。Agent 应转述网关的实际操作提示。
+
 通知渠道的 `subscription.add`、`subscription.update`、`subscription.delete` 使用渠道账号绑定的
 有效 MoviePilot 用户身份，渠道管理员也不会借用超级管理员身份。创建时订阅归属绑定用户，
 普通用户只能修改或删除自己的订阅；未绑定或绑定用户已停用时拒绝执行。三项操作仍保留确认机制。
@@ -1174,4 +1239,4 @@ description、aliases、instructions，或通过 `append_instructions` 追加规
 
 ## Web 手动分页
 
-`/api/v1/search/title/stream` 与 `/api/v1/search/media/{media_id}/stream` 新增可选参数 `manual_paging`、`page`、`source`。`manual_paging=true` 时每个来源只返回指定的一页，`replace`/`done` 事件附带各来源的 `source`、`site_name`、`page`、`can_continue`、`error`。不传该参数时行为不变，Agent `search.*` operation 不受影响。完整规则及订阅补全搜索策略 `SubscribeSearchStrategy` 见 [订阅补全搜索与手动分页](smart-search.md)。
+`/api/v1/search/title/stream` 与 `/api/v1/search/media/{media_id}/stream` 新增可选参数 `manual_paging`、`page`、`source`。`manual_paging=true` 时每个来源只返回指定的一页，不同站点按既有并发数请求，并在来源完成后发送 `append` 预览；最终统一过滤后的 `replace`/`done` 事件附带各来源的 `source`、`site_name`、`page`、`can_continue`、`error`，预览不推进页号。不传该参数时行为不变，Agent `search.*` operation 不受影响。完整规则及订阅补全搜索策略 `SubscribeSearchStrategy` 见 [订阅补全搜索与手动分页](smart-search.md)。

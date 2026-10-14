@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 import re
 from typing import Optional
+from urllib.parse import urlsplit
 
 from lxml import etree
 
-from app.modules.indexer.parser import SiteParserBase, SiteSchema
 from app.foundation import size as size_tools
 from app.foundation import temporal as time_tools
 from app.foundation import text as text_tools
 from app.foundation.dom import DomUtils
+from app.modules.indexer.parser import SiteParserBase, SiteSchema
 
 
 class Unit3dSiteUserInfo(SiteParserBase):
@@ -31,6 +32,10 @@ class Unit3dSiteUserInfo(SiteParserBase):
                     self._user_detail_page = f"/users/{self.username}"
 
             tmps = html.xpath('//a[contains(@href, "bonus/earnings")]')
+            if not tmps and self.username:
+                tmps = html.xpath('//a[contains(@href, "/users/") and contains(@href, "/bonus/")]')
+                tmps = [link for link in tmps
+                        if urlsplit(link.get("href")).path.startswith(f"/users/{self.username}/bonus/")]
             if tmps:
                 bonus_text = tmps[0].xpath("string(.)")
                 bonus_match = re.search(r"([\d,.]+)", bonus_text)

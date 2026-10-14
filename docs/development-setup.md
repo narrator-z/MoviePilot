@@ -151,6 +151,13 @@ dependencies = ["example-package>=1,<2"]
 - 仅有 `requirements.txt` 的历史插件继续按原方式安装；
 - 宿主不消费插件自己的 `uv.lock`，因为多个插件共享同一主程序环境，不能分别同步独立锁文件。
 
+启动恢复依赖时，只收集已安装且存在启用本体或分身的插件清单；全部实例都停用的插件
+不会参与依赖解析，也不会提供本地 wheels。先尝试统一安装，失败后逐个恢复插件，并在
+后续请求中保留已就绪和已恢复插件的原始清单约束，避免互斥版本轮流覆盖共享环境。
+仍不可满足的插件保持 `dependency_pending`，其它就绪插件继续激活。两个互斥版本无法
+在同一环境中同时满足，应停用所有冲突实例、卸载冲突插件或由插件作者统一依赖版本。
+安装结束后宿主重新分类并激活就绪插件；容器外手工修改依赖后，需重载插件或重启以更新运行状态。
+
 ### 3.2 异步 HTTP 客户端边界
 
 主程序自建的 `AsyncRequestUtils` 使用 HTTPX2，`app.sdk.network.AsyncRequestUtils` 与旧插件
@@ -226,6 +233,8 @@ Docker 镜像直接基于官方基础镜像构建，只安装应用运行所需�
 主仓架构检查不依赖独立插件仓；官方插件兼容观察通过每周或手工工作流单独运行，仅上传语义差异
 报告，不自动更新基线。普通主仓改动不要求额外检出插件仓或运行观察任务。宿主架构门禁和 changed-file
 Pylint 由 `v3` PR/push 的 GitHub Actions 执行，`app/` 全量 Pylint 是建议性报告。
+
+站点采集器源码与构建工作流位于 [MoviePilot-Site-Collector](https://github.com/jxxghp/MoviePilot-Site-Collector)，使用独立的 `site-adapter-collector-v1.0.x` Release，仅在采集器发布输入变化时递增版本并构建，不跟随后端 Release。下载入口为 [采集器独立 Release](https://github.com/jxxghp/MoviePilot-Site-Collector/releases/latest)，自动版本和手动测试构建规则见 [采集器发布说明](https://github.com/jxxghp/MoviePilot-Site-Collector/blob/main/docs/site-adapter-collector-release.md#维护者发布流程)。
 
 Ruff/Mypy 基线只允许收紧，不接受新增诊断或类型错误增长；受治零错误文件由 `mypy.ini` 的
 `files=` 维护。Mypy 完整 ratchet 固定按 Linux/Python 3.14 分析。Coverage job 在 `v3` PR/push

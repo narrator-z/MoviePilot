@@ -44,8 +44,9 @@ class TransferPending(Base):
     蒸发。而已经稳定落地的文件不会再产生任何监控事件，也不会有新的补偿扫描起点
     ——结果就是永久漏件，只能靠人工比对补整理。
 
-    准入时保存版本化规划输入和指纹；纯规划完成后以同一行原子保存完整有序计划并
-    推进到 planned。重启恢复可直接消费已规划路径，避免再次触发 rename 等插件事件。
+    准入时保存版本化规划输入和指纹；provider 调用快照与宿主文件计划分别原子推进到
+    provider_pending、planned，并记录本阶段的计划冻结时间。重启恢复直接消费检查点，
+    避免再次触发 rename 等插件事件。
     所有执行期 mutation 都以稳定任务身份和租约 token 进行 CAS fencing。
     """
 
@@ -1080,7 +1081,10 @@ class TransferPending(Base):
                         lease_token: str, now_time: str,
                         updated_at: str) -> int:
         """
-        以输入指纹为 CAS 条件原子保存计划并推进到已规划。
+        以输入指纹为 CAS 条件原子保存检查点并推进到本阶段可执行状态。
+
+        provider 调用快照也属于冻结计划，必须同事务写入 planned_at 才能准备执行；
+        后续回退到宿主计划时，以新的检查点提交时间刷新该字段。
         :param db: 数据库会话
         :param task_id: 稳定任务标识
         :param input_fingerprint: 规划输入规范 JSON 指纹
@@ -1110,7 +1114,7 @@ class TransferPending(Base):
             "last_error": None,
             "updated_at": updated_at,
         }
-        if target_state == "planned":
+        if target_state in ("planned", "provider_pending"):
             values["planned_at"] = updated_at
         return execute_dml(
             db,
@@ -1124,6 +1128,37 @@ class TransferPending(Base):
                 cls.lease_expires_at > now_time,
             )
             .values(**values),
+            execution_options={"synchronize_session": False},
+        )
+
+    @classmethod
+    def isolate_unhandled_failure(
+            cls, db: Session, *, task_id: str, lease_token: str,
+            error: str, now_utc: str, updated_at: str,
+    ) -> int:
+        """以当前租约收口未记账异常；已释放租约的重试和复核不得重复计数。"""
+        return execute_dml(
+            db,
+            update(cls).where(
+                cls.task_id == task_id,
+                cls.state.in_(("accepted", "planned", "provider_pending")),
+                cls.execution_state.in_(("not_started", "running", "retry_wait")),
+                cls.execution_payload.is_(None),
+                cls.terminal_history_id.is_(None),
+                cls.lease_token == lease_token,
+                cls.lease_expires_at.is_not(None),
+                cls.lease_expires_at > now_utc,
+            ).values(
+                execution_state="manual_review",
+                retry_count=cls.retry_count + 1,
+                retry_due_at=None,
+                lease_owner=None,
+                lease_token=None,
+                lease_expires_at=None,
+                heartbeat_at=None,
+                last_error=error,
+                updated_at=updated_at,
+            ),
             execution_options={"synchronize_session": False},
         )
 

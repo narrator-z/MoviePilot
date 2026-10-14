@@ -8,19 +8,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.foundation.singleton import Singleton
-from app.runtime.loop import main_loop_registry
+from app.runtime.extensions.plugin import manager as plugin_manager_module
+from app.runtime.extensions.plugin.admission import PluginMutationAdmission
 from app.runtime.extensions.plugin.dependency import (
     PluginDependencyClassification,
     PluginDependencyInstallResult,
 )
+from app.runtime.extensions.plugin.manager import PluginManager
 from app.runtime.extensions.plugin.monitor import (
     PluginChangeMonitor,
     PluginMonitorController,
 )
-from app.runtime.extensions.plugin.admission import PluginMutationAdmission
 from app.runtime.extensions.plugin.system import reset_plugin_system
-from app.runtime.extensions.plugin import manager as plugin_manager_module
-from app.runtime.extensions.plugin.manager import PluginManager
+from app.runtime.loop import main_loop_registry
 from app.schemas.plugin import PluginRuntimeStatus
 from app.startup.initializers import plugins as plugins_initializer
 
@@ -405,6 +405,66 @@ async def test_sync_plugins_reloads_only_updated_running_plugins(monkeypatch) ->
     manager.reload_plugin.assert_called_once_with("UpdatedPlugin")
     manager.start.assert_not_called()
     register.assert_called_once_with("UpdatedPlugin")
+
+
+@pytest.mark.asyncio
+async def test_sync_plugins_reloads_running_plugin_after_sync_failure(
+    monkeypatch,
+) -> None:
+    """回滚后仍运行的插件需重新确认运行态，并继续激活其他就绪插件。"""
+    manager = MagicMock()
+    manager.sync.return_value = []
+    manager.async_install_plugin_missing_dependencies_with_status.return_value = (
+        PluginDependencyInstallResult(missing=[], success=True)
+    )
+    manager.classify_plugins.return_value = PluginDependencyClassification(
+        ready=("RecoveredPlugin", "OtherPlugin"),
+        missing_dependencies=(),
+        missing_source=(),
+    )
+    manager.running_plugins = {"RecoveredPlugin": object()}
+    register = _patch_sync_plugins(monkeypatch, manager)
+    manager.get_plugin_runtime_statuses.return_value = {
+        "RecoveredPlugin": PluginRuntimeStatus.SYNC_FAILED,
+    }
+
+    assert await plugins_initializer.sync_plugins() is True
+
+    manager.reload_plugin.assert_called_once_with("RecoveredPlugin")
+    manager.start.assert_called_once_with("OtherPlugin")
+    assert [call.args[0] for call in register.call_args_list] == [
+        "RecoveredPlugin",
+        "OtherPlugin",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_plugins_continues_startup_when_failed_plugin_is_not_ready(
+    monkeypatch,
+) -> None:
+    """不可恢复的单插件失败仍让启动继续完成依赖与服务初始化。"""
+    manager = MagicMock()
+    manager.sync.return_value = []
+    manager.async_install_plugin_missing_dependencies_with_status.return_value = (
+        PluginDependencyInstallResult(missing=[], success=True)
+    )
+    manager.classify_plugins.return_value = PluginDependencyClassification(
+        ready=(),
+        missing_dependencies=(),
+        missing_source=("FailedPlugin",),
+    )
+    manager.running_plugins = {}
+    register = _patch_sync_plugins(monkeypatch, manager)
+    manager.get_plugin_runtime_statuses.return_value = {
+        "FailedPlugin": PluginRuntimeStatus.SYNC_FAILED,
+    }
+
+    assert await plugins_initializer.sync_plugins() is True
+
+    manager.async_install_plugin_missing_dependencies_with_status.assert_awaited_once()
+    manager.start.assert_not_called()
+    manager.reload_plugin.assert_not_called()
+    register.assert_not_called()
 
 
 @pytest.mark.asyncio

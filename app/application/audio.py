@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from stat import S_IWUSR
+from stat import S_IRUSR, S_IWUSR
 from tempfile import NamedTemporaryFile
 from threading import RLock
 from typing import Any, Iterator, Optional, Union
@@ -119,6 +119,7 @@ def _audio_write_target(path: Path) -> Iterator[Path]:
 
     不解析并改写符号链接指向的源文件。临时文件与目标同目录，以便原子替换；
     任一写入失败或期间目标发生变化时保留原链接，并清理未提交副本。
+    独立副本至少保留所有者读写权限，避免 NAS ACL 挂载映射的 mode 产生不可读文件。
     """
     stat = path.stat()
     link_inode = path.lstat().st_ino
@@ -130,8 +131,8 @@ def _audio_write_target(path: Path) -> Iterator[Path]:
         temporary = Path(stream.name)
     try:
         shutil.copy2(path, temporary)
-        # 做种源可以只读；只给独立副本增加写权限，源权限保持不变。
-        temporary.chmod(stat.st_mode | S_IWUSR)
+        # NAS ACL 挂载可将可读源文件映射为 000；只给独立副本补齐读写权限，源权限保持不变。
+        temporary.chmod(stat.st_mode | S_IRUSR | S_IWUSR)
         initial_copy = _audio_signature(temporary)
         yield temporary
         if _audio_signature(temporary) == initial_copy:
@@ -213,6 +214,39 @@ def _cue_references_existing_audio(path: Path, names: Any) -> bool:
     return False
 
 
+def _cue_split_audio_files(path: Path, text: str) -> list[str]:
+    """列出 CUE 中只声明单条音轨、且文件确实存在于同目录的 FILE 引用名。
+
+    FILE 块只有一条音轨说明该文件本身就是一整支曲目，曲目边界来自文件本身；块内
+    有两条以上音轨说明该文件是整轨镜像，索引才是唯一的曲目来源。跨目录引用无法
+    核对目录归属，保守返回空列表交由阻断处理。
+    """
+    singles: list[str] = []
+    current: Optional[str] = None
+    tracks = 0
+    for line in text.splitlines():
+        reference = re.match(r'\s*FILE\s+(?:"([^"\r\n]+)"|(\S+))', line, re.IGNORECASE)
+        if reference:
+            if current is not None and tracks == 1:
+                singles.append(current)
+            current = reference.group(1) or reference.group(2)
+            tracks = 0
+            continue
+        if current is not None and re.match(r"\s*TRACK\s+\d{1,3}\s+AUDIO", line, re.IGNORECASE):
+            tracks += 1
+    if current is not None and tracks == 1:
+        singles.append(current)
+    names: list[str] = []
+    for name in singles:
+        try:
+            resolved = _cue_reference_name(name)
+        except ValueError:
+            return []
+        if resolved not in names and (path.parent / resolved).is_file():
+            names.append(resolved)
+    return names
+
+
 def _cue_candidates(path: Path) -> list[Path]:
     """只扫描音频同目录的有限 CUE，不遍历全集或其它目录。"""
     candidates = []
@@ -233,7 +267,7 @@ def _cue_reference_name(name: str) -> str:
 
 
 def _find_audio_cue(path: Path) -> Optional[tuple[Path, MusicCueSheet]]:
-    """以 FILE 引用定位关联 CUE，冲突或同名损坏索引不能退回首曲指纹识别。"""
+    """以 FILE 引用定位关联 CUE，冲突或整轨损坏索引不能退回首曲指纹识别。"""
     matches: list[tuple[Path, MusicCueSheet]] = []
     for candidate in _cue_candidates(path):
         try:
@@ -245,6 +279,10 @@ def _find_audio_cue(path: Path) -> Optional[tuple[Path, MusicCueSheet]]:
         try:
             sheet = parse_music_cue(text)
         except ValueError as error:
+            split_files = _cue_split_audio_files(path, text)
+            if len(split_files) > 1 and path.name in split_files:
+                logger.info(f"CUE 索引结构损坏但专辑为物理分轨，按各文件自带标签整理：{candidate}")
+                continue
             mentions = candidate.stem.casefold() == path.stem.casefold() or _cue_mentions_audio(text, path)
             if mentions and _cue_references_existing_audio(path, _cue_file_references(text)):
                 raise ValueError(f"关联 CUE 无法解析：{candidate.name} - {error}") from error

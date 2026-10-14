@@ -577,6 +577,69 @@ def test_download_single_supplements_category_before_download_event(monkeypatch)
     assert context.media_info.tmdb_id == 12345
 
 
+@pytest.mark.parametrize("save_path", ["", "   "])
+def test_resource_download_event_treats_blank_save_path_as_default(monkeypatch, save_path):
+    """旧订阅持久化的空白保存目录表示使用默认目录，不能被路径校验拒绝。"""
+    captured = {}
+
+    def keep_event(_event_type, event_data):
+        """记录事件订阅方看到的保存目录。"""
+        captured["save_path"] = event_data.options["save_path"]
+        return SimpleNamespace(event_data=event_data)
+
+    monkeypatch.setattr(eventmanager, "send_event", keep_event)
+    context = Context(
+        meta_info=MetaInfo("测试剧集 S01E01"),
+        media_info=MediaInfo(type=MediaType.TV, title="测试剧集"),
+        torrent_info=TorrentInfo(title="测试剧集 S01E01"),
+    )
+
+    result = DownloadChain._apply_resource_download_event(
+        context, None, None, "Subscribe|{}", None, save_path, None, None,
+    )
+
+    assert result == (None, None)
+    assert captured["save_path"] is None
+
+
+def test_resource_download_event_treats_blank_override_as_default(monkeypatch):
+    """事件把保存目录改成空白时同样回到默认目录。"""
+
+    def blank_override(_event_type, event_data):
+        """模拟插件清空保存目录。"""
+        event_data.options["save_path"] = " "
+        return SimpleNamespace(event_data=event_data)
+
+    monkeypatch.setattr(eventmanager, "send_event", blank_override)
+    context = Context(
+        meta_info=MetaInfo("测试剧集 S01E01"),
+        media_info=MediaInfo(type=MediaType.TV, title="测试剧集"),
+        torrent_info=TorrentInfo(title="测试剧集 S01E01"),
+    )
+
+    result = DownloadChain._apply_resource_download_event(
+        context, None, None, None, None, "/downloads/tv", None, None,
+    )
+
+    assert result == (None, None)
+
+
+def test_resource_download_event_still_rejects_invalid_save_path(monkeypatch):
+    """非空白的非法保存目录仍按白名单拒绝。"""
+    monkeypatch.setattr(eventmanager, "send_event", lambda *_args: None)
+    context = Context(
+        meta_info=MetaInfo("测试剧集 S01E01"),
+        media_info=MediaInfo(type=MediaType.TV, title="测试剧集"),
+        torrent_info=TorrentInfo(title="测试剧集 S01E01"),
+    )
+
+    result = DownloadChain._apply_resource_download_event(
+        context, None, None, None, None, "relative/path", None, None,
+    )
+
+    assert result == ("relative/path", "保存路径必须是绝对路径")
+
+
 def test_download_single_persists_custom_words_snapshot(monkeypatch):
     """下载成功登记历史时，应把传入的订阅识别词原样存入快照，供整理时原样复现识别。"""
     captured = {}
@@ -1446,9 +1509,9 @@ def test_batch_download_rejects_complete_coverage_when_files_have_same_count_but
 
 def test_batch_download_accepts_complete_coverage_when_title_episodes_cover_target(monkeypatch):
     """
-    显式标出完整范围的候选也可满足完整覆盖任务。
+    显式标出完整范围的候选也可满足完整覆盖任务，并在整季阶段核对种子文件后复用内容提交。
     """
-    _FakeBatchTorrentHelper.episodes = []
+    _FakeBatchTorrentHelper.episodes = list(range(1, 144))
     monkeypatch.setattr(download_batch, "TorrentHelper", _FakeBatchTorrentHelper)
     monkeypatch.setattr(download_selection, "TorrentHelper", _FakeBatchTorrentHelper)
     monkeypatch.setattr(eventmanager, "send_event", lambda *args, **kwargs: None)
@@ -1456,7 +1519,7 @@ def test_batch_download_accepts_complete_coverage_when_title_episodes_cover_targ
     chain = DownloadChain.__new__(DownloadChain)
     chain.eventmanager = MagicMock()
     chain.eventmanager.send_event.return_value = None
-    chain.download_torrent = MagicMock()
+    chain.download_torrent = MagicMock(return_value=(b"torrent", None, ["files"]))
     chain.download_single = MagicMock(return_value="hash")
 
     context = _build_tv_context(episode_list=list(range(1, 144)))
@@ -1476,8 +1539,9 @@ def test_batch_download_accepts_complete_coverage_when_title_episodes_cover_targ
     assert downloads == [context]
     assert lefts == {}
     assert context.confirmed_full_coverage is True
-    chain.download_torrent.assert_not_called()
+    chain.download_torrent.assert_called_once()
     chain.download_single.assert_called_once()
+    assert chain.download_single.call_args.kwargs["torrent_content"] == b"torrent"
 
 
 def test_batch_download_rejects_complete_coverage_when_title_episodes_are_partial(monkeypatch):

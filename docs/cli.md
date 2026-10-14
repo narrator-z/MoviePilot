@@ -432,6 +432,7 @@ moviepilot version
 - `start --safe` 会以安全模式启动后端，本次启动跳过插件、调度器、监控、命令和工作流等后台扩展能力，不修改用户配置
 - `MOVIEPILOT_AUTO_UPDATE` 为布尔开关，默认 `false`；只有 `true` 启用后台 Release 检查和版本提醒，保存后定时服务热更新。`AUTO_UPDATE_RESOURCE` 独立控制站点资源检查和提醒；任一开关开启即启用检测服务，且只检查对应目标，两者均关闭才移除服务。`MOVIEPILOT_UPDATE_DEV` 为独立布尔开关，默认 `false`；设为 `true` 时手动 `moviepilot update` 默认使用 DEV 更新模式。旧 `dev/release` 值统一转换为 `MOVIEPILOT_AUTO_UPDATE=true`；旧 `dev` 在未显式配置新开关时迁移为 `MOVIEPILOT_UPDATE_DEV=true`
 - Release 更新由后台每 6 小时检查 GitHub Release；管理员确认后先静默下载安装包并显示进度，下载完成后再次确认重启，通过专门的内部更新入口安装已下载且通过 SHA-256 校验的包后再启动服务
+- Web 更新提示支持“全部下载 / 一次重启安装”：一起准备主程序、后端声明的配套前端和最新站点资源，全部就绪后只重启一次，也保留单独更新入口。手动“检查最新版本”可将旧待安装目标替换为更高版本；定时检查、检查失败及无更高版本时仍保留已下载包，下载和安装中不会更换目标。正式 V3 更新按版本号选择最高版本，支持跨多个 V3 小版本直接安装完整包；V2 到 V3 不属于此流程。站点原生扩展随重启加载，普通启动/重启不会检查或下载更新。
 - 页面中的“稍后”会在当前浏览器暂停提醒 24 小时，“忽略此版本”只屏蔽当前版本；出现更高版本时会重新提示
 - 通过系统内置的重启入口触发重启时，本地 CLI 安装模式也会复用同一套前后端进程管理完成重启
 - 前端默认监听 `NGINX_PORT`，默认值 `3000`
@@ -505,6 +506,7 @@ moviepilot config set AMLL_BASE_URL https://api.amll.dev
 moviepilot config set LYRICS_BATCH_TIMEOUT 120
 moviepilot config set LYRICS_PROVIDER_RETRY_MAX_WAIT 5
 moviepilot config set MUSIC_METADATA_TO_SIMPLIFIED true
+moviepilot config set MUSIC_LYRICS_TO_SIMPLIFIED true
 moviepilot config set MUSIC_RELEASE_REGION_PRIORITY CN,TW,HK
 moviepilot config set MUSIC_RELEASE_SCRIPT_PRIORITY Hans,Hant,Latn
 ```
@@ -529,6 +531,7 @@ moviepilot config describe API_TOKEN --show-secrets
 - `AMLL_BASE_URL` 默认使用无需 API Key 的 AMLL TTML API，也可指向兼容原生接口的自建实例。来源优先按 ISRC 查询，再严格核对歌曲、艺术家及已有专辑信息；下载的 TTML 主唱时间轴转换为 Lyricsfile 和 LRC，限流时短暂冷却并让其他歌词来源继续处理
 - `THEAUDIODB_API_KEY` 用于音乐元数据及纯文本歌词兜底，默认 `123` 为官方公开 V1 Key；额外歌词来源可通过插件提供，接入方式见[歌词插件开发说明](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/faq/21-register-lyrics-provider.md)
 - `MUSIC_METADATA_TO_SIMPLIFIED` 默认开启；开启后会将识别结果中的曲名、艺术家、专辑和分类等标准音乐元数据转换为简体中文，不转换歌词与来源原始响应
+- `MUSIC_LYRICS_TO_SIMPLIFIED` 默认关闭，独立控制生成的 `.lrc` / `.txt` 歌词正文转简体；时间轴、LRC 标签及来源 Lyricsfile 保持原样。已有歌词仍遵循原刮削策略，需要转换时选择“总是刮削”重新刮削
 - `MUSIC_RELEASE_REGION_PRIORITY` 与 `MUSIC_RELEASE_SCRIPT_PRIORITY` 分别使用逗号分隔的 ISO 3166-1 地区代码和 ISO 15924 文字代码；仅在 MusicBrainz 候选结构同样可信时作为发行版本排序依据，最多使用前三项
 - `config describe` 显示单个配置项的类型、默认值和当前值
 
@@ -600,6 +603,9 @@ moviepilot tool run moviepilot_api operation_id=media.search 'query={"title":"�
 - `tool list` 用于动态发现当前服务可调用的工具
 - `tool show` 会输出参数名、类型和描述
 - `tool run` 参数格式固定为 `key=value`；对象、数组、布尔值和 `null` 使用合法 JSON
+- 工具命令自动解析本地 REST API 的 `success/message/data` 响应信封；`tool run` 输出
+  `data.result` 中的 JSON 或普通文本，返回内容为空时显示成功提示。
+- REST 请求失败时显示服务端错误原因并返回非零退出码，不输出整个工具目录响应。
 - MoviePilot 业务能力统一通过 `moviepilot_api` 的固定 `operation_id` 调用；不接受任意 URL、method、认证头或 Token，也不兼容旧业务工具名
 - 涉及精确媒体身份的 operation 统一使用 `media_source` + `media_id`，两个字段必须成对传递并复用搜索结果
 - `read_skill`、`read_file`、`write_file`、`edit_file` 和 `execute_command`
@@ -624,3 +630,7 @@ moviepilot scheduler list
 ```shell
 moviepilot scheduler run subscribe_refresh
 ```
+
+`scheduler list/run` 通过工具网关解析 REST 信封和内部业务响应。列表显示任务 ID、状态、
+下次运行时间和名称；执行命令显示业务返回值，无返回内容时显示调用成功提示，业务失败时
+显示原因并返回非零退出码。

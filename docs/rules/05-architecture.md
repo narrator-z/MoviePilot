@@ -73,13 +73,20 @@ to make the directory tree look symmetrical.
 | `app/application/invocation.py` | Frozen Agent write-call identity, claim and receipt contracts; the injected repository provides atomic claim, fenced settlement and unresolved-state reads, while `db/adapters/invocation.py` owns short transactions and cold-start recovery is invoked by startup |
 | `app/application/network.py` | System network-test target catalog, immutable public/private projections, URL and redirect admission, response validation and the injected transport Port; startup owns concrete HTTP Adapter assembly |
 | `app/application/outbox.py` | Durable intent, transaction-only stager, short-transaction dispatch store, claim fencing and structured post-commit result contracts |
-| `app/application/transfer/` | Durable transfer use cases: `workflow.py` owns queue service orchestration; `models.py` owns admission/planning/task contracts; `jobs.py` owns in-process task views; `notifications.py` owns failure aggregation; `projection.py` owns domain projections; `execution.py` owns stable operation identity, step/checkpoint state, retry/manual-review commands and terminal-settlement DTOs; `recovery.py` owns failed/corrupt task cleanup and history detachment through the execution repository; `history.py` projects history write fields and file fingerprints; `feedback.py` owns failure stages, notification snapshots and message text, while Chain owns notification delivery and cleanup side effects |
+| `app/application/transfer/` | Durable transfer use cases: `workflow.py` owns queue service orchestration; `models.py` owns admission/planning/task contracts; `jobs.py` owns in-process task views; `notifications.py` owns success/failure notification snapshots, batch waiting and quiet-window aggregation; `projection.py` owns domain projections; `execution.py` owns stable operation identity, step/checkpoint state, retry/manual-review commands and terminal-settlement DTOs; `recovery.py` owns failed/corrupt task cleanup and history detachment through the execution repository; `history.py` projects history write fields and file fingerprints; `feedback.py` owns failure stages, notification snapshots and message text, while Chain owns notification delivery and cleanup side effects |
 | `app/chain/transfer/music.py` | 音乐整理的纯标签准入、目录共识、发行分组与曲目上下文编排；`filter.py` 保留通用文件筛选和既有 mixin 调用契约。可信标签在本地完成分类与命名，分类的外部事实补充可由本次用例明确禁用，仍遵守用户策略与人工覆盖 |
 | `app/application/plugin/` | Plugin market catalog, installation command, installed-plugin identity contract and startup migration, runtime port, folder operations and dynamic-route use cases; filenames remain single words (`catalog.py`, `identity.py`, `migration.py`, `install.py`, `runtime.py`, `folders.py`, `routes.py`) |
 | `app/application/server/` | MoviePilot Server reporting and sharing use cases; local data readers and transport callbacks are injected by startup |
 | `app/application/site/` | Configured site catalog, authentication level and index-resource capability; the generated extension and its data bundle stay together here |
 | `app/application/messaging/` | Message rendering/routing, interactions and the Agent-to-message bridge: `ingress.py` owns the single channel-to-host loopback boundary; `interaction/` owns generic interaction state plus Agent choice contracts; `channel/admin.py` owns channel administrator resolution; `router.py` unified interaction priority and callback dispatch; `site.py`/`subscribe.py`/`skill.py` per-command sessions, input parsing and views; `media.py` media interaction state while the business workflow stays in `MediaInteractionChain`; `plugin.py` plugin input capture and plugin button callbacks; `webagent/` owns WebAgent notification events and stream transport; `agent.py` owns WebAgent application orchestration, display projection, session identity/persistence coordination, temporary attachment registry and audio preparation/transcription; `message.py` notification rendering, templates and queue. Not a public SDK recommended for direct plugin use |
 | `app/application/security/` | Authentication, authorization, frozen user/auth projections, atomic user aggregate commands, per-user configuration publication, cookies, passkeys, OTP/two-factor, path/URL safety, SSRF and signing policy |
+
+订阅日志仍由 `runtime/log.py` 的通用资源作用域负责路由、等级和有界滚动写入；
+`application/subscription/observability.py` 只绑定订阅身份并汇总诊断省略数量。
+搜索、RSS 匹配、元数据刷新、重置和完成判定在单订阅边界绑定上下文。
+`api/endpoints/subexecution.py` 用资源 Cookie 校验归属并返回文本/SSE/ZIP，
+权限检查通过 `api/dependencies/subscription.py` 的短会话作用域完成，流读取不能占用请求级数据库事务。
+文件读取、滚动追踪和归档复用现有 SystemLogPort 及启动装配，ZIP 压缩复用已有受控工作线程。
 
 ### Agent runtime boundaries
 
@@ -639,12 +646,19 @@ Shared subscription metadata and media-key construction belongs to
 `app.application.subscription.contract`; `app.chain.subscribe` is a same-named package
 whose root exposes only the stable `SubscribeChain`. `facade.py` owns the class
 identity and event entry wrappers; `create.py`, `search.py`, `match.py`, `refresh.py`,
-`completion.py`, `reconcile.py` and `notify.py` are the single owners of their
+`completion.py`, `music.py`, `reconcile.py` and `notify.py` are the single owners of their
 respective workflows, while `query.py`, `interaction.py`, `identity.py` and `policy.py`
 own the remaining focused capabilities. Startup imports the subscription share Port
 directly from `notify.py`; canonical callers import identity projection directly from
 `identity.py`. The retired `app/chain/subscribe.py` monolith must not return, package
 owners must not be re-exported, and `_music` must not import its concrete chain owner.
+`music.py` 通过已注入的下载/整理历史 Port 关联成功入库文件，只读取本地音频标签和
+有效 CUE，按真实发行身份分组对账；发行身份与逐盘完整覆盖的纯规则归 `domain/music.py`。
+它通过既有订阅 mutation 写入事实和总曲目数，不新增数据库字段，也不从文件数量猜测完成。
+下载提交 owner 则按种子实际 hash、全部音频成功整理记录及仍存在的本地目标阻止音乐订阅重复提交；人工下载
+和未完整整理的任务保留原行为。新增 owner 使冷导入宿主模块数各增加 1：
+`app.startup.lifecycle` 586 → 587、`app.factory` 599 → 600、`app.main` 601 → 602；
+原有耗时预算、采样和生命周期约束保持不变。
 `app.chain.search.execution` reads the Application-owned `SubscriptionSiteBudget`
 contract to apply subscription-only keyword scheduling and IMDb query deduplication;
 the site budget and provider retain request admission, per-site intervals and cooldown
@@ -1234,7 +1248,7 @@ driven workflow registration.
 | `app/domain/plugin.py` | Pure local-source, generation-compatibility and Release-install-plan rules |
 | `app/adapters/external/plugin/client.py` | `PluginMarketTransport`, the unique market transport, index/Release and local-candidate owner |
 | `app/adapters/system/plugin/package.py` | `PluginPackageManager`, the unique install, checkpoint, backup, restore and physical-delete owner |
-| `app/adapters/system/plugin/dependency.py` | `PluginDependencyInstaller`, the dependency manifest, missing-package inspection and installation owner |
+| `app/adapters/system/plugin/dependency.py` | `PluginDependencyInstaller`, enabled-source dependency inspection and constrained per-plugin recovery owner; `async_install` has two completion-owned worker boundaries for request preparation and fallback planning, while package subprocess cancellation remains with `PluginRuntimeHealth` |
 | `app/adapters/system/plugin/health.py` | `PluginRuntimeHealth`, the runtime-environment guard, pre/post-install check and recovery owner |
 | `app/startup/composition/plugin.py` | Constructs one market transport/client, package manager, runtime-health owner and dependency installer per lifespan; `PluginHelper` compatibility calls consume those same published owners |
 | `app/runtime/extensions/resource.py` | Data-only managed-resource registry and sync/async lifecycle adapters |

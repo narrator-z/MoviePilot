@@ -21,6 +21,7 @@ from app.application.subscription.execution import (
 from app.application.subscription.observability import (
     SearchExecutionSummary,
     finish_returned_search_task,
+    subscription_log_scope,
 )
 from app.application.subscription.sitebudget import (
     SubscriptionSearchCancelled,
@@ -58,6 +59,21 @@ def skip_search_task(
     )
 
 
+def subscription_search_cancelled(
+    repository: SubscriptionRepository,
+    subscription_id: int,
+    allow_paused_search: bool,
+    cancelled: Callable[[], bool],
+) -> bool:
+    """自动搜索在安全边界重读暂停状态；显式补搜仍遵守取消和系统停止。"""
+    if cancelled():
+        return True
+    if allow_paused_search:
+        return False
+    current = repository.get(subscription_id)
+    return current is None or current.state == "S"
+
+
 @dataclass(slots=True)
 class SubscriptionSearchTaskRunner:
     """执行一条已认领的订阅搜索任务，并负责完整收尾。"""
@@ -81,6 +97,12 @@ class SubscriptionSearchTaskRunner:
 
     def execute(self) -> Optional[int]:
         """执行当前任务，返回实际进入搜索处理的订阅 ID。"""
+        with subscription_log_scope(self.task.subscription_id, self.task.source, str(self.task.task_id)):
+            logger.scoped_info("开始处理订阅搜索任务")
+            return self._execute()
+
+    def _execute(self) -> Optional[int]:
+        """在已绑定日志的任务作用域内执行搜索及等待判断。"""
         lease_token = self.task.lease_token
         if lease_token is None:
             logger.error("这次订阅搜索暂时无法开始，系统稍后会重新处理")
@@ -92,11 +114,14 @@ class SubscriptionSearchTaskRunner:
         if cancelled():
             self.queue.release_task(task_id=task_id, lease_token=lease_token, cancelled=True)
             self.summary.record("cancelled", "cancelled")
+            logger.scoped_info("本轮搜索已取消")
             return None
 
         subscribe = self.subscription_repository.get(self.task.subscription_id)
         if subscribe is None:
             self._finish_missing_subscription(task_id, lease_token)
+            return None
+        if self._skip_paused_subscription(subscribe):
             return None
 
         self.report_progress(
@@ -115,6 +140,7 @@ class SubscriptionSearchTaskRunner:
                 message="订阅刚刚创建，保存好设置后会自动开始搜索",
             )
             self.summary.record("requeued", "recent_subscription")
+            logger.scoped_info(f"订阅刚刚创建，搜索已安排在 {recent_retry_at} 继续")
             return None
 
         execution_lease = self.execution_admission.try_acquire(
@@ -142,6 +168,15 @@ class SubscriptionSearchTaskRunner:
             error="订阅已删除",
         )
         self.summary.record("cancelled", "missing_subscription")
+
+    def _skip_paused_subscription(self, subscribe: SubscriptionSnapshot) -> bool:
+        """暂停后收口已入队的自动任务，保留显式补搜的执行权限。"""
+        if subscribe.state != "S" or self.task.source in {"manual", "targeted"}:
+            return False
+        skip_search_task(self.queue, self.task, "订阅已暂停，这次没有自动搜索")
+        self.summary.record("skipped", "paused")
+        logger.scoped_info("订阅已暂停，本轮不执行自动搜索")
+        return True
 
     def _handle_active_subscription(
         self,
@@ -172,6 +207,7 @@ class SubscriptionSearchTaskRunner:
             "这个订阅正在处理，本次自动检查无需重复执行",
         )
         self.summary.record("skipped", "admission_conflict")
+        logger.scoped_info("订阅正在处理，本轮自动检查无需重复执行")
 
     def _execute_owned_task(
         self,
@@ -184,12 +220,21 @@ class SubscriptionSearchTaskRunner:
     ) -> Optional[int]:
         """在持有订阅执行权时完成搜索、异常处理和资源释放。"""
         phase_changed = partial(self._update_phase, task_id, lease_token)
+        allow_paused_search = self.task.source in {"manual", "targeted"}
         execution_context = SubscriptionExecutionContext(
             lease=execution_lease,
             admission=self.execution_admission,
             task_id=task_id,
+            source=self.task.source,
             task_lease=lease_token,
-            cancel_requested=lambda: cancelled() or self.stop_state.is_system_stopped,
+            cancel_requested=partial(
+                subscription_search_cancelled,
+                self.subscription_repository,
+                self.task.subscription_id,
+                allow_paused_search,
+                lambda: cancelled() or self.stop_state.is_system_stopped,
+            ),
+            allow_paused_search=allow_paused_search,
             phase_changed=phase_changed,
             resuming_sites=self.task.pending_site_ids is not None,
         )
@@ -199,7 +244,8 @@ class SubscriptionSearchTaskRunner:
             if current is None:
                 self._finish_missing_subscription(task_id, lease_token)
                 return None
-            # 暂停只影响后续自动调度；持久任务已接纳的一次搜索继续执行，停止须显式取消任务。
+            if self._skip_paused_subscription(current):
+                return None
             self.searchchain.configure_subscription_site_budget(
                 SubscriptionSiteBudget(
                     repository=self.queue,
@@ -217,7 +263,7 @@ class SubscriptionSearchTaskRunner:
                 execution_context=execution_context,
             )
             system_stopped = self.stop_state.is_system_stopped
-            cancel_requested = False if system_stopped else cancelled()
+            cancel_requested = False if system_stopped else execution_context.is_cancel_requested()
             subscription_id, outcome, reason = finish_returned_search_task(
                 queue=self.queue,
                 task_id=task_id,
@@ -228,10 +274,12 @@ class SubscriptionSearchTaskRunner:
                 cancel_requested=cancel_requested,
             )
             self.summary.record(outcome, reason)
+            logger.scoped_info(f"本轮搜索任务结束：{outcome}，原因：{reason or '正常结束'}；订阅是否完成以缺失内容检查为准")
             return subscription_id
         except SubscriptionSearchCancelled:
             self._handle_cancelled_search(task_id, lease_token, execution_context)
         except SubscriptionSearchDeferred as deferred:
+            logger.scoped_info(f"站点暂时忙，本轮搜索延后继续：{deferred}")
             handle_subscription_search_deferred(
                 self.queue,
                 task_id,
@@ -263,6 +311,7 @@ class SubscriptionSearchTaskRunner:
         current_site_id: Optional[int] = None,
     ) -> None:
         """保存当前任务的用户可见阶段和正在访问的站点。"""
+        logger.debug(f"执行阶段：{phase}，当前站点：{current_site_id or '-'}")
         self.queue.update_task_phase(
             task_id=task_id,
             lease_token=lease_token,
@@ -277,6 +326,7 @@ class SubscriptionSearchTaskRunner:
         execution_context: SubscriptionExecutionContext,
     ) -> None:
         """区分搜索超时、用户停止和系统关闭。"""
+        logger.scoped_info("本轮搜索已停止，将根据取消、超时或系统关闭状态收尾")
         if execution_context.is_expired() and not execution_context.is_cancel_requested():
             self.queue.finish_task(
                 task_id=task_id,

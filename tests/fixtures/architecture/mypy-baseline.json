@@ -792,7 +792,6 @@
     "attr-defined": 1,
     "no-untyped-call": 1,
     "no-untyped-def": 3,
-    "operator": 2,
     "return-value": 1,
     "type-arg": 4,
     "union-attr": 4,
@@ -901,7 +900,7 @@
   },
   "app/chain/subscribe/completion.py": {
     "arg-type": 2,
-    "assignment": 3,
+    "assignment": 1,
     "no-untyped-call": 1,
     "operator": 3,
     "type-var": 1,
@@ -1063,7 +1062,7 @@
   "app/cli.py": {
     "attr-defined": 2,
     "misc": 57,
-    "no-any-return": 6,
+    "no-any-return": 4,
     "type-arg": 3,
     "union-attr": 2
   },
@@ -1999,8 +1998,8 @@
   },
   "app/modules/slack/slack.py": {
     "assignment": 1,
-    "dict-item": 2,
-    "list-item": 2,
+    "dict-item": 1,
+    "list-item": 1,
     "no-untyped-call": 5,
     "no-untyped-def": 9,
     "type-arg": 7,
@@ -2796,7 +2795,7 @@
     "arg-type": 1,
     "attr-defined": 1,
     "type-arg": 1,
-    "union-attr": 9,
+    "union-attr": 8,
     "var-annotated": 1
   },
   "app/workflow/actions/add_subscribe.py": {
@@ -2833,8 +2832,7 @@
     "var-annotated": 1
   },
   "app/workflow/actions/filter_torrents.py": {
-    "arg-type": 2,
-    "list-item": 1,
+    "arg-type": 1,
     "no-untyped-call": 1,
     "type-arg": 1,
     "union-attr": 1,

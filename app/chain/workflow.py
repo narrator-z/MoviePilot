@@ -1,11 +1,10 @@
 import ast
-import base64
 import copy
 import inspect
-import pickle
 import threading
 from collections import defaultdict, deque
 from contextvars import Context, copy_context
+from dataclasses import is_dataclass
 from datetime import date, datetime
 from functools import partial
 from time import monotonic, sleep
@@ -59,6 +58,16 @@ def _serialize_workflow_value(value: Any, stack: Optional[set[int]] = None) -> A
                 field_name: _serialize_workflow_value(getattr(value, field_name, None), stack)
                 for field_name in value.__class__.model_fields
             }
+        finally:
+            stack.remove(object_id)
+
+    to_dict = getattr(value, "to_dict", None) if is_dataclass(value) and not isinstance(value, type) else None
+    if callable(to_dict):
+        # RSS 等动作按设计把领域 dataclass（如 app.domain.context.Context）放进上下文，其 to_dict
+        # 与工作流 Schema 字段对齐，恢复时可经 ActionContext 校验还原；落到 str() 会存成无法恢复的文本。
+        stack.add(object_id)
+        try:
+            return _serialize_workflow_value(to_dict(), stack)
         finally:
             stack.remove(object_id)
 
@@ -353,7 +362,10 @@ class WorkflowExecutor:
 
     def restore_context(self) -> ActionContext:
         """
-        恢复工作流上下文，兼容旧版 Base64 Pickle 存储格式。
+        恢复工作流上下文。
+
+        只接受结构化 JSON 上下文；旧版 Base64 Pickle 格式（``content`` 字段）不再反序列化，
+        按空上下文从头执行，避免执行数据库中来源不可信的序列化载荷。
         """
         context = ActionContext()
         if self.workflow.context:
@@ -361,8 +373,7 @@ class WorkflowExecutor:
                 logger.info(f"工作流已执行动作：{self.workflow.current_action}")
             try:
                 if isinstance(self.workflow.context, dict) and self.workflow.context.get("content"):
-                    decoded_data = base64.b64decode(self.workflow.context["content"])
-                    context = pickle.loads(decoded_data)
+                    logger.warning(f"工作流 {self.workflow.name} 的上下文为已废弃的旧版格式，将从空上下文开始执行")
                 elif isinstance(self.workflow.context, dict):
                     context = ActionContext.model_validate(self.workflow.context)
             except Exception:

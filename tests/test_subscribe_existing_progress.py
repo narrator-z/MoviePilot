@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 import app.chain.subscribe.refresh as subscribe_refresh
+import app.chain.subscribe.verification as subscribe_verification
 from app.application.subscription.contract import SubscriptionSnapshot, build_subscribe_meta
 from app.application.subscription.mutation import SyncSubscriptionMutationService
 from app.chain.download import DownloadChain
@@ -41,7 +42,14 @@ def progress_scope(monkeypatch):
     download._media_exists_with_server_cache = Mock(
         return_value=ExistMediaInfo(seasons={1: [1, 2]})
     )
+    # verification.py 的媒体库二次核验经 DownloadChain().media_exists 读取事实集号，
+    # 与主检查共用同一替身（随 _media_exists_with_server_cache 返回值联动），
+    # 避免核验构造真实 DownloadChain 实例访问媒体服务器。
+    download.media_exists = Mock(
+        side_effect=lambda **_kwargs: download._media_exists_with_server_cache.return_value
+    )
     monkeypatch.setattr(subscribe_refresh, "DownloadChain", lambda: download)
+    monkeypatch.setattr(subscribe_verification, "DownloadChain", lambda: download)
     chain = object.__new__(SubscribeChain)
     chain.finish_subscribe_or_not = Mock()
     chain._SubscribeChain__apply_episodes_refresh = Mock(return_value=12)

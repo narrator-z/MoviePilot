@@ -323,3 +323,12 @@ vulnerabilities:
       - pkg:pypi/urllib3@2.7.0
     expired_at: 2027-01-15
     statement: urllib3 2.7.0 is pinned by the project lockfile; 2.8.0 carries the fix. CVE-2026-97689 is a DoS via unbounded memory when retrying outbound requests; MoviePilot issues a bounded number of outbound requests, so the impact is limited. Bump urllib3 to 2.8.0 on the next dependency refresh.
+
+  - id: CVE-2026-96889
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/librsvg2-2@2.60.0+dfsg-1
+      - pkg:deb/debian/librsvg2-2
+    expired_at: 2027-01-15
+    statement: librsvg2-2 is pulled in via the pinned Debian base image; Debian published the fix in 2.60.0+dfsg-1+deb13u1, which is not yet adopted by the base image tag we pin. CVE-2026-96889 is a use-after-free triggered when an SVG document contains XML includes with duplicated entities; MoviePilot does not render operator- or user-supplied SVG content, so the affected code path is not reachable. Suppressed pending the next base-image refresh. Reassess when this exception expires.

@@ -332,3 +332,25 @@ vulnerabilities:
       - pkg:deb/debian/librsvg2-2
     expired_at: 2027-01-15
     statement: librsvg2-2 is pulled in via the pinned Debian base image; Debian published the fix in 2.60.0+dfsg-1+deb13u1, which is not yet adopted by the base image tag we pin. CVE-2026-96889 is a use-after-free triggered when an SVG document contains XML includes with duplicated entities; MoviePilot does not render operator- or user-supplied SVG content, so the affected code path is not reachable. Suppressed pending the next base-image refresh. Reassess when this exception expires.
+
+  - id: CVE-2026-8286
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/curl@8.14.1-2+deb13u5
+      - pkg:deb/debian/curl
+      - pkg:deb/debian/libcurl3t64-gnutls
+      - pkg:deb/debian/libcurl4t64
+    expired_at: 2027-01-15
+    statement: curl/libcurl are pulled in via the pinned Debian base image; Debian published the fix in 8.14.1-2+deb13u7, which is not yet adopted by the base image tag we pin. CVE-2026-8286 is an insecure-connection-establishment issue caused by a TLS configuration mismatch; MoviePilot's outbound traffic uses Python urllib3 rather than libcurl, and the in-container curl binary is an operator diagnostic utility not exposed as a service, so the affected path is not reachable. Suppressed pending the next base-image refresh. Reassess when this exception expires.
+
+  - id: CVE-2026-8927
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/curl@8.14.1-2+deb13u5
+      - pkg:deb/debian/curl
+      - pkg:deb/debian/libcurl3t64-gnutls
+      - pkg:deb/debian/libcurl4t64
+    expired_at: 2027-01-15
+    statement: curl/libcurl are pulled in via the pinned Debian base image; Debian published the fix in 8.14.1-2+deb13u7, which is not yet adopted by the base image tag we pin. CVE-2026-8927 is an information-disclosure issue where proxy authentication state is not cleared between connections; MoviePilot does not route outbound traffic through the in-container curl/libcurl stack, so the affected path is not reachable. Suppressed pending the next base-image refresh. Reassess when this exception expires.

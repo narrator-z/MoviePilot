@@ -916,9 +916,21 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         :param file_secret_settings: 框架按 model_config 或 _secrets_dir 创建的来源
         :return: 从高到低排列的来源
         """
-        secret_source = _DeploymentSecretsSource(
-            settings_cls, secrets_dir=cast(SecretsSettingsSource, file_secret_settings).secrets_dir
-        )
+        base_dir = cast(SecretsSettingsSource, file_secret_settings).secrets_dir
+        if not base_dir:
+            # fork：显式禁用或目录序列为空时尊重用户选择，不追加应用目录
+            secrets_dir = base_dir
+        else:
+            # fork：优先读应用配置目录 secrets/（签名密钥持久化），用户显式目录在后覆盖
+            fork_dir = get_env_path().parent / "secrets"
+            if fork_dir == base_dir:
+                secrets_dir = base_dir
+            elif isinstance(base_dir, (str, Path)):
+                secrets_dir = [str(fork_dir), base_dir]
+            else:
+                # 序列形式：fork 目录插到最前，用户显式目录保持原顺序（后者覆盖）
+                secrets_dir = [str(fork_dir), *base_dir]
+        secret_source = _DeploymentSecretsSource(settings_cls, secrets_dir=secrets_dir)
         return init_settings, env_settings, dotenv_settings, secret_source
 
     def __init__(self, **kwargs: Any) -> None:
@@ -940,14 +952,21 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
             app_env_path = self.CONFIG_PATH / "app.env"
             if not app_env_path.exists():
                 shutil.copy2(self.INNER_CONFIG_PATH / "app.env", app_env_path)
-        # 处理签名密钥持久化：未在 app.env/环境变量/secrets 中显式配置时，随机生成并写回 app.env。
+        # 处理签名密钥持久化：未在环境变量/secrets 中显式配置时，随机生成并写入应用配置目录 secrets/。
         # 否则每次进程启动都会用新的随机密钥，导致已签发的 JWT 全部验签失败（403），前端被强制登出。
+        # 写入 secrets 目录而非 app.env，保持「加载配置不写 app.env」的上游契约（测试对 app.env 做字节快照）。
         for _secret_field in ("SECRET_KEY", "RESOURCE_SECRET_KEY"):
-            if _secret_field not in self.model_fields_set:
+            if _secret_field not in self.model_fields_set and _get_secrets_dir() is not None:
                 _new_key = secrets.token_urlsafe(32)
-                self.update_env_config(_secret_field, None, _new_key)
+                _fork_secrets_dir = self.CONFIG_PATH / "secrets"
+                try:
+                    _fork_secrets_dir.mkdir(parents=True, exist_ok=True)
+                    (_fork_secrets_dir / _secret_field).write_text(_new_key, encoding="utf-8")
+                except OSError:
+                    # 目录被文件占用或无权限时降级为不持久化，进程仍用本次新密钥
+                    logger.warning(f"'{_secret_field}' secrets 目录不可用，本次不持久化，下次启动将重新生成")
                 setattr(self, _secret_field, _new_key)
-                logger.info(f"'{_secret_field}' 未持久化，已随机生成并写入 'app.env'")
+                logger.info(f"'{_secret_field}' 未持久化，已随机生成并写入 secrets 目录")
 
     @staticmethod
     def validate_api_token(value: Any, original_value: Any) -> Tuple[Any, bool]:

@@ -1,4 +1,6 @@
-"""渠道专用正文应独立渲染，同时保留普通渠道和历史的纯文本。"""
+"""
+渠道专用正文应独立渲染，同时保留普通渠道和历史的纯文本。
+"""
 
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -22,7 +24,9 @@ from app.schemas.types import NotificationChannel
 
 
 def _message() -> Message:
-    """构造一份统一的语义内容，三个渠道由宿主分别渲染。"""
+    """
+    构造一份统一的语义内容，三个渠道由宿主分别渲染。
+    """
     return Message(title="站点自动签到", text="原有完整正文", userid="target",
                    rich_content=NotificationContent(title="签到", blocks=[NotificationBlock(title="完成")]))
 
@@ -30,7 +34,9 @@ def _message() -> Message:
 @pytest.mark.parametrize("module_class,channel", [(TelegramModule, "Telegram"), (SlackModule, "Slack")])
 @pytest.mark.parametrize("method", ["post_message", "send_direct_message"])
 def test_module_passes_only_own_rich_text(module_class, channel, method):
-    """渲染依然经过既有配置、目标和开关，原 Message 不被修改。"""
+    """
+    渲染依然经过既有配置、目标和开关，原 Message 不被修改。
+    """
     module = module_class()
     result = {"success": True, "message_id": 1} if channel == "Telegram" else (True, {"ts": "1"})
     client = SimpleNamespace(send_msg=Mock(return_value=result))
@@ -50,7 +56,9 @@ def test_module_passes_only_own_rich_text(module_class, channel, method):
 
 @pytest.mark.parametrize("module_class", [TelegramModule, SlackModule])
 def test_rich_text_does_not_bypass_notification_switch(module_class):
-    """关闭渠道时，专用正文不能绕过 check_message 执行真实发送。"""
+    """
+    关闭渠道时，专用正文不能绕过 check_message 执行真实发送。
+    """
     module = module_class()
     with (patch.object(module, "get_configs", return_value={"test": SimpleNamespace(name="test")}),
           patch.object(module, "check_message", return_value=False),
@@ -61,7 +69,9 @@ def test_rich_text_does_not_bypass_notification_switch(module_class):
 
 @pytest.mark.parametrize("rich", [True, False])
 def test_feishu_uses_card_markdown_and_keeps_original(rich):
-    """飞书交互卡片选择自身正文，未提供时与原来的发送结构一致。"""
+    """
+    飞书交互卡片选择自身正文，未提供时与原来的发送结构一致。
+    """
     client = object.__new__(Feishu)
     client._user_chat_mapping = {}
     client._default_chat_id = "chat"
@@ -78,7 +88,9 @@ def test_feishu_uses_card_markdown_and_keeps_original(rich):
 
 
 def test_slack_block_kit_preserves_accessibility_fallback_and_detail_link():
-    """Slack 使用原文摘要、原生标题及分段正文，保留查看详情按钮。"""
+    """
+    Slack 使用原文摘要、原生标题及分段正文，保留查看详情按钮。
+    """
     client = object.__new__(Slack)
     client._client = SimpleNamespace(chat_postMessage=Mock(return_value={"ok": True}))
     ok, _ = client.send_msg("签到结果", text="纯文本", formatted_text="*统计*\n\n站点详情",
@@ -94,12 +106,16 @@ def test_slack_block_kit_preserves_accessibility_fallback_and_detail_link():
 
 @pytest.mark.parametrize("text", ["x" * 3001])
 def test_slack_oversized_rich_text_falls_back_to_existing_notification(text):
-    """超出 Block Kit 限制时用完整旧通知路径，避免 invalid_blocks。"""
+    """
+    超出 Block Kit 限制时用完整旧通知路径，避免 invalid_blocks。
+    """
     assert Slack._formatted_blocks(text) == []
 
 
 def test_slack_long_report_sends_every_site_in_bounded_messages():
-    """超过单条 Block Kit 容量时分段，每条保留标题和详情按钮。"""
+    """
+    超过单条 Block Kit 容量时分段，每条保留标题和详情按钮。
+    """
     client = object.__new__(Slack)
     client._client = SimpleNamespace(chat_postMessage=Mock(return_value={"ok": True}))
     paragraphs = [f"*站点{index}*\n签到成功" for index in range(130)]
@@ -119,7 +135,9 @@ def test_slack_long_report_sends_every_site_in_bounded_messages():
 
 
 def test_slack_conversation_context_does_not_change_new_notification_target():
-    """没有编辑消息 ID 时，历史会话上下文不能覆盖原有通知收件人。"""
+    """
+    没有编辑消息 ID 时，历史会话上下文不能覆盖原有通知收件人。
+    """
     client = object.__new__(Slack)
     client._client = SimpleNamespace(chat_postMessage=Mock(return_value={"ok": True}))
     ok, _ = client.send_msg("签到结果", text="纯文本", formatted_text="*成功*", userid="target",
@@ -129,7 +147,9 @@ def test_slack_conversation_context_does_not_change_new_notification_target():
 
 
 def test_feishu_long_report_sends_every_site_in_bounded_cards():
-    """飞书按实际卡片字节预算分段，所有站点按顺序保留且目标不变。"""
+    """
+    飞书按实际卡片字节预算分段，所有站点按顺序保留且目标不变。
+    """
     import json
 
     client = object.__new__(Feishu)
@@ -154,7 +174,9 @@ def test_feishu_long_report_sends_every_site_in_bounded_cards():
 
 
 def test_plain_message_default_is_unchanged():
-    """无专用正文时，所有普通消费者仍获取原 text。"""
+    """
+    无专用正文时，所有普通消费者仍获取原 text。
+    """
     message = Message(text="纯文本", channel=NotificationChannel.Wechat)
     assert message.rich_content is None
     assert message.text == "纯文本"
@@ -166,7 +188,9 @@ def test_plain_message_default_is_unchanged():
 ])
 @pytest.mark.parametrize("rich", [True, False])
 def test_additional_channels_select_body_and_keep_every_paragraph(module_class, channel, rich):
-    """所有已支持格式化的渠道接入独立正文，长报告分段但不遗漏站点。"""
+    """
+    所有已支持格式化的渠道接入独立正文，长报告分段但不遗漏站点。
+    """
     module = module_class()
     client = SimpleNamespace(send_msg=Mock(return_value=True))
     message = _message()
@@ -187,7 +211,9 @@ def test_additional_channels_select_body_and_keep_every_paragraph(module_class, 
 
 @pytest.mark.parametrize("module_class", [DingTalkModule, DiscordModule, VoceChatModule, SynologyChatModule])
 def test_missing_notification_instance_does_not_send(module_class):
-    """配置存在但客户端未就绪时，不运行分段循环或使用上一配置的正文。"""
+    """
+    配置存在但客户端未就绪时，不运行分段循环或使用上一配置的正文。
+    """
     module = module_class()
     with (patch.object(module, "get_configs", return_value={
         "test": SimpleNamespace(name="test", type="test", enabled=True)}),
@@ -197,7 +223,9 @@ def test_missing_notification_instance_does_not_send(module_class):
 
 
 def test_discord_attachment_does_not_enter_rich_text_loop():
-    """附件通知沿用原文件发送分支，结构化正文不会产生第二条消息。"""
+    """
+    附件通知沿用原文件发送分支，结构化正文不会产生第二条消息。
+    """
     module = DiscordModule()
     client = SimpleNamespace(send_file=Mock(return_value=True), send_msg=Mock())
     message = _message()
@@ -212,7 +240,9 @@ def test_discord_attachment_does_not_enter_rich_text_loop():
 
 
 def test_wechat_bot_and_application_mode_remain_independent():
-    """同轮包含机器人和应用配置时，富文本不能流入应用纯文本或原 Message。"""
+    """
+    同轮包含机器人和应用配置时，富文本不能流入应用纯文本或原 Message。
+    """
     module = WechatModule()
     bot = object.__new__(WeChatBot)
     bot.send_msg = Mock()
@@ -232,7 +262,9 @@ def test_wechat_bot_and_application_mode_remain_independent():
 
 @pytest.mark.parametrize("markdown_available", [True, False])
 def test_qq_keeps_rich_text_and_falls_back_original_once(markdown_available):
-    """QQ 有权限时发送全部分段，无权限时仅回退一次完整旧正文。"""
+    """
+    QQ 有权限时发送全部分段，无权限时仅回退一次完整旧正文。
+    """
     client = object.__new__(QQBot)
     client._ready = True
     client._app_id = "id"
@@ -255,7 +287,9 @@ def test_qq_keeps_rich_text_and_falls_back_original_once(markdown_available):
 
 
 def test_qq_module_supplies_chunks_and_preserves_plain_fallback():
-    """QQ 模块为客户端提供富文本分段，同时保留原 text 用于权限回退。"""
+    """
+    QQ 模块为客户端提供富文本分段，同时保留原 text 用于权限回退。
+    """
     module = QQBotModule()
     client = SimpleNamespace(send_msg=Mock())
     message = _message()
@@ -269,7 +303,9 @@ def test_qq_module_supplies_chunks_and_preserves_plain_fallback():
 
 
 def test_channel_notification_format_obeys_capabilities_and_instance_mode(monkeypatch):
-    """能力配置决定正文选择，禁用能力以及企业微信应用模式均使用旧正文。"""
+    """
+    能力配置决定正文选择，禁用能力以及企业微信应用模式均使用旧正文。
+    """
     from dataclasses import replace
 
     from app.schemas.notification import ChannelCapabilityManager, NotificationTextFormat
@@ -290,18 +326,65 @@ def test_channel_notification_format_obeys_capabilities_and_instance_mode(monkey
 
 
 def test_telegram_channel_summary_includes_detail_link_without_changing_legacy_rich_message():
-    """专用摘要能访问完整结果，原有 Rich Message 不被添加内容。"""
+    """
+    详情链接经过真实 Markdown 转换仍是链接，原有 Rich Message 不被添加内容。
+    """
+    from app.modules.telegram.telegram import Telegram
+
     message = _message()
     message.link = 'https://example.com/?a=1&b="value"'
     rich = TelegramModule._notification_rich_message(message)
-    assert '<a href="https://example.com/?a=1&amp;b=&quot;value&quot;">查看详情</a>' in rich
+    converted = "".join(chunk["html"] for chunk in Telegram._build_rich_message_chunks(rich))
+    assert '<a href="https://example.com/?a=1&amp;b=%22value%22">查看详情</a>' in converted
+    assert "&lt;a href" not in converted
     message.rich_content = None
     message.rich_message = "原有完整 Rich Message"
     assert TelegramModule._notification_rich_message(message) == message.rich_message
 
 
+def test_telegram_notification_sections_have_native_list_indentation():
+    """
+    真实转换产物应包含分节标题和缩进列表，而非全是同级普通段落。
+    """
+    from app.modules.telegram.telegram import Telegram
+
+    message = Message(rich_content=NotificationContent(title="签到结果", blocks=[
+        NotificationBlock(title="统计", text="本次 47"),
+        NotificationBlock(title="失败 · 9"),
+        NotificationBlock(title="Cookie已失效", text="站点一、站点二"),
+        NotificationBlock(title="网络失败", text="站点三"),
+        NotificationBlock(title="成功 · 28"),
+        NotificationBlock(title="签到成功", text="站点四、站点五"),
+    ]))
+    body = "".join(chunk["html"] for chunk in Telegram._build_rich_message_chunks(
+        TelegramModule._notification_rich_message(message)))
+    assert "<h3>失败 · 9</h3>" in body
+    assert "<h3>成功 · 28</h3>" in body
+    assert body.count("<li>") == 3
+    assert "<b>Cookie已失效</b><br/>站点一、站点二" in body
+    assert "<b>签到成功</b><br/>站点四、站点五" in body
+
+
+def test_telegram_long_section_list_splits_without_losing_items():
+    """
+    原因很多时由真实转换器拆分长列表，各组和对应名单仍完整保留。
+    """
+    from app.modules.telegram.telegram import Telegram
+
+    blocks = [NotificationBlock(title="访问失败 · 150")]
+    blocks.extend(NotificationBlock(title=f"失败原因{index}：" + "网络连接失败" * 20,
+                                    text=f"完整站点{index:03d}") for index in range(150))
+    message = Message(rich_content=NotificationContent(title="签到结果", blocks=blocks))
+    chunks = Telegram._build_rich_message_chunks(TelegramModule._notification_rich_message(message))
+    assert len(chunks) > 1
+    body = "".join(chunk["html"] for chunk in chunks)
+    assert all(body.count(f"完整站点{index:03d}") == 1 for index in range(150))
+
+
 def test_host_renders_raw_data_safely_for_every_declared_format():
-    """同一份结构化数据按能力生成语法，站点文本不能注入格式、链接或提醒。"""
+    """
+    同一份结构化数据按能力生成语法，站点文本不能注入格式、链接或提醒。
+    """
     from app.schemas.notification import NotificationTextFormat
 
     content = NotificationContent(title="站点自动签到", blocks=[NotificationBlock(
@@ -315,7 +398,9 @@ def test_host_renders_raw_data_safely_for_every_declared_format():
 
 
 def test_host_telegram_native_conversion_preserves_literal_content():
-    """宿主的 Rich Markdown 转换保留特殊字符原意，不产生注入链接。"""
+    """
+    宿主的 Rich Markdown 转换保留特殊字符原意，不产生注入链接。
+    """
     from telegramify_markdown import richify
 
     from app.schemas.notification import NotificationTextFormat

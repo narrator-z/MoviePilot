@@ -1,3 +1,7 @@
+"""
+根据动作参数筛选工作流中的资源列表。
+"""
+
 from typing import List, Optional
 
 from pydantic import Field
@@ -38,9 +42,11 @@ class FilterTorrentsAction(BaseAction):
     }
 
     def __init__(self, action_id: str):
-        """初始化过滤后资源集合。"""
+        """
+        初始化过滤后资源集合。
+        """
         super().__init__(action_id)
-        self._torrents = []
+        self._torrents: list[WorkflowTorrentContext] = []
 
     name = "过滤资源"
     description = "对资源列表数据进行过滤"
@@ -48,15 +54,17 @@ class FilterTorrentsAction(BaseAction):
 
     @property
     def success(self) -> bool:
-        """返回资源过滤是否已完成。"""
+        """
+        返回资源过滤是否已完成。
+        """
         return self.done
 
-    def execute(self, workflow_id: int, params: dict, context: ActionContext) -> ActionContext:
+    def execute(self, workflow_id: int, params: dict[str, object], context: ActionContext) -> ActionContext:
         """
         过滤torrents中的资源
         """
-        params = FilterTorrentsParams(**params)
-        for torrent in context.torrents:
+        action_params = FilterTorrentsParams.model_validate(params)
+        for torrent in context.torrents or []:
             if runtime_stop_state.is_workflow_stopped(workflow_id):
                 break
             if isinstance(torrent, dict):
@@ -66,20 +74,20 @@ class FilterTorrentsAction(BaseAction):
             if TorrentHelper().filter_torrent(
                     torrent_info=torrent_info,
                     filter_params={
-                        "quality": params.quality,
-                        "resolution": params.resolution,
-                        "effect": params.effect,
-                        "include": params.include,
-                        "exclude": params.exclude,
-                        "size": params.size
+                        "quality": action_params.quality,
+                        "resolution": action_params.resolution,
+                        "effect": action_params.effect,
+                        "include": action_params.include,
+                        "exclude": action_params.exclude,
+                        "size": action_params.size
                     }
             ):
                 if ActionChain().filter_torrents(
-                        rule_groups=params.rule_groups,
+                        rule_groups=action_params.rule_groups or [],
                         torrent_list=[torrent_info],
                         mediainfo=media_info
                 ):
-                    if torrent.torrent_info is not None and torrent.torrent_info is not torrent_info:
+                    if torrent.torrent_info is not None:
                         # 过滤链把规则优先级写在还原出的领域副本上，需同步回保留在结果中的 Schema 原对象。
                         torrent.torrent_info.pri_order = torrent_info.pri_order
                     self._torrents.append(torrent)

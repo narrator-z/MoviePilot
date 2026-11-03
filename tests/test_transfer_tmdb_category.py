@@ -1,9 +1,15 @@
+"""
+验证TMDB 分类规则在整理规划中的应用。
+"""
+
 import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.application.transfer.workflow import TransferTask
-from app.chain.transfer.facade import TransferChain
+
+# 此用例覆盖运行时惰性导出，静态检查无法解析该公开入口。
+from app.chain.transfer import TransferChain  # pylint: disable=no-name-in-module
 from app.domain.context import MediaInfo
 from app.domain.metainfo import MetaInfo
 from app.schemas.file import FileItem
@@ -12,7 +18,9 @@ from app.schemas.types import MediaSource, MediaType
 
 
 def test_transfer_rejects_partial_or_invalid_explicit_identity() -> None:
-    """整理公共入口不得把半套身份或格式非法来源传入后台任务。"""
+    """
+    整理公共入口不得把半套身份或格式非法来源传入后台任务。
+    """
     chain = object.__new__(TransferChain)
     fileitem = FileItem(
         storage="local",
@@ -37,7 +45,9 @@ def test_transfer_rejects_partial_or_invalid_explicit_identity() -> None:
 
 
 def test_transfer_resolves_complete_identity_before_building_tasks(monkeypatch) -> None:
-    """整理入口收到完整身份时应精确识别，失败后不得退化为标题识别。"""
+    """
+    整理入口收到完整身份时应精确识别，失败后不得退化为标题识别。
+    """
     chain = object.__new__(TransferChain)
     fileitem = FileItem(
         storage="local",
@@ -48,10 +58,14 @@ def test_transfer_resolves_complete_identity_before_building_tasks(monkeypatch) 
     calls = []
 
     class FakeMediaChain:
-        """记录精确识别参数并返回空结果。"""
+        """
+        记录精确识别参数并返回空结果。
+        """
 
         def recognize_media(self, **kwargs):
-            """模拟显式身份识别失败。"""
+            """
+            模拟显式身份识别失败。
+            """
             calls.append(kwargs)
             return None
 

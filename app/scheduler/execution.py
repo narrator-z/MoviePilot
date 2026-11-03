@@ -1,4 +1,6 @@
-"""调度任务准入、执行、进度和事件循环桥接。"""
+"""
+调度任务准入、执行、进度和事件循环桥接。
+"""
 
 import asyncio
 import inspect
@@ -17,8 +19,11 @@ from app.runtime.events import eventmanager
 from app.runtime.log import logger
 from app.runtime.loop import main_loop_registry
 from app.runtime.observability import record_metric
+from app.runtime.priority import interactive_execution
 from app.runtime.progress import ProgressHelper
 from app.runtime.scheduling import TimerUtils
+from app.runtime.settings import get_runtime_setting
+from app.scheduler.admission import defer_coroutine, invoke_background
 from app.scheduler.contract import _SchedulerOwnerBase
 from app.schemas.dashboard import ScheduleInfo as _SchemaScheduleInfo
 from app.schemas.types import EventType
@@ -27,26 +32,47 @@ _message_helper_factory: Callable[[], MessageHelper] = MessageHelper
 
 
 class SchedulerExecutionOwner(_SchedulerOwnerBase):
-    """调度任务准入与函数执行语义。"""
+    """
+    调度任务准入与函数执行语义。
+    """
 
     def _accepting_submissions(self) -> bool:
-        """判断调度器是否仍允许提交新的运行实例。"""
+        """
+        判断调度器是否仍允许提交新的运行实例。
+        """
         return self._lifecycle_state in {"starting", "running"}
 
     def _next_job_generation(self, job_id: str) -> int:
-        """为同一 job 的下一次注册分配单调 generation。"""
+        """
+        为同一 job 的下一次注册分配单调 generation。
+        """
         return self._registry.next_generation(job_id)
 
     def _assign_job_generation(self, job_id: str, job: dict[str, Any]) -> None:
-        """把注册 generation 写入可变运行时状态。"""
+        """
+        把注册 generation 写入可变运行时状态，并补齐协程任务的执行预算。
+
+        声明为 0 的任务保留不限时：托管协程消费者无法靠取消真正停止，给它总时长上限
+        只会把正常长轮次记成失败，真实收尾仍然要等消费者自己结束。
+        """
         self._registry.assign_generation(job_id, job)
+        declared = job.get("timeout_seconds")
+        if declared == 0:
+            job["timeout_seconds"] = None
+        elif inspect.iscoroutinefunction(job.get("func")) and declared is None:
+            timeout = int(get_runtime_setting("SCHEDULER_JOB_TIMEOUT", 3600))
+            job["timeout_seconds"] = timeout if timeout > 0 else None
 
     def _is_job_active(self, job_id: str) -> bool:
-        """判断任一 generation 的同 ID 任务是否仍在真实执行。"""
+        """
+        判断任一 generation 的同 ID 任务是否仍在真实执行。
+        """
         return self._registry.is_active(job_id)
 
     def _release_job_generation(self, job_id: str, generation: int) -> None:
-        """在任务真实收尾后释放对应 generation 的运行所有权。"""
+        """
+        在任务真实收尾后释放对应 generation 的运行所有权。
+        """
         self._registry.release_generation(job_id, generation)
 
     def _prepare_job(self, job_id: str) -> Optional[dict[str, Any]]:
@@ -109,14 +135,26 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
         return job
 
     @staticmethod
-    def _handle_job_error(job_id: str, job: dict[str, Any], error: Exception) -> None:
+    def _handle_job_error(
+        job_id: str,
+        job: dict[str, Any],
+        error: Exception,
+        detail: Optional[str] = None,
+    ) -> None:
         """
         记录定时任务执行异常并发送系统错误事件。
+
+        :param job_id: 调度任务标识
+        :param job: 任务运行时状态
+        :param error: 捕获到的异常，用于取异常类型与堆栈
+        :param detail: 面向日志、通知和事件的错误文本；省略时取异常文本，
+            用于补足 asyncio 超时这类 str() 为空的标准异常
         """
-        logger.error(f"定时任务 {job.get('name')} 执行失败：{str(error)} - {traceback.format_exc()}")
+        message = detail or str(error)
+        logger.error(f"定时任务 {job.get('name')} 执行失败：{message} - {traceback.format_exc()}")
         _message_helper_factory().put(
             title=f"{job.get('name')} 执行失败",
-            message=str(error),
+            message=message,
             role="system",
             level="error",
         )
@@ -126,7 +164,7 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
                 "type": "scheduler",
                 "scheduler_id": job_id,
                 "scheduler_name": job.get("name"),
-                "error": str(error),
+                "error": message,
                 "traceback": traceback.format_exc(),
             },
         )
@@ -165,16 +203,18 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
         success = True
         error = None
         try:
-            result = await JobExecutionState.await_result(
-                coro_factory(),
-                timeout_seconds=job.get("timeout_seconds"),
-            )
+            await defer_coroutine(job, self._accepting_submissions)
+            with interactive_execution(enabled=False):
+                result = await JobExecutionState.await_result(
+                    coro_factory(),
+                    timeout_seconds=job.get("timeout_seconds"),
+                )
             error = self._get_result_error(result)
             success = error is None
         except asyncio.TimeoutError as err:
             success = False
             error = f"任务执行超时（{job.get('timeout_seconds')} 秒）"
-            self._handle_job_error(job_id=job_id, job=job, error=err)
+            self._handle_job_error(job_id=job_id, job=job, error=err, detail=error)
         except asyncio.CancelledError:
             success = False
             error = "任务已取消"
@@ -216,6 +256,9 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
                 started = threading.Event()
 
                 async def run_owned_job() -> None:
+                    """
+                    在当前事件循环中执行已取得所有权的任务。
+                    """
                     started.set()
                     await self._run_coro_job(
                         coro_factory=coro_factory,
@@ -312,7 +355,7 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
                 p.join()
             else:
                 # 普通函数
-                result = func(*args, **kwargs)
+                result = invoke_background(job, self._accepting_submissions, func, *args, **kwargs)
                 error = self._get_result_error(result)
                 success = error is None
         except Exception as e:
@@ -323,6 +366,9 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
             if not deferred_finish:
 
                 def finish_without_loop() -> None:
+                    """
+                    事件循环未接受收尾任务时同步释放执行所有权。
+                    """
                     self._finish_unsubmitted_job(
                         job_id=job_id,
                         job=job,
@@ -381,7 +427,8 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
                             id=job_id,
                             name=name,
                             provider=provider_name,
-                            status="正在运行",
+                            status="等待交互结束" if service.get("deferred") else "正在运行",
+                            execution_group=service.get("execution_group", "default"),
                             progress=progress.value if progress else 0,
                             progress_text=progress.text if progress else None,
                             progress_enable=progress.enable if progress else False,
@@ -409,6 +456,7 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
                         name=job.name,
                         provider=service_state.get("provider_name", "[系统]"),
                         status=status,
+                        execution_group=service_state.get("execution_group", "default"),
                         next_run=next_run,
                         progress=progress.value if progress else 0,
                         progress_text=progress.text if progress else None,
@@ -430,6 +478,7 @@ class SchedulerExecutionOwner(_SchedulerOwnerBase):
                         name=service.get("name"),
                         provider=service.get("provider_name", "[系统]"),
                         status=("正在运行" if self._is_job_active(job_id) else "等待"),
+                        execution_group=service.get("execution_group", "default"),
                         progress=progress.value if progress else 0,
                         progress_text=progress.text if progress else None,
                         progress_enable=progress.enable if progress else False,

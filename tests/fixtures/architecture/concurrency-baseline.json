@@ -217,8 +217,8 @@
   },
   "app/api/endpoints/history.py:asyncio.to_thread": {
     "owners": {
-      "_request_batch_durable_retries": 1,
-      "ai_redo_transfer_history": 1
+      "ai_redo_transfer_history": 1,
+      "batch_ai_redo_transfer_history": 1
     },
     "target": "asyncio.to_thread"
   },
@@ -248,6 +248,12 @@
       "verify_database_backup": 1
     },
     "target": "app.runtime.execution.run_in_threadpool_to_completion"
+  },
+  "app/api/endpoints/widget.py:app.runtime.execution.run_in_threadpool": {
+    "owners": {
+      "widget_snapshot": 1
+    },
+    "target": "app.runtime.execution.run_in_threadpool"
   },
   "app/application/agenttask.py:asyncio.create_task": {
     "owners": {
@@ -330,6 +336,13 @@
       "PluginCandidateInventoryReader.async_load": 1
     },
     "target": "asyncio.to_thread"
+  },
+  "app/application/widget.py:app.runtime.execution.run_in_threadpool": {
+    "owners": {
+      "WidgetSnapshotService._download_section": 1,
+      "WidgetSnapshotService._overview": 1
+    },
+    "target": "app.runtime.execution.run_in_threadpool"
   },
   "app/chain/_recognition.py:app.runtime.execution.run_in_threadpool": {
     "owners": {
@@ -640,6 +653,13 @@
     },
     "target": "asyncio.to_thread"
   },
+  "app/startup/composition/cliagent.py:app.runtime.execution.run_in_threadpool_to_completion": {
+    "owners": {
+      "_close_cli_extensions": 3,
+      "run_cli_agent_request": 2
+    },
+    "target": "app.runtime.execution.run_in_threadpool_to_completion"
+  },
   "app/startup/composition/network.py:asyncio.to_thread": {
     "owners": {
       "_NetworkTestTransportAdapter.websocket": 1
@@ -660,6 +680,12 @@
     },
     "target": "asyncio.to_thread"
   },
+  "app/startup/initializers/agent.py:app.runtime.execution.run_in_threadpool_to_completion": {
+    "owners": {
+      "AgentInitializer._bind_runtime_data": 1
+    },
+    "target": "app.runtime.execution.run_in_threadpool_to_completion"
+  },
   "app/startup/initializers/modules.py:app.runtime.execution.run_in_threadpool_to_completion": {
     "owners": {
       "stop_modules.run_step": 1
@@ -677,6 +703,12 @@
       "configure_plugin_services.refresh_plugin_registrations": 1,
       "configure_plugin_services.reload_plugin_tree": 1,
       "execute_task": 1
+    },
+    "target": "app.runtime.execution.run_in_threadpool_to_completion"
+  },
+  "app/startup/initializers/scheduler.py:app.runtime.execution.run_in_threadpool_to_completion": {
+    "owners": {
+      "stop_scheduler.stop_and_reset": 1
     },
     "target": "app.runtime.execution.run_in_threadpool_to_completion"
   },

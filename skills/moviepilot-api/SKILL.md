@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 55
+version: 71
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -48,13 +48,13 @@ allowed-api-operations: >-
   storage.mkdir storage.rename storage.delete transfer.queue transfer.queue.delete transfer.name
   transfer.target_path transfer.manual_history transfer.episode_format.recommend
   transfer.manual_reviews transfer.manual_review transfer.manual_review.resolve
-  transfer.history.redo transfer.history.redo_batch transfer.history.clear workflow.create
-  workflow.get workflow.update workflow.delete workflow.actions workflow.event_types
-  workflow.plugin.actions workflow.start workflow.pause workflow.reset workflow.shares
-  workflow.share workflow.share.delete workflow.fork torrent.cache.get torrent.cache.delete
-  torrent.cache.clear torrent.cache.refresh torrent.cache.reidentify database.backups.list
-  database.backups.create database.backups.verify database.backups.delete filter.test
-  system.network.targets system.network.test system.module.list system.module.catalog
+  transfer.history.redo transfer.history.redo_batch transfer.history.replan transfer.history.clear
+  workflow.create workflow.get workflow.update workflow.delete workflow.actions
+  workflow.event_types workflow.plugin.actions workflow.start workflow.pause workflow.reset
+  workflow.shares workflow.share workflow.share.delete workflow.fork torrent.cache.get
+  torrent.cache.delete torrent.cache.clear torrent.cache.refresh torrent.cache.reidentify
+  database.backups.list database.backups.create database.backups.verify database.backups.delete
+  filter.test system.network.targets system.network.test system.module.list system.module.catalog
   system.module.settings system.module.test plugin.market.sync_wiki plugin.runtime.status
   plugin.history plugin.releases plugin.ratings plugin.rating plugin.rating.submit
   plugin.statistics plugin.reset plugin.clone.restorable plugin.clone config.user.get
@@ -66,6 +66,18 @@ allowed-api-operations: >-
 ---
 
 # MoviePilot API
+
+When a plugin mutation is busy or its outcome is unknown, inspect `plugin.runtime.status`
+before retrying. `active_operation` identifies the running plugin, operation, hook, and
+elapsed time. A caller timeout or cancellation does not stop the hook and must never
+trigger automatic replay of the same mutation.
+
+For a historical invalid plugin instance ID reported in logs, `plugin.instance.purge`
+accepts the exact ID with only `config: true` (all other scope flags false). It deletes
+only an empty disabled host record: no saved configuration, display overrides, default
+target, or log overrides. A saved empty configuration object still protects the record.
+This recovery path never stops plugins or deletes plugin data, databases, or files.
+Records with settings, clones, missing records, and mixed scopes are rejected.
 
 Unhandled exceptions outside the durable transfer step ledger stop automatic
 replay and create an `unhandled_execution_review` diagnostic. Repair or disable
@@ -84,6 +96,10 @@ only `operation_id`, `path_params`, `query`, and `body`. The host chooses the
 fixed HTTP method and path, creates the current user's authentication token,
 applies authorization and confirmation policy, and returns the API response.
 
+`slash.run` confirms that a command was triggered, not that execution finished.
+Channel receipts use the host-verified sender; calls without a channel use the
+existing administrator notification route and may have no delivery target.
+
 The gateway connects directly to the local backend listener using `HOST` and
 `PORT`, bypassing environment proxies. `APP_DOMAIN` is for public URLs such as
 Passkey origins and is not the gateway base URL. Keep it configured even when
@@ -96,6 +112,11 @@ users may update or delete only their own subscriptions. An unbound or inactive
 channel user must bind an active account before retrying, not switch to an
 administrator identity.
 
+`subscription.list` uses the current user identity and subscription ownership filtering.
+The separate global subscription integration endpoint requires a valid API_TOKEN
+and administrator identity. It is outside this skill's allowed operations and must
+never be used to bypass user scope.
+
 For QQ, either `qq_userid` or `qq_openid` may match the current channel ID; for
 Feishu, either `feishu_userid` or `feishu_openid` may match. A single matching
 field is sufficient, but the match must identify exactly one active MoviePilot
@@ -105,6 +126,13 @@ as a workaround or bypass an ambiguous binding.
 For `subscription.update`, omit settings that should stay unchanged. Send JSON
 `null` to clear a supported optional setting; see [Subscription APIs](api/subscription.md)
 for the exact fields and the form empty-string compatibility rule.
+
+Music downloads keep an existing media category and otherwise use the Chinese
+music label as the downloader category, without changing library or metadata categories.
+qBittorrent still follows MoviePilot's configured automatic-management toggle:
+when enabled, its category rules control the save location; when disabled,
+MoviePilot omits the category and explicitly disables automatic management so
+the requested `save_path` applies. Existing tasks are not reclassified or moved.
 
 This file is intentionally kept as the routing and execution guide. Detailed
 operation contracts live in the linked category files under `api/`; load only
@@ -140,6 +168,9 @@ downloader mappings when switching path modes.
    identifiers and use the documented pagination fields. Pass object and array
    bodies as native JSON values, and pass null only when the selected operation
    allows it. The only string body is the literal `"dev"` for `system.upgrade.dev`.
+   If a model JSON-encodes the whole body, every gateway entrypoint restores one
+   layer of object, array, or null before validation and dispatch. Nested string
+   values stay unchanged, and the selected operation's contract still applies.
    Never flatten operation fields next to `operation_id`: put each in its declared
    `path_params`, `query`, or `body` container. Do not copy pagination or filters
    from another operation. An `invalid_input` response names the failing field
@@ -209,18 +240,40 @@ frontmatter allowlist, and the matching gateway contract together.
 
 ## API Surface Scope
 
+System widget endpoints under `/api/v1/widget/*` are outside this skill and the Agent tool catalog.
+Context, registration, and owner revocation use the existing main login. Snapshot reads and self
+revocation use a separate, expiring, read-only Bearer; never use it as an ordinary API/MCP login
+credential, or enable, rotate, or export widget grants on a user's behalf. Reading context must not
+issue or rotate credentials. See `docs/widgets.md` for the protocol and user scope. System extensions
+must not hold the main login token.
+
+Plugin metadata may include `plugin_readme`, an optional HTTP(S) documentation link.
+The UI resolves missing links through the admin REST endpoint
+`GET /api/v1/plugin/readme/{plugin_id}?repo_url=...`, which returns `url` or null
+without installing the plugin. This endpoint does not add an Agent operation.
+
+For installed plugins with a bound source, `plugin.market` only lists an update
+when that repository has a newer version. A higher version in another repository
+does not trigger `has_update`. Use `plugin.source.options` to inspect alternative
+sources; switching sources still requires an explicit source change. Installed
+plugins without a bound source retain market candidates for source selection.
+
 Operations declare an identity scope: `public` reads external public metadata without requiring a channel account binding; `bound_user` uses the active MoviePilot user bound to the stable channel sender ID (Web uses its authenticated user ID); `admin` requires administrator authority. Read-only does not mean public. Channel nicknames never establish identity. Personal records and subscription writes retain their existing ownership and permission checks.
 
 When identity resolution fails, relay the gateway's actual remediation message and sender ID. Channel users bind their own MoviePilot account via avatar > Personal Information > Account Binding, fill the named channel field, and save. Do not invent a Settings > Users binding page, substitute nicknames/group/bot IDs, diagnose an ambiguous binding failure as a network issue, or ask Web users to bind a notification channel. Public operations do not require binding.
 
 This Skill is the complete callable MoviePilot business API surface for the
 Agent. Every operation in `allowed-api-operations` has one exact parameter
-contract in a category file and one matching MCP `tools/list` branch. There is
+contract in a category file and one matching MCP `tools/list` branch in the
+default `full` schema mode. Clients explicitly sending
+`X-MCP-Schema-Mode: compact` receive a best-effort projection for oversized
+schemas; exact operation contracts remain available here and through
+`GET /api/v1/mcp/tools/moviepilot_api/schema`. There is
 no hidden fallback to an arbitrary REST route.
 
 MoviePilot's underlying OpenAPI document is larger because it also serves the
 web UI, authentication, account lifecycle, binary and streaming responses,
-callbacks, compatibility endpoints, and source-specific presentation routes.
+callbacks, compatibility endpoints, and GitHub recognition/presentation routes.
 Those routes are deliberately not copied into this Skill. A non-listed route
 must be one of the following before the Agent may use its capability:
 
@@ -232,15 +285,19 @@ must be one of the following before the Agent may use its capability:
 - explicitly unapproved until a role, effect, confirmation, recovery, result,
   and English parameter contract is added.
 
-The maintained route-by-route inventory is
-`docs/refactor/agent-api-surface-audit.md`. Its generated drift test fails
-when OpenAPI changes without an explicit ownership decision.
+The maintained route-by-route inventory is the fixed registry in
+`app/agent/policy/api.py`. The drift test fails when OpenAPI changes without an
+explicit ownership decision.
 
 The management recovery route `POST /api/v1/history/transfer/{history_id}/discard-corrupt`
 is reserved for direct authenticated management clients and is not a callable
 Agent operation. It clears corrupt task state while retaining the history record.
 
 ## Calling Contract
+
+MCP operation and field descriptions are written in Chinese; operation IDs, field names,
+enum values, and request shapes retain their exact documented spelling. The compact schema
+rewrites descriptions that refer to omitted branches; use the full schema for precise inputs.
 
 Setting a subscription to state `S` stops queued and running automatic searches at safe
 boundaries, including new-subscription and site-retry tasks. An explicit subscription search
@@ -260,6 +317,12 @@ Call the gateway with this shape:
 
 ### Common read and download contracts
 
+`search.recommend` with `check_only=true` reads current status without loading search results.
+Disabled recommendations return `disabled` immediately. `force=true` takes precedence over
+the read-only flag and loads candidates to start a new task.
+The browser endpoints `/media/status` and `/subscribe/calendar` are outside the Agent
+operation catalog; do not invent gateway calls for them.
+
 Select the operation for the task first, then send only fields declared by that operation. Common verification contracts are:
 
 | operation_id | `path_params` | `query` |
@@ -268,6 +331,10 @@ Select the operation for the task first, then send only fields declared by that 
 | `subscription.list` | none | optional `page`, `count` |
 | `download.tasks.active` | none | optional `page`, `count`, `name` |
 | `site.list` | none | optional `page`, `count`, `name`, `status=all\|active\|inactive` |
+
+`site.category` returns category entries without search settings. Category `id`
+values may be integers or text; numeric strings retain the integer response.
+Join selected IDs with commas for `site.resource`'s `query.cat`, preserving text IDs.
 
 Subscription execution logs are browser resource endpoints:
 `GET /api/v1/subscribe/{subscription_id}/logs` (SSE, or text with `length=-1`)
@@ -297,6 +364,9 @@ token exchange downloads retain their existing credential rules.
   `music_type=recording|album|artist`; an artist is browse-only.
 - Treat `success=false`, HTTP error data, empty results, and validation errors as
   real outcomes. Do not claim success without checking the response.
+- `media.scrape` reports rejected media and failed NFO writes as business failures,
+  including failures within a directory. For concurrent custom-filter changes,
+  re-read the rules and confirm the intended change before retrying a conflict.
 - Respect an explicit `execution_outcome`: `pending` is accepted but unfinished,
   while `unknown` means a write may have happened. Do not repeat an unknown write
   or change defaults merely to evade duplicate protection. In the built-in Agent,
@@ -306,12 +376,37 @@ token exchange downloads retain their existing credential rules.
   `read_tool_result` for the next page instead of repeating the operation. These
   receipt and result tools are internal to the Agent, not external MCP tools.
 
+## Agent Task And Conversation State
+
+- For `agent_task` updates, `enabled=null` preserves the current enabled state. Renaming a paused task does not resume its schedule.
+- `agent_task` pins a real execution account at creation. Channel senders must uniquely bind to an active MoviePilot user. Background API calls retain that account's permissions, and invalid identity fails the run. Confirm legacy tasks with `update` in their original conversation or recreate them; never substitute a same-name account or fall back to the superuser.
+- Traditional message sessions are scoped by channel, configured source, and user ID. A stop, clear, status query, or confirmation targets the current source's session.
+- Background WebAgent completion appends the current turn to display history. Frontend complete snapshots keep their existing replacement contract.
+- Complete snapshot replacement retains hidden choice receipts so delayed snapshots cannot restore a selected card to pending; ordinary messages retain replacement behavior.
+- WebAgent choice callbacks save the first selection before replying. `already_selected=true` means
+  execution was claimed; restore its feedback without sending another message. Unclaimed selections
+  can retry the same value. Idle waiting workers do not count toward `is_processing`.
+- WebAgent temporary attachments are scoped to their creating account. Download, voice transcription, and attachment events accept only references registered to the current account; cross-account access is treated as missing.
+- File creation with `overwrite=false` rejects a concurrent creator. Versioned edits reject a peer's intervening write; reread the file and use its current SHA before retrying.
+- Market skill installation preserves an explicitly selected GitHub branch. If that branch is unavailable, treat installation as failed instead of silently switching branches.
+
+## Subscription Identity And Workflow Recovery
+
+- Preserve media type, source, media ID, season, episode group, and music entity type when finding or creating a subscription. Movies and TV series with the same numeric ID are distinct targets. Keep the episode group in source-based lookup.
+- Concurrent creation for the same user and identity returns the existing subscription ID. An update to an existing target identity cancels that update; reread both subscriptions before deciding the next step.
+- Changing the work, season, episode group, or music entity resets the previous target's download and upgrade progress. Missing episodes restart from the new total; clearing the episode group also changes the target.
+- Servarr duplicate series additions return the real existing subscription ID. If a cancelled search loses its executor, lease expiry settles the cancellation and permits a new search.
+- Workflow recovery retries failed nodes and nodes skipped because of failed dependencies while retaining successful node results. Editing a paused workflow keeps its timer disabled; Cron uses the host scheduler timezone.
+
 ## Collection Counts And Pagination
 
 - Search SSE `manual_paging=true` is a Web-only page-by-page mode and adds no Agent
   operations; keep using the documented `search.*` operations. Web streams search
   sites concurrently and emit `append` previews before the final filtered page;
   only the completed result carries source state for advancing page numbers.
+- Recent `search.results` snapshots belong to the authenticated user; search again after
+  upgrading to populate them. Optional Web `done.diagnostics` uses `scope=page` for the current
+  page. Skipped rule groups do not increase the resource rejection count.
 - For list inspection, explicitly send the operation's documented pagination
   fields instead of requesting an unbounded legacy result. For optional legacy
   pagination, start with `query={"page":1,"count":20}`.
@@ -345,3 +440,12 @@ Use `memory(target="user")` for cross-task preferences and `memory(target="memor
 environment facts. Procedures belong in the relevant skill, not duplicated in both stores.
 A background proposal to replace/remove memory needs the user's explicit `/memory approve ID`;
 never infer that confirmation from a tool result or a prior conversation.
+
+
+### Download submission provenance
+
+New records returned by `download.history.list` may include `note.subscription_download`:
+`submission_type` (`initial` or `upgrade`), `best_version_full`, and the initial and upgraded episode lists.
+Filling missing episodes remains an initial download even when quality upgrades are enabled.
+A pack containing both missing and previously downloaded episodes counts as an upgrade and retains both lists.
+Do not infer provenance from current subscription settings when an older history record has no marker.

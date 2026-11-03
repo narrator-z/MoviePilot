@@ -1,4 +1,6 @@
-"""通过固定宿主 API 路由执行 Agent 业务操作。"""
+"""
+通过固定宿主 API 路由执行 Agent 业务操作。
+"""
 
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from app.agent.policy.contracts import ActionEffect
 from app.agent.policy.sanitizer import stable_type_name
 from app.application.security.token import create_access_token
 from app.runtime.log import logger
+from app.runtime.priority import PRIORITY_HEADER, interactive_key
 from app.runtime.settings import get_runtime_setting
 
 _DEFAULT_API_REQUEST_TIMEOUT_SECONDS = 30
@@ -25,17 +28,34 @@ _SEARCH_TORRENTS_REQUEST_TIMEOUT_SECONDS = 290
 
 
 class ApiExecutionError(RuntimeError):
-    """固定 API 路由无法构造或请求失败。"""
+    """
+    固定 API 路由无法构造或请求失败。
+    """
 
     def __init__(self, message: str, *, external_may_continue: bool = False) -> None:
-        """区分调用前拒绝和请求发出后无法确认的外部副作用。"""
+        """
+        区分调用前拒绝和请求发出后无法确认的外部副作用。
+        """
         super().__init__(message)
         self.external_may_continue = external_may_continue
 
 
 @dataclass(frozen=True)
 class ApiExecutionContext:
-    """API 请求使用的 Agent 身份和会话上下文。"""
+    """
+    API 请求使用的 Agent 身份和会话上下文。
+
+    :param user_id: 可信入口解析的调用用户标识
+    :param username: 用于签发 API 身份的用户名；未提供时为 None
+    :param is_admin: 调用身份是否具有管理员权限
+    :param session_id: 关联的 Agent 会话标识；无会话时为 None
+    :param channel: 调用所属消息渠道；直接 API 调用可为 None
+    :param source: 渠道内的消息来源标识；没有来源时为 None
+    :param public_read_only: 是否仅允许使用宿主身份查询公共资料；不能复用于其他操作
+    :param channel_user_id: 发起会话的用户在消息渠道内的原始标识，如 Telegram 用户 ID；
+        与渠道一起写入宿主令牌的签名声明，供命令回执等需要回复原渠道的场景使用，
+        不参与 API 用户鉴权；无渠道时为 None
+    """
 
     user_id: str
     username: str | None
@@ -43,12 +63,14 @@ class ApiExecutionContext:
     session_id: str | None = None
     channel: str | None = None
     source: str | None = None
-    # 使用宿主身份的公共查询不能复用于其他 operation。
     public_read_only: bool = False
+    channel_user_id: str | None = None
 
 
 class MoviePilotApiExecutor:
-    """把 operation ID 转换为受控的 MoviePilot REST API 请求。"""
+    """
+    把 operation ID 转换为受控的 MoviePilot REST API 请求。
+    """
 
     _ALLOWED_SOURCES = frozenset({"tmdb", "douban", "bangumi", "anilist"})
     _ALLOWED_DOWNLOAD_ACTIONS = frozenset({"start", "stop"})
@@ -65,13 +87,17 @@ class MoviePilotApiExecutor:
         context: ApiExecutionContext,
         request_factory: type[AsyncRequestUtils] = AsyncRequestUtils,
     ) -> None:
-        """绑定调用身份和 HTTP 传输工厂。"""
+        """
+        绑定调用身份和 HTTP 传输工厂。
+        """
         self._context = context
         self._request_factory = request_factory
 
     @staticmethod
     def _resolve_base_url() -> str:
-        """按后端监听地址直连本机 API，不依赖对外域名和反向代理。"""
+        """
+        按后端监听地址直连本机 API，不依赖对外域名和反向代理。
+        """
         host = str(get_runtime_setting("HOST", "127.0.0.1") or "127.0.0.1").strip("[]")
         # 通配监听地址按相同地址族回环，兼容只监听 IPv6 的部署。
         host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
@@ -86,7 +112,9 @@ class MoviePilotApiExecutor:
         route: ApiOperationRoute,
         path_params: Mapping[str, Any],
     ) -> str:
-        """替换固定路由占位符并校验具有枚举约束的路径参数。"""
+        """
+        替换固定路由占位符并校验具有枚举约束的路径参数。
+        """
         rendered = route.path
         required = []
         cursor = 0
@@ -111,26 +139,43 @@ class MoviePilotApiExecutor:
         return rendered
 
     def _build_headers(self) -> dict[str, str]:
-        """构造宿主令牌和请求上下文头，并确保头值符合 ASCII 约束。"""
+        """
+        构造宿主令牌和请求上下文头，并确保头值符合 ASCII 约束。
+        """
         user_id = str(self._context.user_id or "")
         if not user_id.isdigit():
             raise ApiExecutionError("当前 Agent 身份没有可用于 API 鉴权的用户 ID")
-        token = create_access_token(
-            userid=int(user_id),
-            username=self._context.username or user_id,
-            super_user=self._context.is_admin,
-        )
+        username = self._context.username or user_id
+        if self._context.channel and self._context.channel_user_id and not self._context.public_read_only:
+            # 渠道发起人写入宿主签名声明而非请求头，外部调用者无法伪造命令回执和会话操作的目标。
+            token = create_access_token(
+                userid=int(user_id),
+                username=username,
+                super_user=self._context.is_admin,
+                agent_channel=self._context.channel,
+                agent_channel_user=self._context.channel_user_id,
+            )
+        else:
+            token = create_access_token(
+                userid=int(user_id),
+                username=username,
+                super_user=self._context.is_admin,
+            )
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
         }
         if self._context.session_id:
-            headers["X-MoviePilot-Agent-Session"] = self._context.session_id
+            # 会话标识由渠道内的原始用户标识拼装，微信等渠道可能含中文；与渠道、来源一致做 URL 编码后再发送。
+            headers["X-MoviePilot-Agent-Session"] = quote(str(self._context.session_id), safe="")
         if self._context.channel:
             # 渠道值来自通知渠道枚举，也可能来自插件扩展；统一 URL 编码可兼容两者。
             headers["X-MoviePilot-Agent-Channel"] = quote(self._context.channel, safe="")
         if self._context.source:
             headers["X-MoviePilot-Agent-Source"] = quote(self._context.source, safe="")
+        execution_key = interactive_key()
+        if execution_key:
+            headers[PRIORITY_HEADER] = execution_key
         return headers
 
     @classmethod
@@ -139,7 +184,9 @@ class MoviePilotApiExecutor:
         payload: Any,
         headers: Mapping[str, Any],
     ) -> Any:
-        """把 REST 数量响应头投影为 Agent 可直接读取的附加集合元数据。"""
+        """
+        把 REST 数量响应头投影为 Agent 可直接读取的附加集合元数据。
+        """
         if not isinstance(payload, Mapping):
             return payload
         normalized_headers = {
@@ -172,7 +219,9 @@ class MoviePilotApiExecutor:
         query: Mapping[str, Any] | None = None,
         body: Any = None,
     ) -> str:
-        """执行白名单 operation，并把响应转换为稳定 JSON 文本。"""
+        """
+        执行白名单 operation，并把响应转换为稳定 JSON 文本。
+        """
         if self._context.public_read_only and operation_id not in API_UNBOUND_READ_OPERATIONS:
             raise ApiExecutionError("公共查询执行器不允许访问个人数据或执行其他操作")
         route = resolve_api_route(operation_id)

@@ -1,6 +1,12 @@
+"""
+验证NexusPHP 页面结构与种子字段兼容。
+"""
+
 # -*- coding: utf-8 -*-
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from lxml import etree
 
 from app.modules.indexer.parser.nexus_php import NexusPhpSiteUserInfo
@@ -17,6 +23,133 @@ def _build_parser() -> NexusPhpSiteUserInfo:
         apikey=None,
         token=None,
     )
+
+
+def test_nexus_php_depthstudio_traffic_falls_back_to_details():
+    """
+    首页解析失败后从详情表格补齐流量，不依赖卡片类名或实际流量。
+    """
+    html_text = (Path(__file__).parent / "fixtures" / "depthstudio_userdetails.html").read_text(encoding="utf-8")
+    html = etree.HTML(html_text)
+    homepage = etree.tostring(html.xpath("//div")[0], encoding="unicode")
+    homepage = homepage.replace("info-stat", "other-style")
+    parser = _build_parser()
+
+    parser._parse_user_base_info(homepage)
+
+    assert parser.upload == 0
+    assert parser.download == 0
+
+    parser._parse_user_detail_info(html_text)
+
+    assert parser.upload == round(323.04 * 1024 ** 3)
+    assert parser.download == round(73.54 * 1024 ** 3)
+    assert parser.ratio == 4.393
+
+
+def test_nexus_php_detail_traffic_preserves_nonzero_values():
+    """
+    详情兜底不能覆盖已有的非零流量和分享率。
+    """
+    parser = _build_parser()
+    parser._parse_user_base_info(
+        "<html><body>上传量: 1 GB 下载量: 2 GB 分享率: 0.5</body></html>"
+    )
+    original = parser.upload, parser.download, parser.ratio
+
+    parser._parse_user_detail_info(
+        '<table><tr><td><strong>上传量</strong>: 323.04 GB</td>'
+        '<td><strong>下载量</strong>: 73.54 GB</td></tr>'
+        '<tr><td><strong>分享率</strong>: 4.392</td></tr></table>'
+    )
+
+    assert (parser.upload, parser.download, parser.ratio) == original
+
+
+@pytest.mark.parametrize("homepage, expected_upload, expected_download, expected_ratio", [
+    ("上传量: 1 GB", 1024 ** 3, round(73.54 * 1024 ** 3), 4.392),
+    ("下载量: 0 B 分享率: 0", round(323.04 * 1024 ** 3), round(73.54 * 1024 ** 3), 4.392),
+    ("上传量: 0 B 下载量: 0 B 分享率: 0", round(323.04 * 1024 ** 3), round(73.54 * 1024 ** 3), 4.392),
+    ("上传量: 1 GB 下载量: 2 GB 分享率: 0", 1024 ** 3, 2 * 1024 ** 3, 4.392),
+])
+def test_nexus_php_detail_traffic_fills_zero_fields(
+    homepage, expected_upload, expected_download, expected_ratio
+):
+    """
+    零值字段允许从详情补读，分享率优先取详情表格的显示值。
+    """
+    parser = _build_parser()
+    parser._parse_user_base_info(f"<html><body>{homepage}</body></html>")
+    detail = (Path(__file__).parent / "fixtures" / "depthstudio_userdetails.html").read_text(encoding="utf-8")
+
+    parser._parse_user_detail_info(detail)
+
+    assert parser.upload == expected_upload
+    assert parser.download == expected_download
+    assert parser.ratio == expected_ratio
+
+
+def test_nexus_php_zero_ratio_uses_final_traffic_without_displayed_ratio():
+    """
+    详情未显示分享率时，按补读后的上传/下载量重新计算零分享率。
+    """
+    parser = _build_parser()
+    parser._parse_user_base_info("<html><body>上传量: 0 B 下载量: 0 B 分享率: 0</body></html>")
+
+    parser._parse_user_detail_info(
+        '<table><tr><td><strong>上传量</strong>: 8 GB</td>'
+        '<td><strong>下载量</strong>: 2 GB</td></tr></table>'
+    )
+
+    assert parser.upload == 8 * 1024 ** 3
+    assert parser.download == 2 * 1024 ** 3
+    assert parser.ratio == 4.0
+
+
+@pytest.mark.parametrize("table, expected_upload, expected_download, expected_ratio", [
+    ('<tr><td><strong>上传量</strong>: 1.5 <span>TB</span></td>'
+     '<td><strong>下载量</strong>: 512 <span>GB</span></td></tr>',
+     round(1.5 * 1024 ** 4), 512 * 1024 ** 3, 3.0),
+    ('<tr><td>上傳量</td><td>1,024 GB</td></tr><tr><td>下載量</td><td>512 GB</td></tr>'
+     '<tr><td>分享率</td><td>2.001</td></tr>',
+     1024 ** 4, 512 * 1024 ** 3, 2.001),
+    ('<tr><td><strong>实际上传量</strong>: 1 TB</td>'
+     '<td><strong>实际下载量</strong>: 1 TB</td></tr>', 0, 0, 0.0),
+    ('<tr><td>上传量</td><td>0 B</td></tr><tr><td>下载量</td><td>0 B</td></tr>', 0, 0, 0.0),
+    ('<tr><td>上传量</td><td>未知</td></tr><tr><td>下载量</td><td>未知</td></tr>', 0, 0, 0.0),
+])
+def test_nexus_php_detail_traffic_table(table, expected_upload, expected_download, expected_ratio):
+    """
+    按表格字段识别流量，支持嵌套单位和分列布局，并排除实际流量。
+    """
+    parser = _build_parser()
+    parser._parse_user_base_info("<html><body></body></html>")
+
+    parser._parse_user_detail_info(f"<html><body><table>{table}</table></body></html>")
+
+    assert parser.upload == expected_upload
+    assert parser.download == expected_download
+    assert parser.ratio == expected_ratio
+
+
+@pytest.mark.parametrize("download, ratio_text, expected_ratio", [
+    ("512 GB", "分享率: 3.001", 3.001),
+    ("512 GB", "", 3.0),
+    ("0 B", "", 0.0),
+])
+def test_nexus_php_legacy_traffic(download, ratio_text, expected_ratio):
+    """
+    保留传统页面解析、分享率计算及零下载量行为。
+    """
+    parser = _build_parser()
+
+    parser._parse_user_traffic_info(
+        f"<html><body>上传量: 1.5 TB 下载量: {download} {ratio_text}</body></html>"
+    )
+
+    assert parser.upload == round(1.5 * 1024 ** 4)
+    assert parser.download == (512 * 1024 ** 3 if download == "512 GB" else 0)
+    assert parser.ratio == expected_ratio
 
 
 def test_nexus_php_seeding_next_page_stops_when_userid_missing():
@@ -92,7 +225,9 @@ def test_nexus_php_pttime_homepage_parses_bonus_and_user_level():
 
 
 def test_nexus_php_pttime_marker_requires_common_level_for_current_user():
-    """UID 标记缺少通用等级或属于其他用户时，不应解析站点专用等级。"""
+    """
+    UID 标记缺少通用等级或属于其他用户时，不应解析站点专用等级。
+    """
     parse_marker = NexusPhpSiteUserInfo._parse_user_level_marker
 
     assert parse_marker("[UID=67537][(初中)]", "67537") is None
@@ -308,7 +443,9 @@ def test_nexus_php_seeding_list_replaces_profile_fallback_without_double_countin
 
 
 def test_custom_seeding_endpoints_and_pterclub_navigation_headers():
-    """已确认的定制站点直接使用真实入口，猫站请求头不影响其他站点。"""
+    """
+    已确认的定制站点直接使用真实入口，猫站请求头不影响其他站点。
+    """
     endpoints = {
         "pterclub.net": "getusertorrentlist.php?userid=123&type=seeding",
         "pterclub.com": "getusertorrentlist.php?userid=123&type=seeding",
@@ -332,7 +469,9 @@ def test_custom_seeding_endpoints_and_pterclub_navigation_headers():
 
 
 def test_keepfrds_unmarked_columns_preserve_profile_count(monkeypatch):
-    """朋友列表含做种时长，汇总数量与可见明细不一致时保留汇总和真实明细体积。"""
+    """
+    朋友列表含做种时长，汇总数量与可见明细不一致时保留汇总和真实明细体积。
+    """
     parser = _build_parser()
     parser._site_domain = "keepfrds.com"
     parser._parse_site_page('<a href="userdetails.php?id=123">user</a>')
@@ -349,7 +488,9 @@ def test_keepfrds_unmarked_columns_preserve_profile_count(monkeypatch):
 
 
 def test_pterclub_profile_size_overrides_partial_paginated_list(monkeypatch):
-    """猫站汇总体积优先于分页明细累加，翻页继续沿用导航头且不重复汇总。"""
+    """
+    猫站汇总体积优先于分页明细累加，翻页继续沿用导航头且不重复汇总。
+    """
     parser = _build_parser()
     parser._site_domain = "pterclub.net"
     parser._parse_site_page('<a href="userdetails.php?id=123">user</a>')
@@ -360,7 +501,9 @@ def test_pterclub_profile_size_overrides_partial_paginated_list(monkeypatch):
     calls = []
 
     def get_page(**kwargs):
-        """回放分页内容并记录请求参数。"""
+        """
+        回放分页内容并记录请求参数。
+        """
         calls.append(kwargs)
         if len(calls) == 1:
             return page + '<a href="getusertorrentlist.php?page=1">下一页</a>'
@@ -377,14 +520,18 @@ def test_pterclub_profile_size_overrides_partial_paginated_list(monkeypatch):
 
 
 def test_putao_summary_only_does_not_follow_global_torrent_list(monkeypatch):
-    """葡萄只取明确做种计数，不推算体积或扫描全站列表。"""
+    """
+    葡萄只取明确做种计数，不推算体积或扫描全站列表。
+    """
     parser = _build_parser()
     parser._site_domain = "pt.sjtu.edu.cn"
     parser._parse_site_page('<a href="userdetails.php?id=123">user</a>')
     calls = []
 
     def get_page(**kwargs):
-        """回放葡萄异步汇总响应。"""
+        """
+        回放葡萄异步汇总响应。
+        """
         calls.append(kwargs)
         return '<div>当前做种 21 完成种子数 2 未完成种子数 138</div>'
 
@@ -398,7 +545,9 @@ def test_putao_summary_only_does_not_follow_global_torrent_list(monkeypatch):
 
 
 def test_nexus_empty_seeding_response_logs_warning(monkeypatch):
-    """接口失败为空时应提示可诊断警告，并保留详情页汇总。"""
+    """
+    接口失败为空时应提示可诊断警告，并保留详情页汇总。
+    """
     parser = _build_parser()
     parser.userid = "123"
     parser.seeding = 7
@@ -413,7 +562,9 @@ def test_nexus_empty_seeding_response_logs_warning(monkeypatch):
 
 
 def test_pterclub_headers_reach_http_transport_and_failures_are_visible(monkeypatch):
-    """导航头实际传递给统一 HTTP 客户端，404/403 警告不暴露 Cookie 或用户标识。"""
+    """
+    导航头实际传递给统一 HTTP 客户端，404/403 警告不暴露 Cookie 或用户标识。
+    """
     from types import SimpleNamespace
 
     parser = _build_parser()
@@ -422,7 +573,9 @@ def test_pterclub_headers_reach_http_transport_and_failures_are_visible(monkeypa
     calls, warnings = [], []
 
     def get_response(**kwargs):
-        """回放 HTTP 失败响应，验证传输层参数。"""
+        """
+        回放 HTTP 失败响应，验证传输层参数。
+        """
         calls.append(kwargs)
         return SimpleNamespace(status_code=404, text="File not found.")
 

@@ -7,12 +7,18 @@
 pytest 是唯一运行入口。`tests/conftest.py` 在收集前完成隔离引导，因此任何方式启动 pytest 都会自动隔离。
 
 ```bash
-uv run --locked --no-sync pytest tests                              # 串行全量
-uv run --locked --no-sync pytest tests/test_xxx.py                  # 单文件
-uv run --locked --no-sync pytest tests/test_xxx.py::SomeTest::test_y   # 单用例
-uv run --locked --no-sync python tests/run.py                       # 默认按文件预计耗时均衡为 4 片并行跑全量
-uv run --locked --no-sync python tests/run.py --serial              # 串行全量，便于调试或生成覆盖率
-uv run --locked --no-sync python tests/run.py --shard 1/4           # 只跑指定分片，供 CI 复用
+# 串行全量
+uv run --locked --no-sync pytest tests
+# 单文件
+uv run --locked --no-sync pytest tests/test_xxx.py
+# 单用例
+uv run --locked --no-sync pytest tests/test_xxx.py::SomeTest::test_y
+# 默认按文件预计耗时均衡为 4 片并行跑全量
+uv run --locked --no-sync python tests/run.py
+# 串行全量，便于调试或生成覆盖率
+uv run --locked --no-sync python tests/run.py --serial
+# 只跑指定分片，供 CI 复用
+uv run --locked --no-sync python tests/run.py --shard 1/4
 ```
 
 `tests/run.py` 的 runner 参数只有 `--serial`、`--shard N/TOTAL` 和 `--exclude-architecture-gate`；其余参数保持原顺序
@@ -51,6 +57,22 @@ focused 测试验证，不要求启动产品全套测试。
 目标 base 复现或其他充分证据说明，并按 `docs/rules/12-collaboration-and-distribution.md`
 的已记录维护者决定处置。已预授权的同一范围无需逐次重问，缺少证据时保留未知，不伪报通过。
 
+持久通知恢复由 `tests/test_outbox_recovery.py` 使用临时 SQLite、真实线程及屏障验证：
+整理事件阻塞时下载通知仍能完成、同类事件不会并行重复认领、在途租约续期、崩溃租约接管、
+提交失败与取消后的重试，以及关闭超时保留资源。`tests/test_telegram.py` 覆盖海报失败后的文本
+兜底、会话/话题/按钮保留、429 不追加请求，以及发送失败不能被 outbox 当作成功确认。
+
+AppPush 的所有用户范围由 `tests/test_notification_routing_parity.py` 验证：下载、入库和订阅消息
+经同步、异步与持久事件入口到达真实渠道；明确用户和管理员范围保持隔离，组合范围不重复发送。
+`tests/test_user_repository.py` 使用临时数据库验证接收集合只含启用账号的不可变身份，
+`tests/test_apppush.py` 验证无明确范围时不广播，以及单账号投递失败不阻断其他账号；投递 HTTP 均使用替身。
+
+`tests/test_db_error_diagnostics.py` 在临时 SQLite 的同步及异步连接池中注入
+`SQLITE_IOERR_SHORT_READ`：失败事务保留原始异常、不自动重放写入，后续独立事务
+使用新连接恢复；锁争用和约束错误不触发额外的连接失效。
+`tests/test_event_runtime_components.py` 验证 `SystemError` 处理器失败时只记日志，
+不再调用通知回调或派生错误广播。此回归不模拟真实磁盘故障，也不保证持续 I/O 故障时数据库可用。
+
 ## 隔离模型（`tests/conftest.py`）
 
 收集任何测试模块、`import app.*` **之前**，conftest 完成两件事：
@@ -64,6 +86,24 @@ focused 测试验证，不要求启动产品全套测试。
 - 用例**不得**依赖某个本地才有的动态模块副本；缺失的外部模块由 conftest 兜底或用例自行 mock。
 
 ## 外部依赖：一律 mock，零真实网络
+
+AniList 直接访问官方 GraphQL 接口，不再探测 `trace.moe/anilist/`。中文数据集保存在
+`<CONFIG_DIR>/cache/anilist/anilist-chinese.json`，有效期 24 小时，同步、异步查询和重建客户端
+共用快照；配置 `GITHUB_PROXY` 时先直连镜像，失败再按 `PROXY` 访问原始 GitHub 地址。
+下载失败保留过期数据并在五分钟后重试，目录或文件读写失败时仍可使用已下载的内存数据。
+`tests/test_anilist_translations.py` 使用临时目录和下载替身验证重建客户端后的缓存复用、到期刷新、
+坏缓存、磁盘故障、镜像回退、同步异步并发去重及取消后释放锁；不据此推断真实代理耗时。
+
+高清杜比换域回归由 `tests/test_hddolby_spider.py`、`tests/test_hddolby_parser.py` 和
+`tests/test_site_connectivity.py` 验证：网页使用 `www.uhddolby.com` 时，搜索、用户资料和
+做种统计仍可按资源的 `api_url` 访问 `api.hddolby.com`，并保留站点代理和认证配置。
+API 连接失败或返回 HTTP 错误时，连通性提示指出实际接口主机；网页解析成功不能代替
+API 验证。错误提示和搜索告警不得输出地址中的账号、密码或查询令牌。测试不使用真实站点凭据。
+
+社区勋章使用 `tests/test_community_medal_background.py` 验证启动主动预热、无人访问时的六小时
+更新、失败后的自动重试及 TaskRegistry 关闭。外部下载或远端开关被屏障阻塞时，查询必须在
+屏障释放前返回当前快照；冷启动通过 `refreshing` 表示后台尚未完成，不能把刷新锁或网络等待
+转移到页面请求。`tests/test_community_medals.py` 保留凭据隔离、有效开关和名单协议覆盖。
 
 测试**禁止**发起任何真实外部请求，包括但不限于 TMDB（`api.themoviedb.org`）、LLM 目录（`models.dev`）、下载器、媒体服务器、MP 服务器（`movie-pilot.org` 的共享识别 API）、以及任意外链图片/资源。**验收标准是全量跑测零真实出站**。
 
@@ -93,6 +133,12 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 
 ### 存储与监控的边界回归
 
+`tests/test_transfer_safe_overwrite.py` 使用真实临时文件验证覆盖失败保留旧文件，
+并在持久步骤边界模拟中断；copy、move、硬链接和软链接均须先完成新文件再替换旧目标。
+恢复回归还需验证源文件被替换、新目标变成半文件、备份被替换以及历史清理的符号链接路径，
+不能仅凭路径存在就删除源文件或旧备份。
+远端状态不明保持人工复核，不能通过删除旧文件后盲目重试证明成功。
+
 存储快照用例优先在 SDK 的目录列表、stat、类型查询和连接边界打桩，保留真实的路径映射、
 文件项构造、快照遍历及轮询逻辑。仅替换 `snapshot_storage` 的返回值可以验证轮询器，
 但不能证明存储适配器正确区分了空目录与查询失败。
@@ -108,7 +154,36 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 这些场景只承诺已验证的 SMB 查询语义；为其他存储接入严格快照时，应在其 SDK/API
 边界复现同样的状态转换，并评估目录时间语义、分页和请求成本。
 
+`tests/test_u115_storage.py` 在 115 API 边界验证目录时间不推进时的深层新增、修改、
+保留旧时间的文件移入和删除，兼容空基线，并覆盖千条分页、递归深度和重复派发。
+115 快照不再按目录时间剪枝；扫描间隔、深度和接口限流不变，但每轮可能增加目录列表请求。
+这些用例不代表 115 已接入严格查询或验证了查询失败时的快照原子性。
+
+### 存储严格查询回执回归
+
+`tests/test_storage_cleanup_receipts.py` 通过真实 StorageChain、模块调度器和 FileManager，
+验证未知存储、未初始化模块、缺失模块和适配器不可用均保留整理历史。自定义存储提供方
+放在插件优先路径或宿主前后顺序时，都须能传递明确的文件项/不存在回执；普通查询仍可返回空值。
+
 ## 种子下载重试回归
+
+下载选集回归使用真实 qBittorrent/Transmission Module 与离线下载器端口，验证自定义识别词
+从订阅计划一直传到下载器文件选择；目标集数不匹配或优先级未确认时不启动任务，不能写成功历史。
+启动结果未知时尝试确认暂停；无法确认则明确要求检查下载器，不能宣称任务已停止。
+已有下载任务只按原始种子 info 字节或磁力中的 v1/v2 哈希确认，名称与大小相同不能接管任务。
+
+`tests/test_download_category.py` 从真实下载链经过 qBittorrent 模块和客户端，在 SDK 边界检查
+音乐缺分类时使用“音乐”、已有分类优先，以及自动管理开关和指定路径的传递。
+覆盖豆瓣音乐、MusicBrainz、无显式身份、专辑、单曲与艺术家合集，且下载器分类兜底不回写媒体信息。
+
+`tests/test_music_bilingual_matching.py` 在 Python/Rust 解析、同步/异步/流式搜索和订阅复核中，
+验证双语作品名及艺人署名只有在括号两侧均属于同一实体的可信名称时才匹配；
+未知别名、副标题、不同录音版本及歌曲所属专辑继续保留各自的身份边界。
+
+`tests/test_subscribe_media_id_conflict.py` 与 `tests/test_subscribe_type_conflict.py` 验证
+订阅候选已识别出的媒体来源、ID 或类型冲突时直接拒绝，不以标题、别名或年份覆盖身份。
+《剑来》同名真人与动漫的离线回归覆盖资源年份一致、共同首播年份及缺失年份，断言动漫
+不会进入下载且共享候选不被回填；身份一致的资源和未识别出身份的标题兜底仍可下载。
 
 普通电视剧首次下载的整包优先回归见 `tests/test_subscribe_paged_search.py`：订阅没有下载记录，
 且最新媒体库缺失全部目标集时，先收集所选搜索范围内的候选再尝试完整包；单页策略仍只查每个
@@ -116,11 +191,42 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 回退。已有下载记录或媒体库已有目标集时沿用补集行为，提交前重新检查当前订阅；不会开启洗版
 或写入洗版优先级。测试覆盖显式缺集列表、后页整包、不完整包和搜索期间进度变化，均隔离外部服务。
 
+整包优先也约束候选分批：已收集的整包即使排序低于分集、检查点恢复后缺少临时下载地址，
+也须先恢复地址并共同进入下载选择；多个整包不完整、下载失败或恢复后已不可用时才回退分集。
+`tests/test_search_scan.py` 与 `tests/test_subscribe_paged_search.py` 在离线边界验证恢复、过滤和
+实际下载提交的先后顺序，同时保留普通补集按可用前缀提交的行为。
+
+同一轮分页搜索在站点冷却或时间片结束后恢复时，沿用已处理候选记录，避免无可用集数的
+候选反复重取原页并占用翻页预算。`tests/test_search_scan.py` 使用临时 SQLite、真实站点预算
+和虚拟时钟覆盖秒级冷却下的连续恢复，验证剩余来源继续翻页、末页候选处理后正常收尾，
+且未收录缺集仍保留。新一轮搜索或缺集范围扩大时重新评估候选；旧检查点缺少该记录时兼容恢复。
+
+本地流控等待由实际拒绝原因决定：访问间隔不足只等待间隔，计数配额耗尽才等待计数窗口。
+资源包说明包含上次访问时间时扣除已过去的时间，并保留一秒边界余量；原因未知时沿用保守窗口，
+时间缺失或无效时等待该规则全长。`tests/test_search_site_throttle.py`、`tests/test_search_scan.py`
+和 `tests/test_subscription_site_budget.py` 覆盖两类限制同时配置、剩余时间、时间异常与共享预算，
+验证短冷却不累计长冷却止损，也不会提前关闭优先站点。
+自动分页未实际发出请求时，共享预算取消完整请求间隔的预约，只保留实际剩余冷却；
+真实成功请求仍保留最小间隔。该收口使用临时 SQLite 验证跨订阅可见的预算时间和租约释放。
+
+全集洗版（`best_version=1`、`best_version_full=1`）的主动搜索始终使用洗版规则组，
+包括尚无下载记录或仍有缺集的订阅；未通过洗版规则的整包不会回落到普通订阅规则组。
+订阅显式指定的规则组仍优先。分集洗版中从未下载的剧集继续使用普通订阅规则。
+`tests/test_subscribe_paged_search.py` 覆盖无记录、部分及全部已下载、整季标题与显式集数包，
+验证只有符合洗版规则的完整包能够提交；没有合格候选时，不写下载事实或提升洗版优先级。
+
 种子下载重试的离线边界见 `tests/test_torrent_download_retry.py`：普通 GET 在网络失败、
 403/5xx、空响应或无法解析的响应后最多重试两次，退避为 1、2 秒。签名链接刷新、换票地址、
 首次下载确认按 HTML 表单语义读取控件，兼容单双引号、属性顺序、空 action 和提交按钮；
-仅向同来源的下载端点提交一次 POST，使用确认页地址作为 Referer。HTTP 429 或 JSON `message` / `msg` 明确提示限流时，
+仅向同来源的下载端点提交一次 POST，使用确认页地址作为 Referer。HTTP 429、JSON `message` / `msg` 或 HTML 频控页明确提示限流时，
 停止短退避重试并在通知中保留原因，不把限流响应交给种子解析器或写入无效地址缓存。
+
+`tests/test_site_request_throttle.py` 验证搜索、换票、取种子、重定向和确认 POST 共享站点的
+`limit_seconds`、`limit_interval`、`limit_count`，不同 API 主机按原站点 ID 共用额度。
+HTML `Request frequency limit, please try in N seconds` 按 N 秒冷却整个站点；冷却期间
+不再请求或刷新签名，并保留原文到通知和下载失败记录。虚拟时钟、并发许可和异步取消用例
+验证实际请求起点，缓存命中不消耗额度。无需要集数的拆包继续复用已验证的种子内容，
+不会被记录为资源下载失败；缺集变化后仍可立即选用缓存中的集数。
 测试替换 HTTP 端口与等待，不访问真实站点。
 瞬时状态不会写入 24 小时无效链接缓存；订阅记录的泛化“下载种子内容为空”使用 1 小时冷却，
 明确资源失效仍保留 24 小时冷却。每日下载配额耗尽冷却 24 小时，覆盖站点时区差异；
@@ -132,6 +238,13 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 短期签名或换票资源在下载链中屏蔽原始 enclosure，不将临时请求地址写入无效缓存。
 订阅持久化保留具体失败原因，无效种子使用 24 小时资源冷却，避免重启后每小时重复通知。
 网络异常、空响应、403/5xx 和限流仍沿用瞬时重试与流控规则，不因本次修改加入内容无效黑名单。
+下载器报告同一任务已存在且整包全部媒体文件明细已记录时，按资源指纹登记 7 天提交退避，
+使订阅不再重投同一个已持有的整包；退避只压制该资源，候选仍继续尝试同媒体的其他种子，
+订阅不会被判定完成或失败，且仅订阅来源写台账（手动补投不留冷却记录）。冷却跳过日志转述台账
+中的原因，不再把它断言成"添加下载失败"。见 `tests/test_torrent_download_retry.py` 与
+`tests/test_downloader_submission.py`。
+整包退避指纹不包含解析种子后补齐的集数，下一轮搜索仍能命中；普通失败仍按原有集数指纹隔离。
+只重复选择了已记录的部分集数、但包内仍有未记录文件时，不登记整包退避，也不把未选文件写入历史。
 
 换票资源的跨批次复用见 `tests/test_download_resource_cache.py`：种子成功解析后，
 本地 `torrents` 缓存以站点资源身份、原始换票请求和 Cookie 的摘要保存内容，命中后
@@ -140,7 +253,27 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 以及完整包和拆包保留每日限流原因并采用 24 小时冷却。缓存不保存缺集判断，
 当前识别词和允许集数仍在每批重新应用。
 
+## CUE 内容签名回归
+
+`tests/test_album_cue_cache_signature.py` 在同步及异步目录识别中等长改写真实 CUE 文件，
+恢复原 mtime，断言重新请求专辑匹配且使用新曲目。夹具使用不登记单例的专用真实 owner
+和私有目录缓存，不替换已有 MediaChain 实例或类缓存。
+
 ## 自隔离：用了什么，就还原什么
+
+`tests/test_workflow_safety.py` 使用真实工作流 manager、执行器和节点线程模拟同 ID 重跑、
+终态事务阻塞与失败，确保准入之前没有 reset/start，真实结束和最终落盘之前不释放 owner。
+虚拟时钟验证普通同步动作超时、循环等待截止与协作取消；单节点无边图可执行，坏 DAG 保存和运行均拒绝。
+`tests/test_security_user_boundaries.py` 覆盖管理权限、已有/未落库会话隔离、用户名回收、
+旧记录恢复、缓存授权以及管理员续聊保留原归属和实际执行人。
+图片代理测试通过真实组合根 HTTP Adapter 和 MockTransport 验证跳转在请求前拒绝，
+事件契约/SDK 测试同时验证诊断无原始输入和嵌套快照隔离，均无需外部网络。
+
+`tests/test_event_dispatch_snapshot.py` 使用真实线程池闸门和跨线程提交间隙验证事件关闭结算。
+同步、异步处理器正常返回、抛错或取消时，均先移除自己的 owner 登记，再发布完成信号，
+使关闭等待者不会被已完成但仍登记的句柄唤醒。同步完成观察者在通知调用栈中检查登记表；
+异步用例暂停提交线程在释放生命周期锁与登记完成回调之间的位置，处理器仍在真实事件循环中执行。
+尚未启动的异步提交取消也须清理登记、关闭原协程，并保留处理器内部停止时不等待或取消自身的语义。
 
 用例若修改了**进程级状态**——`sys.modules` 桩、单例（`Singleton._instances`）、`lru_cache`、环境变量、`settings` 字段——必须在用例或模块结束时还原。pytest 一次性导入全部测试模块，未还原的污染会扩散到后续用例，产生“单独跑过、一起跑挂”的测不准现象。
 
@@ -171,11 +304,20 @@ from app.schemas.types import MediaSource
 
 @pytest.fixture
 def sample_meta():
-    """构造一条可复用的识别元数据。"""
+    """
+    构造一条可复用的识别元数据。
+
+    :return: 包含示例标题和年份的媒体识别输入
+    """
     return MetaInfo(title="示例 (2020)")
 
 def test_recognize_prefers_explicit_identity(sample_meta, monkeypatch):
-    """显式媒体来源与原生 ID 时应优先精确识别，而非回退标题搜索。"""
+    """
+    验证指定媒体来源与原生标识时优先精确识别。
+
+    :param sample_meta: 待识别的示例媒体输入
+    :param monkeypatch: 隔离外部查询并在用例结束后恢复的测试夹具
+    """
     monkeypatch.setattr(SomeClient, "fetch", lambda *a, **k: FAKE_MOVIE)
     result = recognize(
         sample_meta,
@@ -217,7 +359,11 @@ def test_recognize_prefers_explicit_identity(sample_meta, monkeypatch):
 - **没有直接 `assert` 不等于空测试**：`pytest.raises`、辅助断言、迁移 round-trip、导入兼容和“不抛异常”都是有效契约；只有名称或注释声称存在的覆盖则需要进一步核实。
 - **删除后验证**：运行受影响文件，核对保留用例及生产代码行/分支覆盖；跨领域清理再运行 `python tests/run.py`。不降低覆盖率基线、不新增 skip、不削弱架构或兼容门禁。
 
-首轮扫描范围、删除映射和保留理由见 [后端测试清理审计](testing-cleanup.md)。
+## 插件发布快照与并发回归
+
+`tests/test_plugin_publish_snapshot.py` 固定读取快照，并在 package 返回后确定性推进远端引用，
+断言非强推冲突保留并发作者更新；自动初始化新仓后必须重新固定、读取和合并，不能把新主分支
+当空仓库。测试只替换 GitHub I/O，保留真实文件读取、清单合并与 Git Data 请求构造。
 
 ## 排查测试问题
 
@@ -229,6 +375,16 @@ def test_recognize_prefers_explicit_identity(sample_meta, monkeypatch):
   _orig = socket.getaddrinfo
   hits = []
   def _spy(host, *a, **k):
+      """
+      记录非本地主机的地址解析请求。
+
+      此探针只记录请求，仍调用真实解析函数；运行用例前须完成外部依赖隔离。
+
+      :param host: 待解析的主机名或地址
+      :param a: 原样传给地址解析函数的位置参数
+      :param k: 原样传给地址解析函数的关键字参数
+      :return: 原始地址解析函数的返回值
+      """
       if host not in ("127.0.0.1", "localhost", "::1"):
           hits.append(str(host))
       return _orig(host, *a, **k)
@@ -244,9 +400,10 @@ def test_recognize_prefers_explicit_identity(sample_meta, monkeypatch):
 - **合并检查复用**：单测/架构与 Pylint 工作流各自保留 PR、push 和手动入口。PR 完整通过全部门禁后，末尾 `CI proof (<github.sha>)` job 记录实际验证的模拟合并提交。合并 push 只在同一工作流的最新 PR 运行完整成功、证明成功、代码树完全相同、模拟合并父提交分别等于 push 前的目标分支和 PR head 时跳过重复门禁。直接 push、强制 push、基线变化、旧工作流缺少证明、失败/未完成运行或 API 异常都执行全量；不依赖提交消息，也不把 PR 的 head SHA 当作测试的合并 SHA。标准 merge/squash/rebase 仅在上述证据一致时复用。GitHub 构建与发布工作流保持独立。
 - **去重脚本验证**：`node --test .github/scripts/reuse.test.mjs` 离线覆盖成功复用及保守回退，两个检查工作流均在判定前执行。复用 job 仅持有 contents/actions/pull-requests 读取权限；没有修改分支保护设置。
 
-- **门禁**：`.github/workflows/test.yml` 在指向 `v3` 的 `pull_request` / `push` 及手动触发时，从 `uv.lock` 同步环境。宿主架构门禁分为两个并行 job，`architecture` 运行宿主依赖、运行契约、事件政策测试和基线快照，`architecture-ratchets` 运行类型、复杂度、并发、Ruff/mypy ratchet 与启动性能检查；其余测试通过 `coverage run --parallel-mode tests/run.py --exclude-architecture-gate --shard N/6` 分到 6 个 job，一次执行同时验证单测并采集覆盖率；门禁已运行的架构测试不在分片中重复执行。每个分片都有独立进程和临时 `CONFIG_DIR`，不共用 SQLite 或进程级状态，由单一报告 job 合并后检查 Application 与 Domain 的固定 80% 基线。
+- **门禁**：`.github/workflows/test.yml` 在指向 `v3` 的 `pull_request` / `push` 及手动触发时，从 `uv.lock` 同步环境。宿主架构门禁分为两个并行 job，`architecture` 运行宿主依赖、运行契约、事件政策测试和基线快照，`architecture-ratchets` 运行类型、复杂度、并发、Ruff/mypy ratchet 与启动性能检查；其余测试通过 `coverage run --parallel-mode tests/run.py --exclude-architecture-gate --shard N/6` 分到 6 个 job，一次执行同时验证单测并采集覆盖率；门禁已运行的架构测试不在分片中重复执行。每个分片都有独立进程和临时 `CONFIG_DIR`，不共用 SQLite 或进程级状态，由单一报告 job 合并后检查除 `app/plugins` 外全部 `app` Python 文件的逐文件低水位。
+- **启动性能**：`scripts/startup/performance.py --check --repeat 3` 对 `app.startup.lifecycle`、`app.factory`、`app.main` 分别执行三次冷导入采样。主启动各入口的耗时上限固定为 3000ms，本次采样中位数不超过 3 秒即通过，超过则失败；历史基线的中位数与最大值仅用于诊断，不改变该上限。宿主模块数量、生命周期组件集合与顺序、线程/任务释放和隔离采样无数据库连接的契约仍按原规则检查。
 - **跨仓观察**：`.github/workflows/architecture-observe.yml` 每周或手工检出官方插件仓最新 `main`，使用 `--check-plugins` 比较公开导入、Hook 和动态 API 契约。它只上传 `official-plugin-architecture-report.json`，不会自动刷新 fixture；语义变化必须人工审查后显式执行 `--write-plugins`。
 - **静态检查**：`.github/workflows/pylint.yml` 对指向 `v3` 的 PR、推送和手工触发运行 Pylint。PR/推送改动到的 Python 文件是硬门禁；`app/` 全量扫描保留为建议性 JSON 构建工件，存量告警不会掩盖或阻塞本次增量治理。
 - **PR 本地验证**：按上文「验证范围与维护者安排」选择 contributor 默认检查或已记录的维护者安排，统一处理证据复用与失败归属；需要断点、输出顺序或测试污染诊断时使用 `--serial`。确认受影响路径与零真实出站，准确标注验证范围；本地执行安排不改变 CI 的全量验证与复用合同。
-- **覆盖率门禁**：`Unit Tests with Coverage` jobs 会在 `v3` 的 PR、push 和手工触发中通过 `tests/run.py --exclude-architecture-gate --shard N/6` 并行采集覆盖率数据，`Coverage Report` 再合并全部分片并只读检查 Application 与 Domain 是否达到 Ubuntu/Python 3.14 canonical 的固定 80% 行覆盖率基线，同时上传 JSON / XML 工件。低于 80% 会阻塞；达到或超过 80% 不要求同步运行时语句计数。macOS 本地报告只用于诊断，不直接作为可提交基线。
+- **覆盖率门禁**：`Unit Tests with Coverage` jobs 会在 `v3` 的 PR、push 和手工触发中通过 `tests/run.py --exclude-architecture-gate --shard N/6` 并行采集覆盖率数据，`Coverage Report` 再合并全部分片并只读检查除 `app/plugins` 外全部 `app` Python 文件的逐文件低水位；已有文件覆盖率只能保持或提升，若可执行语句数减少且未覆盖行数不增加，也允许由此产生的比例下降；未覆盖行数增加仍判为回退。单独一行的 `...` 与 `pass` 一样属于无操作占位，不计入覆盖率，其他包含 `...` 的真实语句仍需覆盖。新文件必须达到至少 80%，同时上传 JSON / XML 工件。macOS 本地报告只用于诊断，不直接作为可提交基线。
 - 复现 CI 使用 `uv sync --locked`；主程序运行依赖位于 `[project].dependencies`，pytest 与覆盖率工具位于默认 `dev` 依赖组。

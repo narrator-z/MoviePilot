@@ -1,8 +1,11 @@
-"""从旧插件源码导入中识别必须提前就绪的宿主资源。"""
+"""
+从旧插件源码导入中识别必须提前就绪的宿主资源。
+"""
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import threading
 import tokenize
 from dataclasses import dataclass
@@ -12,11 +15,17 @@ from typing import Dict, FrozenSet, Iterable, Set, Tuple
 
 @dataclass(frozen=True, slots=True)
 class ResourceImportRule:
-    """描述第三方模块导入与宿主资源能力之间的静态映射。"""
+    """
+    描述第三方模块导入与宿主资源能力之间的静态映射。
 
-    capability_id: str  # 导入前必须准备的宿主能力标识
-    module_prefixes: tuple[str, ...]  # 按完整包边界匹配的第三方模块前缀
-    headed_entrypoints: tuple[str, ...]  # 已确认允许 headed 模式的公开入口
+    :param capability_id: 导入前应准备的托管资源能力标识
+    :param module_prefixes: 需要此资源的第三方模块前缀集合
+    :param headed_entrypoints: 需要有界面显示资源的精确导入入口集合
+    """
+
+    capability_id: str
+    module_prefixes: tuple[str, ...]
+    headed_entrypoints: tuple[str, ...]
 
 
 # 旧插件可能绕过宿主浏览器门面直接调用 CloakBrowser。其六个 launch
@@ -38,20 +47,26 @@ RESOURCE_IMPORT_RULES: tuple[ResourceImportRule, ...] = (
 
 
 _scan_cache_lock = threading.RLock()
-_scan_cache: Dict[Path, Tuple[int, int, int, int, int, FrozenSet[str]]] = {}
+_scan_cache: Dict[Path, Tuple[bytes, FrozenSet[str]]] = {}
 
 
 class PluginResourceImportScanError(RuntimeError):
-    """表示单个插件源码无法生成可靠的精确资源集合。"""
+    """
+    表示单个插件源码无法生成可靠的精确资源集合。
+    """
 
 
 def _all_resource_capabilities() -> FrozenSet[str]:
-    """扫描不完整时返回全部已登记资源，避免漏失导入前置条件。"""
+    """
+    扫描不完整时返回全部已登记资源，避免漏失导入前置条件。
+    """
     return frozenset(rule.capability_id for rule in RESOURCE_IMPORT_RULES)
 
 
 def _matches_module(module_name: str, module_prefixes: Iterable[str]) -> bool:
-    """按完整包边界匹配模块，避免相似名称产生误报。"""
+    """
+    按完整包边界匹配模块，避免相似名称产生误报。
+    """
     return any(
         module_name == prefix or module_name.startswith(f"{prefix}.")
         for prefix in module_prefixes
@@ -59,7 +74,9 @@ def _matches_module(module_name: str, module_prefixes: Iterable[str]) -> bool:
 
 
 def _dynamic_import_aliases(tree: ast.AST) -> tuple[Set[str], Set[str]]:
-    """收集 importlib 模块及 import_module 函数的本地别名。"""
+    """
+    收集 importlib 模块及 import_module 函数的本地别名。
+    """
     module_aliases = {"importlib"}
     function_aliases: Set[str] = set()
     for node in ast.walk(tree):
@@ -80,7 +97,9 @@ def _constant_dynamic_import(
     importlib_aliases: Set[str],
     import_module_aliases: Set[str],
 ) -> str | None:
-    """提取受支持动态导入调用中的常量模块名。"""
+    """
+    提取受支持动态导入调用中的常量模块名。
+    """
     if not node.args:
         return None
     is_import_call = isinstance(node.func, ast.Name) and (
@@ -102,7 +121,9 @@ def _constant_dynamic_import(
 
 
 def _imported_modules(tree: ast.AST) -> FrozenSet[str]:
-    """提取静态导入以及可确定目标的动态导入模块名。"""
+    """
+    提取静态导入以及可确定目标的动态导入模块名。
+    """
     modules: Set[str] = set()
     importlib_aliases, import_module_aliases = _dynamic_import_aliases(tree)
     for node in ast.walk(tree):
@@ -122,11 +143,12 @@ def _imported_modules(tree: ast.AST) -> FrozenSet[str]:
 
 
 def _scan_source(plugin_id: str, path: Path) -> FrozenSet[str]:
-    """读取并解析单个源码文件；不完整结果不能进入插件导入阶段。"""
+    """
+    读取并解析单个源码文件；不完整结果不能进入插件导入阶段。
+    """
     try:
         before_stat = path.stat()
-        # 热加载工具可能保留 mtime，等长替换也不会改变 size；ctime 与 inode/device
-        # 一并参与身份判断，避免把已替换源码误认为旧缓存。
+        # 文件系统时间粒度不足以证明内容不变，每次读取内容摘要；只复用相同内容的AST结论。
         cache_key = (
             before_stat.st_mtime_ns,
             before_stat.st_ctime_ns,
@@ -134,13 +156,9 @@ def _scan_source(plugin_id: str, path: Path) -> FrozenSet[str]:
             before_stat.st_dev,
             before_stat.st_ino,
         )
-        with _scan_cache_lock:
-            cached = _scan_cache.get(path)
-        if cached and cached[:5] == cache_key:
-            return cached[5]
         with tokenize.open(path) as source_file:
             source = source_file.read()
-        tree = ast.parse(source, filename=str(path))
+        content_key = hashlib.sha256(source.encode("utf-8")).digest()
         after_stat = path.stat()
     except (OSError, SyntaxError, UnicodeError) as error:
         raise PluginResourceImportScanError(
@@ -158,6 +176,17 @@ def _scan_source(plugin_id: str, path: Path) -> FrozenSet[str]:
             f"扫描插件 {plugin_id} 时源码 {path.name} 发生变化"
         )
 
+    with _scan_cache_lock:
+        cached = _scan_cache.get(path)
+    if cached and cached[0] == content_key:
+        return cached[1]
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except (SyntaxError, UnicodeError) as error:
+        raise PluginResourceImportScanError(
+            f"无法扫描插件 {plugin_id} 源码 {path.name}：{error}"
+        ) from error
+
     capabilities: Set[str] = set()
     for module_name in _imported_modules(tree):
         for rule in RESOURCE_IMPORT_RULES:
@@ -165,7 +194,7 @@ def _scan_source(plugin_id: str, path: Path) -> FrozenSet[str]:
                 capabilities.add(rule.capability_id)
     result = frozenset(capabilities)
     with _scan_cache_lock:
-        _scan_cache[path] = (*cache_key, result)
+        _scan_cache[path] = (content_key, result)
     return result
 
 
@@ -173,7 +202,9 @@ def scan_plugin_resource_imports(
     plugin_id: str,
     plugin_dir: Path,
 ) -> tuple[str, ...]:
-    """递归扫描插件源码并返回导入前必须准备的 capability ID。"""
+    """
+    递归扫描插件源码并返回导入前必须准备的 capability ID。
+    """
     if not plugin_dir.is_dir():
         raise PluginResourceImportScanError(
             f"插件 {plugin_id} 源码目录不存在：{plugin_dir}"

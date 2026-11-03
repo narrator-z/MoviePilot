@@ -1,3 +1,7 @@
+"""
+通过 YemaPT 接口搜索种子并转换为通用索引结果。
+"""
+
 import base64
 import json
 from typing import Any, List, Optional, Tuple
@@ -11,7 +15,7 @@ from app.schemas.types import MediaType
 
 class YemaSpider:
     """
-    YemaPT 开放 API 索引器
+    YemaPT 开放 API 索引器。
     """
 
     # YemaPT 开放 API 使用更大的分页容量时会返回空结果。
@@ -35,9 +39,9 @@ class YemaSpider:
         "12": "完结",
     }
 
-    def __init__(self, indexer: dict):
+    def __init__(self, indexer: dict[str, Any]):
         """
-        初始化 YemaPT 开放 API 索引器
+        初始化 YemaPT 开放 API 索引器。
 
         :param indexer: 合并站点认证信息后的索引配置
         """
@@ -55,16 +59,16 @@ class YemaSpider:
     @classmethod
     def get_search_page_size(cls, keyword: Optional[str] = None) -> Optional[int]:
         """
-        获取搜索接口单页容量
+        获取搜索接口单页容量。
 
         :param keyword: 搜索关键字，YemaPT 不按关键字改变分页容量
         :return: 搜索接口单页容量
         """
         return cls._size
 
-    def _request_headers(self) -> dict:
+    def _request_headers(self) -> dict[str, Any]:
         """
-        构造开放 API 请求头
+        构造开放 API 请求头。
 
         :return: 不包含 Cookie 的 AuthKey 请求头
         """
@@ -82,7 +86,7 @@ class YemaSpider:
         category_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """
-        构造公开种子列表查询参数
+        构造公开种子列表查询参数。
 
         :param keyword: 搜索关键字
         :param page: MoviePilot 从 0 开始的页码
@@ -102,7 +106,7 @@ class YemaSpider:
             params["categoryId"] = category_id
         return params
 
-    def _search_category_ids(self, mtype: MediaType = None) -> List[Optional[int]]:
+    def _search_category_ids(self, mtype: Optional[MediaType] = None) -> List[Optional[int]]:
         """
         返回当前媒体类型需要分别查询的站点分类。
 
@@ -117,8 +121,12 @@ class YemaSpider:
         return [None]
 
     @staticmethod
-    def _merge_search_results(result_groups: List[List[dict]]) -> List[dict]:
-        """按种子详情链接合并多个分类查询结果并保持首次出现顺序。"""
+    def _merge_search_results(
+        result_groups: List[List[dict[str, Any]]],
+    ) -> List[dict[str, Any]]:
+        """
+        按种子详情链接合并多个分类查询结果并保持首次出现顺序。
+        """
         merged = []
         seen = set()
         for results in result_groups:
@@ -131,9 +139,9 @@ class YemaSpider:
                 merged.append(torrent)
         return merged
 
-    def _parse_result(self, results: List[dict]) -> List[dict]:
+    def _parse_result(self, results: List[dict[str, Any]]) -> List[dict[str, Any]]:
         """
-        将开放 API 种子数据转换为 MoviePilot 标准字段
+        将开放 API 种子数据转换为 MoviePilot 标准字段。
 
         :param results: 公开种子列表接口 data 数组
         :return: MoviePilot 标准种子字典列表
@@ -183,9 +191,11 @@ class YemaSpider:
             })
         return torrents
 
-    def _process_search_response(self, response) -> Tuple[bool, List[dict]]:
+    def _process_search_response(
+        self, response: Any
+    ) -> Tuple[bool, List[dict[str, Any]]]:
         """
-        校验开放 API 通用响应并解析搜索结果
+        校验开放 API 通用响应并解析搜索结果。
 
         :param response: RequestUtils 返回的响应对象
         :return: 是否失败及标准种子列表
@@ -219,21 +229,36 @@ class YemaSpider:
         keyword: Optional[str],
         mtype: Optional[MediaType],
         page: Optional[int],
+        cat: Optional[str] = None,
     ) -> Optional[List[dict[str, Any]]]:
-        """统一执行认证准入并生成各分类的搜索请求体。"""
+        """
+        统一执行认证准入并生成各分类的搜索请求体。
+
+        :param keyword: 搜索关键词
+        :param mtype: 未指定站点分类时使用的媒体类型
+        :param page: 从 0 开始的搜索页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型并逐分类查询
+        :return: 各分类的请求体；缺少认证信息时返回 None
+        """
         if not self._api_key:
             logger.warning(f"{self._name} 未配置 API AuthKey")
             return None
+        if cat:
+            category_ids: List[Optional[int]] = [int(category) for category in cat.split(",")]
+        else:
+            category_ids = self._search_category_ids(mtype)
         return [
             self._build_params(keyword, page, category_id)
-            for category_id in self._search_category_ids(mtype)
+            for category_id in category_ids
         ]
 
     def _finalize_search_responses(
         self,
         responses: List[Any],
     ) -> Tuple[bool, List[dict[str, Any]]]:
-        """统一投影各分类响应并合并去重后的搜索结果。"""
+        """
+        统一投影各分类响应并合并去重后的搜索结果。
+        """
         result_groups = []
         errors = []
         for response in responses:
@@ -246,21 +271,24 @@ class YemaSpider:
     def search(
         self,
         keyword: Optional[str],
-        mtype: MediaType = None,
+        mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
-    ) -> Tuple[bool, List[dict]]:
+        cat: Optional[str] = None,
+    ) -> Tuple[bool, List[dict[str, Any]]]:
         """
-        同步搜索 YemaPT 公开种子
+        同步搜索 YemaPT 公开种子。
 
         :param keyword: 搜索关键字
         :param mtype: MoviePilot 媒体类型，指定后按真实站点分类分别查询
         :param page: MoviePilot 从 0 开始的页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型并逐分类查询
         :return: 是否失败及标准种子列表
         """
         payloads = self._prepare_search_requests(
             keyword=keyword,
             mtype=mtype,
             page=page,
+            cat=cat,
         )
         if payloads is None:
             return True, []
@@ -281,21 +309,24 @@ class YemaSpider:
     async def async_search(
         self,
         keyword: Optional[str],
-        mtype: MediaType = None,
+        mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
-    ) -> Tuple[bool, List[dict]]:
+        cat: Optional[str] = None,
+    ) -> Tuple[bool, List[dict[str, Any]]]:
         """
-        异步搜索 YemaPT 公开种子
+        异步搜索 YemaPT 公开种子。
 
         :param keyword: 搜索关键字
         :param mtype: MoviePilot 媒体类型，指定后按真实站点分类分别查询
         :param page: MoviePilot 从 0 开始的页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型并逐分类查询
         :return: 是否失败及标准种子列表
         """
         payloads = self._prepare_search_requests(
             keyword=keyword,
             mtype=mtype,
             page=page,
+            cat=cat,
         )
         if payloads is None:
             return True, []
@@ -315,7 +346,7 @@ class YemaSpider:
     @staticmethod
     def _download_factor(promotion: str) -> float:
         """
-        转换下载促销类型
+        转换下载促销类型。
 
         :param promotion: 开放 API 下载促销枚举
         :return: MoviePilot 下载系数
@@ -329,7 +360,7 @@ class YemaSpider:
     @staticmethod
     def _upload_factor(promotion: str) -> float:
         """
-        转换上传促销类型
+        转换上传促销类型。
 
         :param promotion: 开放 API 上传促销枚举
         :return: MoviePilot 上传系数
@@ -342,7 +373,7 @@ class YemaSpider:
 
     def _build_download_url(self, torrent_id: int) -> str:
         """
-        构造先生成下载凭证再获取种子文件的两段式链接
+        构造先生成下载凭证再获取种子文件的两段式链接。
 
         :param torrent_id: YemaPT 种子 ID
         :return: Base64 请求配置与下载凭证接口 URL

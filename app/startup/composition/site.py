@@ -1,7 +1,10 @@
-"""站点访问技术端口的宿主组合根。"""
+"""
+站点访问技术端口的宿主组合根。
+"""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, Iterator, Mapping, Optional, cast
+from urllib.parse import urljoin, urlsplit
 
 from app.adapters.external.cookiecloud import CookieCloudHelper
 from app.adapters.external.ocr import OcrHelper
@@ -40,14 +43,41 @@ from app.chain.site import (
     configure_site_ports,
     reset_site_ports,
 )
+from app.foundation.url import UrlUtils, url_origin_for_log
+from app.runtime.log import logger
+
+
+def _redirect_destination(url: str, response: Any) -> tuple[Optional[str], Optional[str]]:
+    """
+    解析一跳重定向的目标地址，只接受不带 URL 凭据的 HTTP(S) 目标。
+
+    :param url: 当前跳的请求地址
+    :param response: 当前跳的重定向响应
+    :return: 目标地址与失败原因，二者恰有一个非空
+    """
+    location = response.headers.get("Location")
+    if not location:
+        return None, "站点请求重定向缺少目标地址"
+    try:
+        destination = urljoin(url, location)
+        target = urlsplit(destination)
+    except ValueError:
+        return None, "站点请求重定向目标无效"
+    if target.scheme not in ("http", "https") or not target.hostname or target.username or target.password:
+        return None, "站点请求重定向目标无效"
+    return destination, None
 
 
 class _RssHttpAdapter:
-    """用 RequestUtils 实现 RSS HTTP 窄端口。"""
+    """
+    用 RequestUtils 实现 RSS HTTP 窄端口。
+    """
 
     def get(self, *, url: str, ua: Optional[str], headers: Optional[dict[str, Any]],
             proxies: Optional[dict[str, Any]], timeout: int) -> Optional[RssResponsePort]:
-        """获取 RSS 原始响应。"""
+        """
+        获取 RSS 原始响应。
+        """
         return cast(
             Optional[RssResponsePort],
             RequestUtils(
@@ -60,7 +90,9 @@ class _RssHttpAdapter:
 
     def post(self, *, url: str, data: dict[str, Any], cookie: str, ua: str,
              proxies: Optional[dict[str, Any]], timeout: int) -> Optional[RssResponsePort]:
-        """提交站点 RSS 链接表单。"""
+        """
+        提交站点 RSS 链接表单。
+        """
         return cast(
             Optional[RssResponsePort],
             RequestUtils(
@@ -73,7 +105,9 @@ class _RssHttpAdapter:
 
     def decode_xml(self, response: RssResponsePort, *, performance_mode: bool,
                    confidence_threshold: float) -> str:
-        """复用宿主统一编码探测规则解码 RSS XML。"""
+        """
+        复用宿主统一编码探测规则解码 RSS XML。
+        """
         decoded: str = RequestUtils.get_decoded_xml_content(
             cast(Any, response),
             performance_mode=performance_mode,
@@ -83,11 +117,15 @@ class _RssHttpAdapter:
 
 
 class _RssBrowserAdapter:
-    """用 PlaywrightHelper 实现 RSS 页面渲染窄端口。"""
+    """
+    用 PlaywrightHelper 实现 RSS 页面渲染窄端口。
+    """
 
     def render(self, *, url: str, cookie: str, ua: str,
                proxies: Optional[dict[str, Any]], timeout: int) -> Optional[str]:
-        """渲染站点 RSS 配置页面并返回源码。"""
+        """
+        渲染站点 RSS 配置页面并返回源码。
+        """
         source: Optional[str] = PlaywrightHelper().get_page_source(
             url=url, cookies=cookie, ua=ua, proxies=proxies, timeout=timeout
         )
@@ -95,22 +133,27 @@ class _RssBrowserAdapter:
 
 
 class _RssParserAdapter:
-    """用可选 Rust 加速器实现 RSS 解析窄端口。"""
+    """
+    用可选 Rust 加速器实现 RSS 解析窄端口。
+    """
 
     def parse(self, content: str, max_items: int) -> Optional[list[dict[str, Any]]]:
-        """调用原生解析器，不可用时保留 None 兜底语义。"""
-        return cast(
-            Optional[list[dict[str, Any]]],
-            rust_accel.parse_rss_items(content, max_items),
-        )
+        """
+        调用原生解析器，不可用时保留 None 兜底语义。
+        """
+        return rust_accel.parse_rss_items(content, max_items)
 
 
 class _CookieBrowserAdapter:
-    """用 PlaywrightHelper 实现站点登录浏览器窄端口。"""
+    """
+    用 PlaywrightHelper 实现站点登录浏览器窄端口。
+    """
 
     def action(self, *, url: str, callback: Callable[[Any], CookieResult],
                proxies: Optional[dict[str, Any]], timeout: Optional[int]) -> CookieResult:
-        """在浏览器受控会话中执行 Application 登录回调。"""
+        """
+        在浏览器受控会话中执行 Application 登录回调。
+        """
         return cast(
             CookieResult,
             PlaywrightHelper().action(
@@ -120,31 +163,43 @@ class _CookieBrowserAdapter:
 
 
 class _CaptchaHttpAdapter:
-    """用 RequestUtils 实现验证码图片下载窄端口。"""
+    """
+    用 RequestUtils 实现验证码图片下载窄端口。
+    """
 
     def fetch(self, *, url: str, cookie: str, ua: str) -> Optional[bytes]:
-        """下载验证码图片，仅向 Application 返回图片字节。"""
+        """
+        下载验证码图片，仅向 Application 返回图片字节。
+        """
         response = RequestUtils(ua=ua, cookies=cookie).get_res(url)
         return response.content if response and response.content else None
 
 
 class _CaptchaOcrAdapter:
-    """用 OcrHelper 实现验证码识别窄端口。"""
+    """
+    用 OcrHelper 实现验证码识别窄端口。
+    """
 
     def recognize(self, image_data: bytes) -> str:
-        """把原始验证码图片字节交给 OCR 服务识别。"""
+        """
+        把原始验证码图片字节交给 OCR 服务识别。
+        """
         text: str = OcrHelper().get_captcha_text(image_data=image_data)
         return text
 
 
 class _TorrentHttpAdapter:
-    """用 RequestUtils 实现种子下载 HTTP 窄端口。"""
+    """
+    用 RequestUtils 实现种子下载 HTTP 窄端口。
+    """
 
     def request(self, *, method: str, url: str, cookie: Optional[str],
                 ua: Optional[str], referer: Optional[str], proxies: Optional[dict[str, Any]],
                 allow_redirects: bool = True,
                 data: Optional[dict[str, Any]] = None) -> Optional[TorrentResponsePort]:
-        """按 Application 指定方法发起请求并保留响应三态。"""
+        """
+        按 Application 指定方法发起请求并保留响应三态。
+        """
         request = RequestUtils(
             ua=ua or "",
             cookies=cookie or "",
@@ -161,7 +216,9 @@ class _TorrentHttpAdapter:
 
 
 class _SiteHttpAdapter:
-    """用 RequestUtils 实现站点链有界 HTTP 响应端口。"""
+    """
+    用 RequestUtils 实现站点链有界 HTTP 响应端口。
+    """
 
     @contextmanager
     def open(
@@ -174,21 +231,71 @@ class _SiteHttpAdapter:
         ua: Optional[str] = None,
         proxies: Optional[Mapping[str, Any]] = None,
         timeout: int = 20,
+        json_body: Optional[Mapping[str, Any]] = None,
     ) -> Iterator[Optional[SiteResponsePort]]:
-        """打开响应并在所有返回或异常分支后关闭底层连接。"""
-        request = RequestUtils(
-            headers=dict(headers or {}),
-            cookies=cookie or "",
-            ua=ua or "",
-            proxies=dict(proxies or {}),
-            timeout=timeout,
-        )
-        with request.response_manager(method=method, url=url) as response:
-            yield cast(Optional[SiteResponsePort], response)
+        """
+        打开响应并在所有返回或异常分支后关闭底层连接。
+
+        GET 请求逐跳跟随重定向，跨域跳转清除 Cookie 与认证头。重定向缺少目标、目标无效、出现环路
+        或超过跳数上限时只记录来源地址的告警并提供 None，与请求失败的语义一致，
+        由调用方按无法打开站点处理，不能以异常中断 CookieCloud 同步等批量流程。
+
+        :param method: HTTP 请求方法
+        :param url: 完整请求地址
+        :param headers: 额外请求头
+        :param cookie: 登录 Cookie
+        :param ua: 用户代理字符串
+        :param proxies: 代理配置
+        :param timeout: 请求超时秒数
+        :param json_body: JSON 请求体，None 时保留无请求体行为
+        :yields: 在上下文有效期内提供响应或 None
+        """
+        request_headers = dict(headers or {})
+        seen = set()
+        failure = "站点请求重定向次数超过上限"
+        for _hop in range(9):
+            if url in seen:
+                failure = "站点请求重定向出现环路"
+                break
+            seen.add(url)
+            request = RequestUtils(
+                headers=request_headers, cookies=cookie or "", ua=ua or "",
+                proxies=dict(proxies or {}), timeout=timeout,
+            )
+            request_options: dict[str, Any] = {} if json_body is None else {"json": dict(json_body)}
+            if method.upper() == "GET":
+                request_options["allow_redirects"] = False
+            with ExitStack() as stack:
+                try:
+                    response = stack.enter_context(
+                        request.response_manager(method=method, url=url, **request_options)
+                    )
+                except ValueError:
+                    # 请求地址或响应 Location 畸形时 requests 会在打开响应时抛出，禁用自动跟随也会预解析 Location
+                    failure = "站点请求地址或重定向目标无效"
+                    break
+                if method.upper() != "GET" or response is None or response.status_code not in (301, 302, 303, 307, 308):
+                    yield cast(Optional[SiteResponsePort], response)
+                    return
+                destination, invalid_reason = _redirect_destination(url, response)
+                if destination is None:
+                    failure = invalid_reason or failure
+                    break
+                if not UrlUtils.same_origin(url, destination):
+                    cookie = None
+                    request_headers = {
+                        key: value for key, value in request_headers.items()
+                        if key.lower() not in ("cookie", "authorization", "proxy-authorization", "referer")
+                    }
+                url = destination
+        logger.warning(f"{failure}：{url_origin_for_log(url)}")
+        yield None
 
 
 class _SiteBrowserAdapter:
-    """用 PlaywrightHelper 实现站点链浏览器渲染端口。"""
+    """
+    用 PlaywrightHelper 实现站点链浏览器渲染端口。
+    """
 
     def render(
         self,
@@ -199,7 +306,9 @@ class _SiteBrowserAdapter:
         proxies: Optional[Mapping[str, Any]],
         timeout: int,
     ) -> Optional[str]:
-        """渲染页面；浏览器 helper 在返回前关闭页面与上下文。"""
+        """
+        渲染页面；浏览器 helper 在返回前关闭页面与上下文。
+        """
         source: Optional[str] = PlaywrightHelper().get_page_source(
             url=url,
             cookies=cookies,
@@ -211,23 +320,33 @@ class _SiteBrowserAdapter:
 
 
 class _SiteChallengeAdapter:
-    """用统一 Cloudflare 规则实现页面挑战识别端口。"""
+    """
+    用统一 Cloudflare 规则实现页面挑战识别端口。
+    """
 
     def detected(self, html_text: str) -> bool:
-        """返回页面是否处于站点挑战流程。"""
+        """
+        返回页面是否处于站点挑战流程。
+        """
         return bool(under_challenge(html_text))
 
 
 class _SiteCookieCloudAdapter:
-    """用 CookieCloudHelper 实现站点 Cookie 聚合端口。"""
+    """
+    用 CookieCloudHelper 实现站点 Cookie 聚合端口。
+    """
 
     def download(self) -> tuple[Optional[dict[str, str]], str]:
-        """下载并返回 CookieCloud 的兼容二元结果。"""
+        """
+        下载并返回 CookieCloud 的兼容二元结果。
+        """
         return CookieCloudHelper().download()
 
 
 def configure_site_access_composition() -> None:
-    """统一装配 RSS、登录、种子下载与站点链技术边。"""
+    """
+    统一装配 RSS、登录、种子下载与站点链技术边。
+    """
     reset_site_access_composition()
     try:
         configure_rss_ports(
@@ -253,7 +372,9 @@ def configure_site_access_composition() -> None:
 
 
 def reset_site_access_composition() -> None:
-    """统一释放站点访问端口，支持重复 lifespan 与失败回滚。"""
+    """
+    统一释放站点访问端口，支持重复 lifespan 与失败回滚。
+    """
     reset_site_ports()
     reset_torrent_port()
     reset_cookie_ports()

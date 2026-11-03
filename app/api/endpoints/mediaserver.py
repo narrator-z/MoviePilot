@@ -1,3 +1,7 @@
+"""
+提供媒体服务器配置对应的媒体库、条目与播放信息查询接口。
+"""
+
 from typing import Any, List, Optional
 
 from fastapi import Depends, HTTPException, status
@@ -12,6 +16,7 @@ from app.api.response import (
 )
 from app.application.configuration import get_configured_system_config
 from app.application.mediaserver import (
+    MEDIA_SERVER_EXISTENCE_QUERY,
     MediaServerQueryService,
     get_mediaserver_configs,
 )
@@ -20,21 +25,27 @@ from app.chain.mediaserver import MediaServerChain
 from app.domain.context import MediaInfo
 from app.domain.metainfo import MetaInfo
 from app.schemas.common import ServiceClientInfo as _SchemaServiceClientInfo
+from app.schemas.context import MediaInfo as _SchemaMediaInfo
 from app.schemas.media import build_media_key, resolve_media_identity
-from app.schemas.mediaserver import ExistMediaInfo as _SchemaExistMediaInfo
 from app.schemas.mediaserver import MediaServerExistingEpisodes as _SchemaMediaServerExistingEpisodes
 from app.schemas.mediaserver import MediaServerExistsData as _SchemaMediaServerExistsData
+from app.schemas.mediaserver import MediaServerField, MediaServerQueryOptions, NotExistMediaInfo
 from app.schemas.mediaserver import MediaServerLibrary as _SchemaMediaServerLibrary
 from app.schemas.mediaserver import MediaServerPlayData as _SchemaMediaServerPlayData
 from app.schemas.mediaserver import MediaServerPlayItem as _SchemaMediaServerPlayItem
-from app.schemas.mediaserver import NotExistMediaInfo
 from app.schemas.mediaserver import NotExistMediaInfo as _SchemaNotExistMediaInfo
 from app.schemas.response import Response as _SchemaResponse
 from app.schemas.token import TokenPayload as _SchemaTokenPayload
 from app.schemas.types import MediaSource, MediaType, SystemConfigKey
-from app.schemas.workflow import MediaInfo as _SchemaMediaInfo
 
 router = ResponseAPIRouter()
+
+# 首页卡片只消费展示内容，播放进度仅由继续观看卡片使用。
+_CARD_QUERY = MediaServerQueryOptions(fields=frozenset({MediaServerField.YEAR, MediaServerField.IMAGES, MediaServerField.LINK}))
+_RESUME_QUERY = _CARD_QUERY.with_fields(MediaServerField.USER_STATE)
+_LIBRARY_QUERY = MediaServerQueryOptions(fields=frozenset({
+    MediaServerField.PATH, MediaServerField.IMAGES, MediaServerField.COUNTS, MediaServerField.LINK,
+}))
 
 
 def _require_mediaserver_result(result: Optional[List[Any]]) -> List[Any]:
@@ -56,7 +67,7 @@ def _require_mediaserver_result(result: Optional[List[Any]]) -> List[Any]:
 )
 def play_item(
     itemid: str, _: _SchemaTokenPayload = Depends(verify_token)
-) -> _SchemaResponse:
+) -> _SchemaResponse[dict[str, Any]]:
     """
     获取媒体服务器播放页面地址
     """
@@ -68,7 +79,13 @@ def play_item(
     media_chain = MediaServerChain()
     for config in configs:
         name = config.name
-        item = media_chain.iteminfo(server=name, item_id=itemid)
+        if not name:
+            continue
+        item = media_chain.iteminfo(
+            server=name,
+            item_id=itemid,
+            query=MediaServerQueryOptions(fields=frozenset()),
+        )
         if item:
             play_url = media_chain.get_play_url(server=name, item_id=itemid)
             if play_url:
@@ -131,23 +148,22 @@ async def exists_local(
     summary="查询已存在的剧集信息（媒体服务器）",
     response_model=_SchemaMediaServerExistingEpisodes,
 )
-def exists(
-    media_in: _SchemaMediaInfo, _: _SchemaTokenPayload = Depends(verify_token)
-) -> Any:
+def exists(media_in: _SchemaMediaInfo, _: _SchemaTokenPayload = Depends(verify_token)) -> Any:
     """
     根据媒体信息查询媒体库已存在的剧集信息
     """
     # 转化为媒体信息对象
     mediainfo = MediaInfo()
     mediainfo.from_dict(media_in.model_dump())
-    existsinfo: _SchemaExistMediaInfo = MediaServerChain().media_exists(
-        mediainfo=mediainfo
+    existsinfo = MediaServerChain().media_exists(
+        mediainfo=mediainfo, query=MEDIA_SERVER_EXISTENCE_QUERY
     )
     if not existsinfo:
         return {}
+    seasons = existsinfo.seasons or {}
     if media_in.season is not None:
-        return {media_in.season: existsinfo.seasons.get(media_in.season) or []}
-    return existsinfo.seasons
+        return {media_in.season: seasons.get(media_in.season) or []}
+    return seasons
 
 
 @router.post(
@@ -165,7 +181,7 @@ def not_exists(
     根据媒体信息查询缺失电影/剧集，媒体类型兼容英文与中文值
     """
     # 媒体信息
-    meta = MetaInfo(title=media_in.title)
+    meta = MetaInfo(title=media_in.title or "")
     mtype = MediaType.from_agent(media_in.type) or MediaType(media_in.type) if media_in.type else None
     if mtype:
         meta.type = mtype
@@ -192,9 +208,7 @@ def not_exists(
     return []
 
 
-@router.get(
-    "/latest", summary="最新入库条目", response_model=List[_SchemaMediaServerPlayItem]
-)
+@router.get("/latest", summary="最新入库条目", response_model=List[_SchemaMediaServerPlayItem])
 def latest(
     server: str,
     count: Optional[int] = 20,
@@ -208,13 +222,12 @@ def latest(
             server=server,
             count=count,
             username=userinfo.username,
+            query=_CARD_QUERY,
         )
     )
 
 
-@router.get(
-    "/playing", summary="正在播放条目", response_model=List[_SchemaMediaServerPlayItem]
-)
+@router.get("/playing", summary="正在播放条目", response_model=List[_SchemaMediaServerPlayItem])
 def playing(
     server: str,
     count: Optional[int] = 12,
@@ -228,13 +241,12 @@ def playing(
             server=server,
             count=count,
             username=userinfo.username,
+            query=_RESUME_QUERY,
         )
     )
 
 
-@router.get(
-    "/library", summary="媒体库列表", response_model=List[_SchemaMediaServerLibrary]
-)
+@router.get("/library", summary="媒体库列表", response_model=List[_SchemaMediaServerLibrary])
 def library(
     server: str,
     hidden: Optional[bool] = False,
@@ -249,7 +261,8 @@ def library(
         MediaServerChain().librarys(
             server=server,
             username=userinfo.username,
-            hidden=hidden,
+            hidden=hidden if hidden is not None else False,
+            query=_LIBRARY_QUERY,
         )
     )
 
@@ -261,9 +274,14 @@ def library(
 )
 async def clients(_: _SchemaTokenPayload = Depends(verify_token), page: CompatiblePageParam = None, count: CompatibleCountParam = None) -> Any:
     """
-    查询可用媒体服务器
+    查询已启用的媒体服务器名称与类型。
+
+    :param _: 已验证的访问令牌
+    :param page: 兼容客户端的分页参数，此接口不据此分页
+    :param count: 兼容客户端的数量参数，此接口不据此截断
+    :return: 已启用媒体服务器的名称和类型列表
     """
-    mediaservers: List[dict] = get_configured_system_config().get(SystemConfigKey.MediaServers)
+    mediaservers: List[dict[str, object]] = get_configured_system_config().get(SystemConfigKey.MediaServers)
     if mediaservers:
         return [
             {"name": d.get("name"), "type": d.get("type")}

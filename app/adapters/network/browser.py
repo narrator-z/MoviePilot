@@ -1,11 +1,15 @@
+"""
+浏览器启动、可复用会话和站点页面访问适配，负责关闭所持有的页面与上下文。
+"""
+
 import ipaddress
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol, cast
 from urllib.parse import urlparse
 
 from app.adapters.network.http import RequestUtils, cookie_parse
@@ -23,15 +27,27 @@ class BrowserElement(Protocol):
     """
 
     def is_visible(self) -> bool:
-        """判断元素是否可见。"""
+        """
+        检查当前元素是否可见。
+
+        :return: 元素满足浏览器可见性规则时返回 True，否则返回 False
+        """
         ...
 
     def fill(self, value: str) -> None:
-        """向元素输入文本。"""
+        """
+        替换元素中的文本内容。
+
+        :param value: 要填写的完整文本；空字符串用于清空内容
+        """
         ...
 
     def inner_text(self) -> str:
-        """获取元素可见文本。"""
+        """
+        读取元素渲染后的可见文本。
+
+        :return: 当前元素的可见文本，允许为空字符串
+        """
         ...
 
 
@@ -41,84 +57,183 @@ class BrowserContext(Protocol):
     """
 
     def new_page(self) -> "BrowserPage":
-        """创建新的浏览器页面。"""
+        """
+        在当前上下文中创建页面。
+
+        :return: 新页面，由调用方或上下文关闭流程释放
+        """
         ...
 
     def cookies(self) -> list[dict[str, Any]]:
-        """返回当前上下文 Cookie。"""
+        """
+        读取上下文当前保存的 Cookie。
+
+        :return: 浏览器 Cookie 对象列表，没有 Cookie 时为空列表
+        """
         ...
 
     def close(self) -> None:
-        """关闭浏览器上下文。"""
+        """
+        关闭上下文及其页面，释放该上下文持有的浏览器资源。
+        """
         ...
 
 
 class BrowserPage(Protocol):
     """
-    CloakBrowser 页面对象的最小接口，覆盖 helper 和登录流程当前用到的方法。
+    同步浏览器页面接口，覆盖页面会话和站点登录所需能力。
+
+    实现方沿用浏览器的超时和异常行为；页面只可在所属上下文和线程仍有效时使用。
+
+    :ivar context: 创建此页面的浏览器上下文，负责页面共享会话状态
+    :ivar url: 当前页面地址，导航后随页面状态更新
     """
 
     context: BrowserContext
     url: str
 
     def set_extra_http_headers(self, headers: dict[str, str]) -> None:
-        """设置页面额外请求头。"""
+        """
+        设置此页面后续请求使用的额外 HTTP 请求头。
+
+        :param headers: 请求头名称与文本值的映射
+        """
         ...
 
     def set_default_timeout(self, timeout: int) -> None:
-        """设置页面默认超时时间。"""
+        """
+        设置页面操作的默认等待上限。
+
+        :param timeout: 超时时间，单位为毫秒；0 沿用浏览器禁用超时的语义
+        """
         ...
 
     def goto(self, url: str, *args: Any, **kwargs: Any) -> Any:
-        """导航到指定 URL。"""
+        """
+        导航到目标地址并按指定条件等待加载。
+
+        :param url: 目标页面地址
+        :param args: 导航接口保留的位置参数
+        :param kwargs: 导航等待条件、超时（毫秒）或来源页等选项
+        :return: 最终导航响应对象；没有发生可返回响应的导航时可能为 None
+        """
         ...
 
     def wait_for_load_state(self, state: str, *args: Any, **kwargs: Any) -> Any:
-        """等待页面加载状态。"""
+        """
+        等待页面达到指定加载状态。
+
+        :param state: 浏览器加载状态，例如 load、domcontentloaded 或 networkidle
+        :param args: 加载等待接口保留的位置参数
+        :param kwargs: 等待超时（毫秒）等加载选项
+        :return: 等待完成后不返回业务数据；超时沿用浏览器异常
+        """
         ...
 
     def wait_for_selector(self, selector: str, *args: Any, **kwargs: Any) -> Any:
-        """等待指定选择器出现。"""
+        """
+        等待选择器对应元素达到指定状态。
+
+        :param selector: 定位目标元素的选择器
+        :param args: 元素等待接口保留的位置参数
+        :param kwargs: 目标状态、严格匹配或超时（毫秒）等选项
+        :return: 匹配元素；等待隐藏或移除状态时可能为 None
+        """
         ...
 
     def fill(self, selector: str, value: str, *args: Any, **kwargs: Any) -> Any:
-        """向指定选择器输入文本。"""
+        """
+        定位输入元素并替换文本。
+
+        :param selector: 定位输入元素的选择器
+        :param value: 要填入的完整文本，空字符串用于清空
+        :param args: 文本填写接口保留的位置参数
+        :param kwargs: 强制执行、严格匹配或超时（毫秒）等选项
+        :return: 操作完成后不返回业务数据；定位或填写失败沿用浏览器异常
+        """
         ...
 
     def click(self, selector: str, *args: Any, **kwargs: Any) -> Any:
-        """点击指定选择器。"""
+        """
+        定位元素并执行点击。
+
+        :param selector: 定位可点击元素的选择器
+        :param args: 点击接口保留的位置参数
+        :param kwargs: 鼠标按键、点击次数、位置或超时（毫秒）等选项
+        :return: 操作完成后不返回业务数据；定位或点击失败沿用浏览器异常
+        """
         ...
 
     def select_option(self, selector: str, *args: Any, **kwargs: Any) -> Any:
-        """选择下拉框选项。"""
+        """
+        设置下拉框选项。
+
+        :param selector: 定位下拉框的选择器
+        :param args: 传给下拉框接口的选项值
+        :param kwargs: 选项值、标签、索引或超时（毫秒）等选项
+        :return: 选中选项的值列表，沿用浏览器接口的返回格式
+        """
         ...
 
     def query_selector(self, selector: str) -> Optional[BrowserElement]:
-        """查询指定选择器元素。"""
+        """
+        查找首个匹配选择器的元素。
+
+        :param selector: 浏览器支持的元素选择器
+        :return: 首个匹配元素；没有匹配项时返回 None
+        """
         ...
 
     def title(self) -> str:
-        """返回页面标题。"""
+        """
+        读取当前页面标题。
+
+        :return: 页面标题文本，允许为空字符串
+        """
         ...
 
     def inner_text(self, selector: str) -> str:
-        """返回指定选择器的可见文本。"""
+        """
+        读取选择器对应元素的可见文本。
+
+        :param selector: 定位目标元素的选择器
+        :return: 目标元素的可见文本；定位失败沿用浏览器异常
+        """
         ...
 
     def content(self) -> str:
-        """返回页面 HTML 内容。"""
+        """
+        读取当前页面完整 HTML 源码。
+
+        :return: 包含文档类型声明的页面源码；导航期间读取可能抛出浏览器异常
+        """
         ...
 
     def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
-        """执行页面 JavaScript 表达式。"""
+        """
+        在当前页面中执行 JavaScript 表达式。
+
+        :param expression: 待执行的 JavaScript 表达式或函数文本
+        :param args: 传入 JavaScript 函数的参数
+        :param kwargs: 浏览器表达式执行接口接受的关键字参数
+        :return: 表达式结果，按浏览器接口的序列化规则转换为 Python 对象
+        """
         ...
 
     def screenshot(self, *args: Any, **kwargs: Any) -> bytes:
-        """截取页面截图。"""
+        """
+        截取当前页面图像。
+
+        :param args: 截图接口保留的位置参数
+        :param kwargs: 图像格式、质量、全页范围或超时（毫秒）等选项
+        :return: 截图的二进制内容，格式由请求选项决定
+        """
         ...
 
     def close(self) -> None:
-        """关闭浏览器页面。"""
+        """
+        关闭当前页面，所属上下文及其他页面保持有效。
+        """
         ...
 
 
@@ -138,7 +253,7 @@ def launch_browser_context(headless: bool = True, **kwargs: Any) -> BrowserConte
         )
     from cloakbrowser import launch_context
 
-    return launch_context(headless=headless, **kwargs)
+    return cast(BrowserContext, launch_context(headless=headless, **kwargs))
 
 
 async def launch_browser_context_async(
@@ -165,7 +280,20 @@ async def launch_browser_context_async(
 
 @dataclass
 class _BrowserSessionState:
-    """保存一个可复用浏览器上下文及其页面游标。"""
+    """
+    保存可复用浏览器上下文、页面游标与会话资源归属。
+
+    :param session_key: 会话唯一键，用于索引复用会话和专属工作线程
+    :param context: 会话持有的浏览器上下文，销毁会话时关闭
+    :param pages: 会话打开的页面列表
+    :param active_index: 当前活动页在 pages 中的索引，默认 0
+    :param user_agent: 创建会话时使用的浏览器标识；None 表示使用实现默认值
+    :param cookies: 用于会话的 Cookie 请求头文本；None 表示未额外指定
+    :param owner: 持有会话资源的运行时登记对象；None 表示未登记
+    :param created_at: 创建时间，使用单调时钟的秒值
+    :param last_used_at: 最近使用时间，使用单调时钟的秒值，供空闲过期判断
+    :param lock: 保护会话状态和页面操作的可重入锁，默认每个会话独立创建
+    """
 
     session_key: str
     context: BrowserContext
@@ -180,7 +308,11 @@ class _BrowserSessionState:
 
     @property
     def active_page(self) -> BrowserPage:
-        """返回会话当前选中的页面。"""
+        """
+        取得活动索引对应的页面。
+
+        :return: 当前活动页面；调用方需保证页面列表非空且索引有效
+        """
         return self.pages[self.active_index]
 
 
@@ -291,15 +423,16 @@ class BrowserSessionHelper:
         if executor:
             context = copy_context()
             # 会话线程保持空底层上下文，每次操作只使用当前调用快照。
-            future = Context().run(
-                executor.submit,
-                context.run,
-                cls._run_session_task,
-                session_key,
-                cls._close_session_in_thread,
-                session_key,
-                owner=owner,
-            )
+            def close_in_context() -> bool:
+                """
+                在调用方上下文中关闭会话，保持会话线程底层上下文为空。
+                """
+                return bool(context.run(
+                    cls._run_session_task, session_key, cls._close_session_in_thread,
+                    session_key, owner=owner,
+                ))
+
+            future: Future[bool] = Context().run(executor.submit, close_in_context)
             try:
                 return future.result()
             finally:
@@ -311,7 +444,9 @@ class BrowserSessionHelper:
 
     @classmethod
     def close_owner(cls, owner: Any) -> bool:
-        """关闭宿主作用域创建的全部浏览器会话和其专属执行线程。"""
+        """
+        关闭宿主作用域创建的全部浏览器会话和其专属执行线程。
+        """
         with cls._sessions_lock:
             session_keys = {
                 key for key, session in cls._sessions.items() if session.owner is owner
@@ -351,17 +486,25 @@ class BrowserSessionHelper:
         :param owner: 可选宿主作用域；提供时会隔离并校验会话归属
         :return: 回调函数返回值
         """
-        self._prune_sessions()
-        return self._run_in_session_thread(
-            session_key,
-            self._with_session_in_thread,
-            session_key,
-            callback,
-            user_agent=user_agent,
-            cookies=cookies,
-            timeout=timeout,
-            owner=owner,
-        )
+        # 会话线程只能执行自己的浏览器任务；不能在其中同步等待其他会话关闭。
+        with self._sessions_lock:
+            in_session_thread = threading.get_ident() in self._session_thread_ids.values()
+        if not in_session_thread:
+            self._prune_sessions()
+        try:
+            return self._run_in_session_thread(
+                session_key,
+                self._with_session_in_thread,
+                session_key,
+                callback,
+                user_agent=user_agent,
+                cookies=cookies,
+                timeout=timeout,
+                owner=owner,
+            )
+        finally:
+            if not in_session_thread:
+                self._enforce_session_limit(protect_session_key=session_key)
 
     def _with_session_in_thread(
         self,
@@ -423,16 +566,16 @@ class BrowserSessionHelper:
             try:
                 context = copy_context()
                 # 会话线程保持空底层上下文，每次操作只使用当前调用快照。
-                future = Context().run(
-                    executor.submit,
-                    context.run,
-                    cls._run_session_task,
-                    session_key,
-                    callback,
-                    *args,
-                    owner=owner,
-                    **kwargs,
-                )
+                def invoke_in_context() -> Any:
+                    """
+                    在当前调用方快照中执行会话操作，避免上下文在会话线程间泄漏。
+                    """
+                    return context.run(
+                        cls._run_session_task, session_key, callback,
+                        *args, owner=owner, **kwargs,
+                    )
+
+                future: Future[Any] = Context().run(executor.submit, invoke_in_context)
             except RuntimeError:
                 cls._discard_session_executor(session_key, executor)
                 continue
@@ -673,7 +816,9 @@ class BrowserSessionHelper:
         session: _BrowserSessionState,
         page: Optional[BrowserPage] = None,
     ) -> dict[str, Any]:
-        """读取活动页面所属域名的 Cookie、User-Agent 和页面地址。"""
+        """
+        读取活动页面所属域名的 Cookie、User-Agent 和页面地址。
+        """
         active_page = page or session.active_page
         current_url = getattr(active_page, "url", "") or ""
         current_host = (urlparse(current_url).hostname or "").lower().rstrip(".")
@@ -778,13 +923,12 @@ class BrowserSessionHelper:
         :return: 页面快照字典
         """
         text_content = cls._safe_inner_text(page, "body")
-        result = {
+        elements = cls._extract_interactive_elements(page, max_elements=max_elements)
+        result: dict[str, Any] = {
             "url": getattr(page, "url", ""),
             "title": cls._safe_page_title(page),
             "text_content": cls._truncate_text(text_content, max_text_chars),
-            "interactive_elements": cls._extract_interactive_elements(
-                page, max_elements=max_elements
-            ),
+            "interactive_elements": elements,
         }
         if status is not None:
             result["status"] = status
@@ -795,12 +939,12 @@ class BrowserSessionHelper:
                 "text": element.get("text"),
                 "href": element.get("href"),
             }
-            for element in result["interactive_elements"]
+            for element in elements
             if element.get("tag") == "a" and element.get("href")
         ][:30]
         forms = [
             element
-            for element in result["interactive_elements"]
+            for element in elements
             if element.get("tag") in {"input", "textarea", "select", "button"}
         ][:30]
         if links:
@@ -815,7 +959,9 @@ class BrowserSessionHelper:
         user_agent: Optional[str] = None,
         viewport: Optional[dict[str, int]] = None,
     ) -> BrowserContext:
-        """按宿主反检测配置创建 CloakBrowser 上下文。"""
+        """
+        按宿主反检测配置创建 CloakBrowser 上下文。
+        """
         context_kwargs = {
             "humanize": get_runtime_setting('CLOAKBROWSER_HUMANIZE'),
             "human_preset": get_runtime_setting('CLOAKBROWSER_HUMAN_PRESET'),
@@ -833,7 +979,9 @@ class BrowserSessionHelper:
         cookies: Optional[str] = None,
         owner: Optional[Any] = None,
     ) -> _BrowserSessionState:
-        """复用匹配会话，或为新的会话键创建上下文。"""
+        """
+        复用匹配会话，或为新的会话键创建上下文。
+        """
         self._validate_owner(owner)
         with self._sessions_lock:
             session = self._sessions.get(session_key)
@@ -871,18 +1019,21 @@ class BrowserSessionHelper:
                 self._close_session_state(session)
                 return existing_session
             self._sessions[session_key] = session
-        self._enforce_session_limit(protect_session_key=session_key)
         return session
 
     @staticmethod
     def _validate_owner(owner: Optional[Any]) -> None:
-        """拒绝已封口作用域创建或复用浏览器会话。"""
+        """
+        拒绝已封口作用域创建或复用浏览器会话。
+        """
         if owner is not None and bool(getattr(owner, "closed", False)):
             raise PermissionError("浏览器会话所属任务已停止")
 
     @classmethod
     def _prune_sessions(cls) -> None:
-        """关闭超过空闲时限的浏览器会话。"""
+        """
+        关闭超过空闲时限的浏览器会话。
+        """
         now = time.monotonic()
         with cls._sessions_lock:
             expired_keys = [
@@ -924,7 +1075,9 @@ class BrowserSessionHelper:
 
     @staticmethod
     def _close_session_state(session: _BrowserSessionState) -> None:
-        """尽力关闭会话中的全部页面和浏览器上下文。"""
+        """
+        尽力关闭会话中的全部页面和浏览器上下文。
+        """
         with session.lock:
             for page in list(session.pages):
                 try:
@@ -938,7 +1091,9 @@ class BrowserSessionHelper:
 
     @staticmethod
     def _safe_page_title(page: BrowserPage) -> str:
-        """读取页面标题，页面失效时返回空字符串。"""
+        """
+        读取页面标题，页面失效时返回空字符串。
+        """
         try:
             return page.title()
         except Exception:
@@ -946,7 +1101,9 @@ class BrowserSessionHelper:
 
     @staticmethod
     def _safe_inner_text(page: BrowserPage, selector: str) -> str:
-        """读取节点文本，选择器或页面失效时返回空字符串。"""
+        """
+        读取节点文本，选择器或页面失效时返回空字符串。
+        """
         try:
             return page.inner_text(selector)
         except Exception:
@@ -954,7 +1111,9 @@ class BrowserSessionHelper:
 
     @staticmethod
     def _truncate_text(text: Optional[str], max_chars: int) -> str:
-        """按 Agent 上下文上限截断页面文本。"""
+        """
+        按 Agent 上下文上限截断页面文本。
+        """
         if not text:
             return ""
         if len(text) <= max_chars:
@@ -965,7 +1124,9 @@ class BrowserSessionHelper:
     def _extract_interactive_elements(
         cls, page: BrowserPage, max_elements: int
     ) -> list[dict[str, Any]]:
-        """提取页面中可见且可交互的元素快照。"""
+        """
+        提取页面中可见且可交互的元素快照。
+        """
         script = f"""
             () => {{
                 const limit = {int(max_elements)};
@@ -1032,9 +1193,11 @@ class BrowserSessionHelper:
 
 
 class PlaywrightHelper:
-    """为旧插件浏览器调用提供统一的 CloakBrowser 适配。"""
+    """
+    为旧插件浏览器调用提供统一的 CloakBrowser 适配。
+    """
 
-    def __init__(self, browser_type: Optional[str] = None, *args, **kwargs):
+    def __init__(self, browser_type: Optional[str] = None, *args: Any, **kwargs: Any) -> None:
         """
         兼容旧的 PlaywrightHelper(browser_type=...) 构造方式。
         """
@@ -1054,7 +1217,7 @@ class PlaywrightHelper:
     @staticmethod
     def __launch_cloakbrowser_context(headless: bool,
                                       user_agent: Optional[str] = None,
-                                      proxies: Optional[dict] = None) -> BrowserContext:
+                                      proxies: Optional[dict[str, Any]] = None) -> BrowserContext:
         """
         启动 CloakBrowser 上下文。
         """
@@ -1065,8 +1228,10 @@ class PlaywrightHelper:
                                       human_preset=get_runtime_setting('CLOAKBROWSER_HUMAN_PRESET'))
 
     @staticmethod
-    def __fs_cookie_str(cookies: list) -> str:
-        """将 FlareSolverr Cookie 列表转换为请求头字符串。"""
+    def __fs_cookie_str(cookies: list[dict[str, Any]]) -> str:
+        """
+        将 FlareSolverr Cookie 列表转换为请求头字符串。
+        """
         if not cookies:
             return ""
         return "; ".join([f"{c.get('name')}={c.get('value')}" for c in cookies if c and c.get('name') is not None])
@@ -1074,8 +1239,8 @@ class PlaywrightHelper:
     @staticmethod
     def __flaresolverr_request(url: str,
                                cookies: Optional[str] = None,
-                               proxy_config: Optional[dict] = None,
-                               timeout: Optional[int] = 60) -> Optional[dict]:
+                               proxy_config: Optional[dict[str, Any]] = None,
+                               timeout: Optional[int] = 60) -> Optional[dict[str, Any]]:
         """
         调用 FlareSolverr 解决 Cloudflare 并返回 solution 结果
         参考: https://github.com/FlareSolverr/FlareSolverr
@@ -1097,23 +1262,21 @@ class PlaywrightHelper:
                 # 使用 session 模式支持代理认证
                 logger.debug("检测到flaresolverr代理需要认证，使用 session 模式")
 
-                # 1. 创建会话
                 session_id = str(uuid.uuid4())
-                create_payload: dict = {
+                create_payload: dict[str, Any] = {
                     "cmd": "sessions.create",
                     "session": session_id
                 }
 
                 # 添加代理配置到会话创建请求
                 if proxy_config and proxy_config.get("server"):
-                    proxy_payload: dict = {"url": proxy_config["server"]}
+                    proxy_payload: dict[str, Any] = {"url": proxy_config["server"]}
                     if proxy_config.get("username"):
                         proxy_payload["username"] = proxy_config["username"]
                     if proxy_config.get("password"):
                         proxy_payload["password"] = proxy_config["password"]
                     create_payload["proxy"] = proxy_payload
 
-                # 创建会话
                 create_result = RequestUtils(content_type="application/json",
                                              timeout=timeout or 60).post_json(url=fs_api, json=create_payload)
                 if not create_result or create_result.get("status") != "ok":
@@ -1121,7 +1284,6 @@ class PlaywrightHelper:
                         f"创建 FlareSolverr 会话失败: {create_result.get('message') if create_result else '无响应'}")
                     return None
 
-                # 2. 使用会话发送请求
                 request_payload = {
                     "cmd": "request.get",
                     "url": url,
@@ -1146,7 +1308,6 @@ class PlaywrightHelper:
                 except Exception as e:
                     logger.debug(f"解析 cookies 失败，忽略: {str(e)}")
 
-            # 发送请求
             data = RequestUtils(content_type="application/json",
                                 timeout=timeout or 60).post_json(url=fs_api, json=request_payload)
             if not data:
@@ -1160,7 +1321,6 @@ class PlaywrightHelper:
             logger.error(f"调用 FlareSolverr 失败: {str(e)}")
             return None
         finally:
-            # 清理会话
             if session_id:
                 try:
                     destroy_payload = {
@@ -1177,18 +1337,23 @@ class PlaywrightHelper:
                callback: Callable[[BrowserPage], Any],
                cookies: Optional[str] = None,
                ua: Optional[str] = None,
-               proxies: Optional[dict] = None,
+               proxies: Optional[dict[str, Any]] = None,
                headless: Optional[bool] = False,
                timeout: Optional[int] = 60) -> Any:
         """
-        访问网页，接收Page对象并执行操作
-        :param url: 网页地址
-        :param callback: 回调函数，需要接收page对象
-        :param cookies: cookies
-        :param ua: user-agent
-        :param proxies: 代理
-        :param headless: 是否无头模式
-        :param timeout: 超时时间
+        访问页面并在受控浏览器会话内执行回调，结束后关闭页面与上下文。
+
+        配置 FlareSolverr 时优先使用其返回的 Cookie 和浏览器标识，回调不可把页面留到会话外使用。
+        异常会记录日志；关闭异常不会覆盖已经获得的回调结果。
+
+        :param url: 要访问的页面地址
+        :param callback: 接收页面对象并返回业务结果的同步回调
+        :param cookies: 初始 Cookie 请求头文本；可被 FlareSolverr 结果替代
+        :param ua: 浏览器标识；可被 FlareSolverr 结果替代
+        :param proxies: 浏览器代理配置；None 表示未指定
+        :param headless: 是否使用无头模式，默认使用有界面模式
+        :param timeout: 导航超时，单位为秒；None 或 0 回退到 60 秒
+        :return: 回调结果；初始化、导航或回调失败而未取得结果时返回 None
         """
         timeout = timeout or 60
         result = None
@@ -1206,7 +1371,7 @@ class PlaywrightHelper:
                         fs_cookie_header = self.__fs_cookie_str(solution.get("cookies", []))
                         fs_ua = solution.get("userAgent")
 
-                context = self.__launch_cloakbrowser_context(headless=headless,
+                context = self.__launch_cloakbrowser_context(headless=bool(headless),
                                                              user_agent=fs_ua or ua,
                                                              proxies=proxies)
                 page = context.new_page()
@@ -1226,7 +1391,6 @@ class PlaywrightHelper:
                 except Exception:
                     pass
 
-                # 回调函数
                 result = callback(page)
 
             except Exception as e:
@@ -1244,17 +1408,21 @@ class PlaywrightHelper:
     def get_page_source(self, url: str,
                         cookies: Optional[str] = None,
                         ua: Optional[str] = None,
-                        proxies: Optional[dict] = None,
+                        proxies: Optional[dict[str, Any]] = None,
                         headless: Optional[bool] = False,
                         timeout: Optional[int] = 60) -> Optional[str]:
         """
-        获取网页源码
-        :param url: 网页地址
-        :param cookies: cookies
-        :param ua: user-agent
-        :param proxies: 代理
-        :param headless: 是否无头模式
-        :param timeout: 超时时间
+        获取网页源码，优先尝试配置的 FlareSolverr，再回退到浏览器读取。
+
+        浏览器路径会等待挑战页标题消失或达到期限，读取结束后释放页面和上下文。
+
+        :param url: 要读取的页面地址
+        :param cookies: 发送给页面的 Cookie 请求头文本
+        :param ua: 指定的浏览器标识，未指定时使用浏览器默认值
+        :param proxies: 浏览器代理配置；None 表示未指定
+        :param headless: 是否使用无头模式，默认使用有界面模式
+        :param timeout: 页面加载与挑战等待上限，单位为秒；None 或 0 回退到 60 秒
+        :return: 获取到的 HTML 文本；未取得源码时返回 None
         """
         timeout = timeout or 60
         source = None
@@ -1271,7 +1439,7 @@ class PlaywrightHelper:
             context = None
             page = None
             try:
-                context = self.__launch_cloakbrowser_context(headless=headless,
+                context = self.__launch_cloakbrowser_context(headless=bool(headless),
                                                              user_agent=ua,
                                                              proxies=proxies)
                 page = context.new_page()
@@ -1281,9 +1449,7 @@ class PlaywrightHelper:
 
                 page.goto(url, wait_until="load", timeout=timeout * 1000)
 
-                # 修复: 部分站点(如 Cloudflare 质询页)会持续轮询请求,
-                # 导致 networkidle 永不触发而超时。改为等待页面加载完成后
-                # 轮询检查标题, 直到不再停留在质询/加载页。
+                # 部分挑战页会持续轮询，无法进入 networkidle；加载后按标题判断是否仍需等待。
                 challenge_titles = ("just a moment", "请稍候", "loading")
                 deadline = time.time() + timeout
                 while time.time() < deadline:

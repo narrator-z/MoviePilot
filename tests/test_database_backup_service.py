@@ -1,3 +1,7 @@
+"""
+验证数据库备份服务的发布、保留、并发控制及文件访问边界。
+"""
+
 from __future__ import annotations
 
 import stat
@@ -20,6 +24,13 @@ from app.application.backup import (
 
 @dataclass(frozen=True, slots=True)
 class _Check:
+    """
+    备份后端测试返回的校验结果。
+
+    :param valid: 备份是否通过校验
+    :param method: 校验方式标识，默认表示测试校验
+    :param detail: 校验补充信息；None 表示没有补充信息
+    """
     valid: bool
     method: str = "test-check"
     detail: str | None = None
@@ -34,17 +45,35 @@ class _Backend:
         self.restored: Path | None = None
 
     def create(self, destination: Path) -> None:
+        """
+        在指定路径写入固定快照内容，供服务发布流程使用。
+
+        :param destination: 待写入的临时备份文件路径
+        """
         destination.write_bytes(b"database snapshot")
 
     def verify(self, artifact: Path) -> BackupCheck:
+        """
+        按预设有效性和文件内容生成校验结果。
+
+        :param artifact: 待读取的备份文件
+        :return: 仅在开关允许且内容匹配时通过的校验结果
+        """
         return _Check(self.valid and artifact.read_bytes() == b"database snapshot")
 
     def restore(self, artifact: Path) -> None:
+        """
+        记录请求恢复的文件，不改写活动数据库。
+
+        :param artifact: 需要恢复的备份文件路径
+        """
         self.restored = artifact
 
 
 class _BlockingBackend(_Backend):
-    """让首个创建停在后端写入阶段，以验证共享服务的并发约束。"""
+    """
+    让首个创建停在后端写入阶段，以验证共享服务的并发约束。
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -52,6 +81,12 @@ class _BlockingBackend(_Backend):
         self.release = Event()
 
     def create(self, destination: Path) -> None:
+        """
+        等待释放事件后写入快照，超过两秒未释放则报告测试超时。
+
+        :param destination: 待写入的临时备份文件路径
+        :raises TimeoutError: 测试未在两秒内释放创建操作
+        """
         self.started.set()
         if not self.release.wait(timeout=2):
             raise TimeoutError("测试未释放数据库备份")
@@ -75,11 +110,15 @@ def _service(
 
 
 def test_service_builds_artifact_store_from_current_policy_root(tmp_path: Path) -> None:
-    """每次操作都应把最新策略根目录交给注入的存储工厂。"""
+    """
+    每次操作都应把最新策略根目录交给注入的存储工厂。
+    """
     roots: list[Path] = []
 
     def build_store(root: Path) -> BackupFiles:
-        """记录应用传入的根目录并返回真实受限文件适配器。"""
+        """
+        记录应用传入的根目录并返回真实受限文件适配器。
+        """
         roots.append(root)
         return BackupFiles(root)
 
@@ -100,6 +139,9 @@ def test_create_publishes_one_readable_private_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """
+    成功备份只发布一个完整文件，并限制目录与文件访问权限。
+    """
     monkeypatch.setattr(
         "app.adapters.system.backup.files.get_app_version",
         lambda: "v9.9.9",
@@ -114,6 +156,9 @@ def test_create_publishes_one_readable_private_file(
 
 
 def test_failed_verification_does_not_publish_artifact(tmp_path: Path) -> None:
+    """
+    校验失败时不发布备份，也不阻塞下一次成功创建。
+    """
     backend = _Backend(valid=False)
     service = _service(tmp_path, backend=backend)
     with pytest.raises(RuntimeError, match="数据库备份校验失败"):
@@ -125,6 +170,9 @@ def test_failed_verification_does_not_publish_artifact(tmp_path: Path) -> None:
 
 
 def test_concurrent_create_is_rejected_without_waiting(tmp_path: Path) -> None:
+    """
+    已有备份正在创建时，新的创建请求立即被拒绝。
+    """
     backend = _BlockingBackend()
     service = _service(tmp_path, backend=backend)
 
@@ -143,6 +191,9 @@ def test_same_second_backups_receive_short_sequence_suffix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """
+    同秒创建多个备份时通过短序号后缀避免文件名冲突。
+    """
     monkeypatch.setattr(
         "app.adapters.system.backup.files.get_app_version",
         lambda: "v9.9.9",
@@ -160,6 +211,9 @@ def test_backup_name_uses_application_release_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """
+    宿主备份文件名包含实际应用发行版本。
+    """
     monkeypatch.setattr(
         "app.adapters.system.backup.files.get_app_version",
         lambda: "v4.2.1",
@@ -169,7 +223,9 @@ def test_backup_name_uses_application_release_version(
 
 
 def test_backup_name_uses_plugin_target_and_version(tmp_path: Path) -> None:
-    """插件备份文件名应记录插件 ID 与插件版本，而不是宿主版本。"""
+    """
+    插件备份文件名应记录插件 ID 与插件版本，而不是宿主版本。
+    """
     service = DatabaseBackupService(
         backend=_Backend(),
         artifact_store_factory=BackupFiles,
@@ -188,7 +244,9 @@ def test_backup_name_uses_plugin_target_and_version(tmp_path: Path) -> None:
 def test_plugin_backup_without_version_uses_target_without_version_segment(
     tmp_path: Path,
 ) -> None:
-    """插件版本元数据缺失时仍应备份，并使用可解析的无版本文件名。"""
+    """
+    插件版本元数据缺失时仍应备份，并使用可解析的无版本文件名。
+    """
     service = DatabaseBackupService(
         backend=_Backend(),
         artifact_store_factory=BackupFiles,
@@ -206,6 +264,9 @@ def test_plugin_backup_without_version_uses_target_without_version_segment(
 
 
 def test_retention_applies_after_new_artifact_is_available(tmp_path: Path) -> None:
+    """
+    新备份发布后再按保留策略清理旧备份。
+    """
     old = _service(tmp_path, now=datetime(2026, 8, 1, 3, 0, 0)).create()
     current = _service(
         tmp_path,
@@ -219,6 +280,9 @@ def test_retention_applies_after_new_artifact_is_available(tmp_path: Path) -> No
 
 
 def test_list_ignores_unmanaged_files_and_rejects_paths(tmp_path: Path) -> None:
+    """
+    列举忽略非托管文件，校验拒绝包含目录的名称。
+    """
     artifact = _service(tmp_path).create()
     (tmp_path / "notes.txt").write_text("ignore", encoding="utf-8")
 
@@ -228,7 +292,9 @@ def test_list_ignores_unmanaged_files_and_rejects_paths(tmp_path: Path) -> None:
 
 
 def test_legacy_backup_name_remains_managed(tmp_path: Path) -> None:
-    """升级前生成的无代际前缀备份仍可列出、校验和删除。"""
+    """
+    升级前生成的无代际前缀备份仍可列出、校验和删除。
+    """
     legacy = tmp_path / "sqlite_20260818_030000.db"
     legacy.write_bytes(b"database snapshot")
     service = _service(tmp_path)
@@ -240,6 +306,9 @@ def test_legacy_backup_name_remains_managed(tmp_path: Path) -> None:
 
 
 def test_delete_removes_only_named_managed_backup(tmp_path: Path) -> None:
+    """
+    删除仅影响指定托管备份，保留其他文件并拒绝路径穿越。
+    """
     service = _service(tmp_path)
     artifact = service.create()
     unmanaged = tmp_path / "notes.txt"
@@ -254,6 +323,9 @@ def test_delete_removes_only_named_managed_backup(tmp_path: Path) -> None:
 
 
 def test_restore_requires_matching_database_type(tmp_path: Path) -> None:
+    """
+    恢复仅接受当前数据库类型的备份，并将文件交给对应后端。
+    """
     backend = _Backend()
     service = _service(tmp_path, backend=backend)
     artifact = service.create()

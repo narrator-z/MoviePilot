@@ -1,4 +1,6 @@
-"""订阅职责 owner 的静态组合宿主合同。"""
+"""
+订阅职责组件的静态组合宿主契约。
+"""
 
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +15,9 @@ if TYPE_CHECKING:
     from app.schemas.transfer import TransferInfo
 
     class _SubscribeOwnerHost:
-        """声明 SubscribeChain 组合后向各 owner 提供的属性和兄弟职责。"""
+        """
+        声明 SubscribeChain 组合后向各职责组件 提供的属性和兄弟职责。
+        """
 
         _SUBSCRIPTION_EXECUTION_TTL: int
         _match_lock: Any
@@ -84,7 +88,9 @@ if TYPE_CHECKING:
         add: Callable[..., Any]
 
         async def async_obtain_images(self, mediainfo: MediaInfo) -> Optional[MediaInfo]:
-            """异步补全媒体图片。"""
+            """
+            异步补全媒体图片。
+            """
             raise NotImplementedError
 
         async def async_post_message(
@@ -96,7 +102,9 @@ if TYPE_CHECKING:
             transferinfo: Optional[TransferInfo] = None,
             **kwargs: Any,
         ) -> None:
-            """异步发送订阅通知。"""
+            """
+            异步发送订阅通知。
+            """
             raise NotImplementedError
         check_and_handle_existing_media: Callable[..., Any]
         _prepare_music_subscribe: Callable[..., Any]
@@ -116,7 +124,11 @@ if TYPE_CHECKING:
         obtain_images: Callable[..., Any]
         parse_subscribe_source_keyword: Callable[..., Any]
         post_message: Callable[..., Any]
+        refresh: Callable[..., Any]
+        check: Callable[..., Any]
+        search: Callable[..., Any]
         remote_list: Callable[..., Any]
+        edit_message: Callable[..., bool]
         resolve_subscribe_missing: Callable[..., Any]
         reconcile_subscription_completion: Callable[..., Any]
         resume_search_queue: Callable[..., Any]

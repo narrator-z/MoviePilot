@@ -1,4 +1,6 @@
-"""整理职责 owner 的静态组合宿主合同。"""
+"""
+整理职责组件 的静态组合宿主合同。
+"""
 
 from typing import TYPE_CHECKING, Any
 
@@ -6,7 +8,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     class _TransferOwnerHost:
-        """声明 TransferChain 组合后向各 owner 提供的属性和兄弟职责。"""
+        """
+        声明 TransferChain 组合后向各组件 提供的属性和兄弟职责。
+        """
 
         _LEASE_HEARTBEAT_INTERVAL_SECONDS: float
         _QUEUE_STOP_SENTINEL: object
@@ -86,6 +90,7 @@ if TYPE_CHECKING:
         _is_media_file: Callable[..., Any]
         _is_movie_year_conflict: Callable[..., Any]
         _is_music_lyrics_file: Callable[..., Any]
+        _is_music_cover_file: Callable[..., Any]
         _is_music_retry_source: Callable[..., Any]
         _is_overwrite_declined: Callable[..., Any]
         _is_primary_media_file: Callable[..., Any]
@@ -93,6 +98,7 @@ if TYPE_CHECKING:
         _finalize_recognition_result: Callable[..., Any]
         _match_music_album_context: Callable[..., Any]
         _match_music_recording_context: Callable[..., Any]
+        _maybe_take_over_failed_transfer: Callable[..., Any]
         _merge_music_track_context: Callable[..., Any]
         _music_info_from_meta: Callable[..., Any]
         _prepare_music_batch_context: Callable[..., Any]
@@ -137,7 +143,9 @@ if TYPE_CHECKING:
         async_post_message: Callable[..., Any]
 
         def __init__(self, runtime_context: Any | None = None) -> None:
-            """声明最终 Chain 提供的运行上下文构造入口。"""
+            """
+            声明最终 Chain 提供的运行上下文构造入口。
+            """
             return None
 
     _TransferOwnerBase = _TransferOwnerHost

@@ -7,10 +7,10 @@ Verification preparation below is the contributor default. Confirmed maintainers
 ### What to Run
 
 ```bash
-# Minimum: run tests directly related to the change
+# 至少运行与本次改动直接相关的测试
 uv run --locked --no-sync pytest tests/test_<domain>.py
 
-# If the change affects common modules, startup flow, CLI, or agent runtime
+# 改动影响公共模块、启动流程、CLI 或智能体运行行为时扩大测试范围
 uv run --locked --no-sync pytest
 ```
 
@@ -44,7 +44,7 @@ Use the following as likely shared-impact boundaries. Run the full test suite wh
 ## Static Analysis
 
 ```bash
-# Full application report; use the AGENTS.md selector for changed-file checks
+# 生成全应用检查报告；改动文件检查按 AGENTS.md 规定选择路径
 uv run --locked --no-sync pylint app/
 ```
 
@@ -148,6 +148,8 @@ Before contributor submission, check applicable items below. Maintainer executio
 - [ ] If MCP/API behavior changed: `docs/mcp-api.md` and related skill files are updated
 - [ ] If database schema changed: a new Alembic migration exists under `database/versions/`
 - [ ] No secrets are included in code, logs, or committed files
-- [ ] Public or cross-module contracts and non-obvious business behavior have useful Chinese documentation
+- [ ] Added and modified objects comply with [08 — Comments and Documentation Style](08-comment-styles.md): Chinese explanations, multiline triple-double-quoted docstrings, shared parameter/return field lists, and complete required module, class, function, and method documentation
+- [ ] Every affected dataclass, Pydantic, and Protocol declaration has accurate documentation; Pydantic field descriptions reach the Schema, and comment migration has not changed model behavior
+- [ ] Older file styles and passing static checks do not replace comment review; existing migration work does not justify new violations
 
-*Last Updated: 2026-08-19*
+*Last Updated: 2026-10-17*

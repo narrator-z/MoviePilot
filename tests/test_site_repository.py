@@ -1,4 +1,6 @@
-"""站点 SQLAlchemy 适配器的快照与事务边界测试。"""
+"""
+站点 SQLAlchemy 适配器的快照与事务边界测试。
+"""
 
 import pytest
 
@@ -8,6 +10,7 @@ from app.application.site.contract import (
     SitePriorityMutation,
     SiteSnapshot,
     SiteStatisticSnapshot,
+    SiteUserDataMutation,
     SiteUserDataSnapshot,
 )
 from app.application.site.query import SiteQueryService
@@ -22,7 +25,9 @@ from app.db.uow import SqlAlchemyAsyncUnitOfWork
 
 
 def _transactional_repository() -> TransactionalSiteRepository:
-    """按生产组合方式构造短 Session 站点仓储。"""
+    """
+    按生产组合方式构造短 Session 站点仓储。
+    """
     return TransactionalSiteRepository(
         sync_session=SessionFactory,
         async_session=async_session_scope,
@@ -31,7 +36,9 @@ def _transactional_repository() -> TransactionalSiteRepository:
 
 @pytest.mark.asyncio
 async def test_site_writes_refresh_image_domains(db, monkeypatch) -> None:
-    """同步新增、同步改址和异步改址提交后均撤销旧图片域名快照。"""
+    """
+    同步新增、同步改址和异步改址提交后均撤销旧图片域名快照。
+    """
     db.watermark(Site)
     cache = SiteImageDomainCache()
     monkeypatch.setattr(site_adapter, "site_image_domains", cache)
@@ -55,7 +62,9 @@ async def test_site_writes_refresh_image_domains(db, monkeypatch) -> None:
 
 
 def test_transactional_repository_projects_frozen_site_snapshot(db) -> None:
-    """独立仓储应在 Session 内复制 JSON 并返回不可变站点快照。"""
+    """
+    独立仓储应在 Session 内复制 JSON 并返回不可变站点快照。
+    """
     db.watermark(Site)
     note = {"nested": ["before"]}
     repository = _transactional_repository()
@@ -78,12 +87,15 @@ def test_transactional_repository_projects_frozen_site_snapshot(db) -> None:
     assert isinstance(snapshot, SiteSnapshot)
     assert snapshot.note == {"nested": ["before"]}
     with pytest.raises(TypeError, match="不可修改"):
+        # 主动修改快照中的嵌套数据，验证对外投影与持久对象隔离。
         snapshot.note["new"] = True  # type: ignore[index]
 
 
 @pytest.mark.asyncio
 async def test_transactional_repository_projects_related_snapshots(db) -> None:
-    """用户数据、图标与统计查询均不得把 ORM 对象带出 Session。"""
+    """
+    用户数据、图标与统计查询均不得把 ORM 对象带出 Session。
+    """
     db.add(
         SiteUserData(
             domain="related-site.example",
@@ -117,8 +129,39 @@ async def test_transactional_repository_projects_related_snapshots(db) -> None:
     assert statistic.note == {"2026-08-28 10:00:00": 3}
 
 
+@pytest.mark.parametrize(
+    ("ratio_fields", "expected_ratio"),
+    [({}, 0), ({"ratio": None}, None), ({"ratio": 0}, 0), ({"ratio": 1.23}, 1.23)],
+)
+def test_userdata_ratio_preserves_null_and_default_through_storage(db, ratio_fields, expected_ratio) -> None:
+    """
+    首次写入与当天更新均保留显式空分享率，省略字段仍使用默认零值。
+    """
+    db.watermark(SiteUserData)
+    domain = "nullable-ratio.example"
+    repository = _transactional_repository()
+    assert repository.update_userdata(
+        domain, "空分享率站点", SiteUserDataMutation({"download": 0, **ratio_fields}),
+    ).success
+
+    def read_ratio():
+        """
+        通过生产查询 DTO 读取已提交的分享率。
+        """
+        records = SiteQueryService(repository).userdata_latest_sync()
+        return next(item.ratio for item in records if item.domain == domain)
+
+    assert read_ratio() == expected_ratio
+    repository.update_userdata(domain, "空分享率站点", SiteUserDataMutation({"ratio": 2.5}))
+    assert read_ratio() == 2.5
+    repository.update_userdata(domain, "空分享率站点", SiteUserDataMutation({"ratio": None}))
+    assert read_ratio() is None
+
+
 def test_userdata_default_seeding_info_is_compatible_with_sync_query_dto(db) -> None:
-    """省略做种明细时，查询 DTO 应收到空列表而不是 JSON 对象。"""
+    """
+    省略做种明细时，查询 DTO 应收到空列表而不是 JSON 对象。
+    """
     db.watermark(SiteUserData)
     domain = "default-seeding-info.example"
     db.add(SiteUserData(domain=domain, name="默认做种明细站点", err_msg=""))
@@ -131,7 +174,9 @@ def test_userdata_default_seeding_info_is_compatible_with_sync_query_dto(db) -> 
 
 @pytest.mark.asyncio
 async def test_session_repository_leaves_commit_and_rollback_to_caller(db) -> None:
-    """请求级仓储仅暂存，外层回滚和提交应分别决定最终可见性。"""
+    """
+    请求级仓储仅暂存，外层回滚和提交应分别决定最终可见性。
+    """
     db.watermark(Site)
     repository = _transactional_repository()
     domain = "request-site.example"
@@ -175,4 +220,5 @@ async def test_session_repository_leaves_commit_and_rollback_to_caller(db) -> No
         await request_repository.stage_priorities((SitePriorityMutation(site_id=snapshot.id, priority=8),))
         await SqlAlchemyAsyncUnitOfWork(session).commit()
 
+    # 本用例已构造非空数据，直接检查或修改其内容以验证快照契约。
     assert repository.get(snapshot.id).pri == 8  # type: ignore[union-attr]

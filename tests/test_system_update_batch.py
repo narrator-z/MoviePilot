@@ -1,4 +1,6 @@
-"""合并更新、跨版本选择和主动刷新待安装目标的离线回归。"""
+"""
+合并更新、跨版本选择和主动刷新待安装目标的离线回归。
+"""
 
 import json
 import threading
@@ -13,7 +15,9 @@ from app.adapters.system import update as update_module
 
 @pytest.fixture
 def manager(monkeypatch, tmp_path):
-    """隔离制品目录、宿主版本和资源版本，所有外部访问由用例替换。"""
+    """
+    隔离制品目录、宿主版本和资源版本，所有外部访问由用例替换。
+    """
     settings = {
         "TEMP_PATH": tmp_path / "temp", "ROOT_PATH": tmp_path / "app",
         "FRONTEND_PATH": tmp_path / "public", "AUTO_UPDATE_RESOURCE": True,
@@ -31,7 +35,9 @@ def manager(monkeypatch, tmp_path):
 
 
 def _release(version, *, next_page=False):
-    """构造带分页信息的 GitHub 正式版本响应。"""
+    """
+    构造带分页信息的 GitHub 正式版本响应。
+    """
     return SimpleNamespace(
         status_code=200, json=lambda: [{"tag_name": version}],
         links={"next": {"url": "ignored"}} if next_page else {},
@@ -39,13 +45,19 @@ def _release(version, *, next_page=False):
 
 
 def _available(manager):
-    """准备两类可用更新并替换在线检查，保留真实写入及下载编排。"""
+    """
+    准备两类可用更新并替换在线检查，保留真实写入及下载编排。
+    """
     def application(**kwargs):
-        """模拟主程序检查结果。"""
+        """
+        模拟主程序检查结果。
+        """
         manager._write_check_result("application", state="available", version="v3.1.7", error=None, **kwargs)
 
     def resources(**kwargs):
-        """模拟资源检查结果。"""
+        """
+        模拟资源检查结果。
+        """
         manager._write_check_result("resources", state="available", version="2", indexer_version="2", error=None, **kwargs)
 
     manager._check_application = application
@@ -54,7 +66,9 @@ def _available(manager):
 
 
 def _ready(manager, monkeypatch):
-    """创建两类可校验制品，供真实合并安装意图使用。"""
+    """
+    创建两类可校验制品，供真实合并安装意图使用。
+    """
     names = ["user.sites.v3.bin", "sites.cpython-test.so"]
     monkeypatch.setattr(update_module.ResourceHelper, "_get_needed_files", classmethod(lambda cls: names))
     manager._root.mkdir(parents=True, exist_ok=True)
@@ -79,7 +93,9 @@ def _ready(manager, monkeypatch):
 
 
 def test_check_selects_highest_stable_version_across_pages(monkeypatch, manager):
-    """旧版本重发、采集器发布和预发布都不能阻止跨小版本选择最高正式版本。"""
+    """
+    旧版本重发、采集器发布和预发布都不能阻止跨小版本选择最高正式版本。
+    """
     responses = [
         SimpleNamespace(status_code=200, links={"next": {}}, json=lambda: [
             {"tag_name": "v3.0.10-1"}, {"tag_name": "v3.1.5"},
@@ -100,7 +116,9 @@ def test_check_selects_highest_stable_version_across_pages(monkeypatch, manager)
 
 @pytest.mark.parametrize("remote", ["v3.1.7", "v3.1.5", "v3.1.4", "error"])
 def test_manual_refresh_only_replaces_ready_package_with_newer_version(monkeypatch, manager, remote):
-    """手动检查只丢弃被新版本取代的主程序清单，失败或较旧响应保留原包及资源。"""
+    """
+    手动检查只丢弃被新版本取代的主程序清单，失败或较旧响应保留原包及资源。
+    """
     manager._merge_prepared_manifest({"version": "v3.1.5", "resource_package_version": "2"})
     manager._write_item("application", state="ready", version="v3.1.5", can_install=True)
     request = Mock(side_effect=RuntimeError("offline")) if remote == "error" else Mock(return_value=_release(remote))
@@ -115,10 +133,14 @@ def test_manual_refresh_only_replaces_ready_package_with_newer_version(monkeypat
 
 @pytest.mark.parametrize("state", ["downloading", "installing", "ready"])
 def test_manual_refresh_preserves_a_concurrent_new_target(monkeypatch, manager, state):
-    """主动刷新等待网络时开始的新下载、安装或新完成制品不得被旧请求覆盖。"""
+    """
+    主动刷新等待网络时开始的新下载、安装或新完成制品不得被旧请求覆盖。
+    """
     manager._write_item("application", state="ready", version="v3.1.5", can_install=True)
     def response(_url):
-        """模拟并发写入更高目标后，返回本次过时检查结果。"""
+        """
+        模拟并发写入更高目标后，返回本次过时检查结果。
+        """
         manager._download_active = state == "downloading"
         manager._write_item("application", state=state, version="v3.1.8")
         return _release("v3.1.7")
@@ -128,7 +150,9 @@ def test_manual_refresh_preserves_a_concurrent_new_target(monkeypatch, manager, 
 
 
 def test_manual_refresh_replaces_resource_target_and_preserves_application(monkeypatch, manager):
-    """资源包主动刷新也可直接跳过旧版本，并保留已准备的主程序制品。"""
+    """
+    资源包主动刷新也可直接跳过旧版本，并保留已准备的主程序制品。
+    """
     _ready(manager, monkeypatch)
     monkeypatch.setattr(update_module.ResourceHelper, "get_update_info", lambda self, **kwargs: {
         "package_version": "5", "auth_version": "3", "indexer_version": "5",
@@ -141,12 +165,16 @@ def test_manual_refresh_replaces_resource_target_and_preserves_application(monke
 
 
 def test_install_state_write_failure_does_not_commit_install_intent(monkeypatch, manager):
-    """状态写入失败时不得留下重启安装意图，另一类更新仍可保留待安装包。"""
+    """
+    状态写入失败时不得留下重启安装意图，另一类更新仍可保留待安装包。
+    """
     _ready(manager, monkeypatch)
     persist = manager._persist_state
     write = Mock(side_effect=[OSError("disk failure"), None, None])
     def persist_once(state):
-        """仅首次安装状态写入失败，后续状态恢复使用真实持久化。"""
+        """
+        仅首次安装状态写入失败，后续状态恢复使用真实持久化。
+        """
         write(state)
         return persist(state)
     monkeypatch.setattr(manager, "_persist_state", persist_once)
@@ -158,13 +186,17 @@ def test_install_state_write_failure_does_not_commit_install_intent(monkeypatch,
 
 
 def test_batch_download_uses_one_worker_and_prevents_early_install(monkeypatch, manager):
-    """主程序准备完成后必须继续等待资源，同一批只有一个后台任务且不能提前重启。"""
+    """
+    主程序准备完成后必须继续等待资源，同一批只有一个后台任务且不能提前重启。
+    """
     _available(manager)
     submit = Mock()
     monkeypatch.setattr(update_module, "ThreadHelper", lambda: SimpleNamespace(submit=submit))
     visited = []
     def application():
-        """模拟主程序先完成，检查资源尚未完成时的安装边界。"""
+        """
+        模拟主程序先完成，检查资源尚未完成时的安装边界。
+        """
         assert manager._active_target == "application"
         visited.append("application")
         manager._write_item("application", state="ready", can_install=True)
@@ -172,7 +204,9 @@ def test_batch_download_uses_one_worker_and_prevents_early_install(monkeypatch, 
         assert manager.request_install("application")[0] is False
         assert not manager._install_file.exists()
     def resources():
-        """模拟第二个资源任务完成。"""
+        """
+        模拟第二个资源任务完成。
+        """
         assert manager._active_target == "resources"
         visited.append("resources")
         manager._write_item("resources", state="ready", can_install=True)
@@ -190,7 +224,9 @@ def test_batch_download_uses_one_worker_and_prevents_early_install(monkeypatch, 
 
 
 def test_retry_batch_download_reuses_successful_application(monkeypatch, manager):
-    """资源失败后合并重试只补资源下载，不重复准备仍为最新的主程序。"""
+    """
+    资源失败后合并重试只补资源下载，不重复准备仍为最新的主程序。
+    """
     _available(manager)
     monkeypatch.setattr(update_module, "ThreadHelper", lambda: SimpleNamespace(submit=lambda function, target: function(target)))
     application = Mock(side_effect=lambda: manager._write_item("application", state="ready", can_install=True))
@@ -207,8 +243,95 @@ def test_retry_batch_download_reuses_successful_application(monkeypatch, manager
     assert resources.call_count == 2
 
 
+@pytest.mark.parametrize("target", ["resources", "all"])
+def test_resource_download_reuses_checked_manifest(monkeypatch, manager, target):
+    """
+    一次单类或合并下载只读取一次清单，防止检查成功后重复请求遭遇出口抖动。
+    """
+    info = {"package_version": "2", "auth_version": "2", "indexer_version": "2", "files": []}
+    request = Mock(side_effect=[info, RuntimeError("重复清单请求")])
+    monkeypatch.setattr(update_module.ResourceHelper, "get_update_info", request)
+    monkeypatch.setattr(update_module.ResourceHelper, "get_download_files", lambda _self, _info: [])
+    monkeypatch.setattr(update_module.ResourceHelper, "download_files", lambda _self, *_args: [])
+    monkeypatch.setattr(manager, "_check_application", lambda **_kwargs: None)
+    monkeypatch.setattr(update_module, "ThreadHelper", lambda: SimpleNamespace(submit=lambda function, selected: function(selected)))
+
+    status = manager.start_download(target)
+
+    resource = next(item for item in status.updates if item.type == "resources")
+    assert resource.state == "ready"
+    assert resource.version == "2"
+    request.assert_called_once()
+
+
+def test_resource_download_failure_retains_retry_with_explicit_phase(monkeypatch, manager):
+    """
+    下载失败必须明确阶段，同时保留重试能力并禁止安装。
+    """
+    manager._write_item("resources", state="available", version="2", indexer_version="2", can_update=True)
+    monkeypatch.setattr(manager, "_check_resources", lambda: None)
+    monkeypatch.setattr(manager, "_download_resources", Mock(side_effect=RuntimeError("HTTP 503")))
+    monkeypatch.setattr(update_module, "ThreadHelper", lambda: SimpleNamespace(submit=lambda function, target: function(target)))
+
+    status = manager.start_download("resources")
+
+    resource = next(item for item in status.updates if item.type == "resources")
+    assert resource.state == "failed"
+    assert "下载" in resource.error and "HTTP 503" in resource.error
+    assert resource.can_update is True
+    assert resource.can_install is False
+
+
+def test_resource_download_refreshes_manifest_between_actions(monkeypatch, manager):
+    """
+    独立检查后远端发布新资源时，下载动作刷新一次清单，避免旧版本号配上新文件。
+    """
+    request = Mock(side_effect=[
+        {"package_version": "2", "indexer_version": "2", "files": []},
+        {"package_version": "3", "indexer_version": "3", "files": []},
+        RuntimeError("同一次下载不得再次读取清单"),
+    ])
+    monkeypatch.setattr(update_module.ResourceHelper, "get_update_info", request)
+    monkeypatch.setattr(update_module.ResourceHelper, "get_download_files", lambda _self, _info: [])
+    monkeypatch.setattr(update_module.ResourceHelper, "download_files", lambda _self, *_args: [])
+    monkeypatch.setattr(update_module, "ThreadHelper", lambda: SimpleNamespace(submit=lambda function, target: function(target)))
+    manager.check("resources")
+
+    status = manager.start_download("resources")
+
+    resource = next(item for item in status.updates if item.type == "resources")
+    assert (resource.state, resource.version) == ("ready", "3")
+    assert request.call_count == 2
+
+
+@pytest.mark.parametrize("info", [None, {"package_version": "3", "indexer_version": "3"}])
+def test_rejected_resource_check_preserves_downloading_snapshot(monkeypatch, manager, info):
+    """
+    过期检查不能替换已经开始下载的资源清单，避免状态和下载目标分离。
+    """
+    previous = (("1", "1"), {"package_version": "2", "indexer_version": "2"})
+    manager._resource_update_info = previous
+
+    def check_response(**_kwargs):
+        """
+        在检查响应到达前模拟另一个调用者启动下载。
+        """
+        manager._download_active = True
+        manager._write_item("resources", state="downloading", version="2", indexer_version="2")
+        return info
+
+    monkeypatch.setattr(update_module, "ResourceHelper", lambda: SimpleNamespace(get_update_info=check_response))
+
+    manager.check("resources")
+
+    assert manager._resource_update_info is previous
+    assert manager.get_status().updates[1].state == "downloading"
+
+
 def test_combined_install_writes_one_manifest_and_marks_both_installing(monkeypatch, manager):
-    """两个包全部校验后只写一份安装意图，重启失败可一起撤销回到 ready。"""
+    """
+    两个包全部校验后只写一份安装意图，重启失败可一起撤销回到 ready。
+    """
     _ready(manager, monkeypatch)
     assert manager.request_install("all")[0] is True
     assert json.loads(manager._install_file.read_text())["targets"] == ["application", "resources"]
@@ -219,7 +342,9 @@ def test_combined_install_writes_one_manifest_and_marks_both_installing(monkeypa
 
 
 def test_combined_install_rejects_corrupt_resource_without_partial_intent(monkeypatch, manager):
-    """任一制品校验失败时不留下部分安装请求，另一类完整制品继续可用。"""
+    """
+    任一制品校验失败时不留下部分安装请求，另一类完整制品继续可用。
+    """
     files = _ready(manager, monkeypatch)
     manager._resource_dir.joinpath(files[0]["name"]).write_bytes(b"corrupt")
     assert manager.request_install("all")[0] is False
@@ -229,7 +354,9 @@ def test_combined_install_rejects_corrupt_resource_without_partial_intent(monkey
 
 
 def test_combined_docker_install_applies_all_payloads_in_one_transaction(monkeypatch, manager):
-    """真实目录事务在一次消费中替换前后端及资源，同时保留插件并清理两类意图。"""
+    """
+    真实目录事务在一次消费中替换前后端及资源，同时保留插件并清理两类意图。
+    """
     _ready(manager, monkeypatch)
     app = manager._docker_app_dir
     public = manager._docker_public_dir

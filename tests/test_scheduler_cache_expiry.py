@@ -1,3 +1,7 @@
+"""
+验证调度器缓存有效期与过期后刷新。
+"""
+
 import asyncio
 import threading
 from unittest.mock import AsyncMock, Mock
@@ -14,24 +18,34 @@ from app.startup.initializers import scheduler as scheduler_initializer
 
 
 class _BackgroundSchedulerStub:
-    """记录系统定时任务注册结果的调度器替身。"""
+    """
+    记录系统定时任务注册结果的调度器替身。
+    """
 
     def __init__(self):
-        """初始化任务记录。"""
+        """
+        初始化任务记录。
+        """
         self.jobs = []
         self.started = False
 
     def add_job(self, func, trigger, **kwargs):
-        """记录一次任务注册。"""
+        """
+        记录一次任务注册。
+        """
         self.jobs.append({"func": func, "trigger": trigger, **kwargs})
 
     def start(self):
-        """记录调度器已启动。"""
+        """
+        记录调度器已启动。
+        """
         self.started = True
 
 
 def test_scheduler_constructor_does_not_start_background_jobs(monkeypatch):
-    """取得调度器单例不应绕过应用生命周期启动后台任务。"""
+    """
+    取得调度器单例不应绕过应用生命周期启动后台任务。
+    """
     init = Mock()
     monkeypatch.setattr(Scheduler, "init", init)
 
@@ -43,7 +57,9 @@ def test_scheduler_constructor_does_not_start_background_jobs(monkeypatch):
 
 
 def test_scheduler_initializer_starts_background_jobs(monkeypatch):
-    """应用启动入口负责显式启动已经构造的调度器。"""
+    """
+    应用启动入口负责显式启动已经构造的调度器。
+    """
     scheduler = Mock()
     monkeypatch.setattr(scheduler_initializer, "Scheduler", Mock(return_value=scheduler))
 
@@ -53,7 +69,9 @@ def test_scheduler_initializer_starts_background_jobs(monkeypatch):
 
 
 def test_scheduler_initializer_stop_preserves_sync_abi(monkeypatch):
-    """同步调用停止入口仍应立即关闭 Scheduler，不返回 coroutine。"""
+    """
+    同步调用停止入口仍应立即关闭 Scheduler，不返回 coroutine。
+    """
     scheduler = Mock()
     monkeypatch.setattr(scheduler_initializer, "Scheduler", Mock(return_value=scheduler))
 
@@ -63,7 +81,9 @@ def test_scheduler_initializer_stop_preserves_sync_abi(monkeypatch):
 
 
 def test_scheduler_initializer_stop_awaits_in_running_loop(monkeypatch):
-    """生命周期事件循环中的停止入口应返回可等待的异步收口。"""
+    """
+    生命周期事件循环中的停止入口应返回可等待的异步收口。
+    """
     scheduler = Mock()
     scheduler.stop_async = AsyncMock()
     monkeypatch.setattr(scheduler_initializer, "Scheduler", Mock(return_value=scheduler))
@@ -79,7 +99,9 @@ def test_scheduler_initializer_stop_awaits_in_running_loop(monkeypatch):
 
 
 def test_scheduler_initializer_retains_bindings_when_async_stop_fails(monkeypatch):
-    """Scheduler 未停止时不得撤销仓储、业务能力或 concrete class 登记。"""
+    """
+    Scheduler 未停止时不得撤销仓储、业务能力或 concrete class 登记。
+    """
     scheduler = Mock()
     scheduler.stop_async = AsyncMock(side_effect=RuntimeError("scheduler busy"))
     reset_bindings = Mock()
@@ -91,7 +113,9 @@ def test_scheduler_initializer_retains_bindings_when_async_stop_fails(monkeypatc
     )
 
     async def scenario() -> None:
-        """等待异步关闭失败并验证 reset 未被调用。"""
+        """
+        等待异步关闭失败并验证 reset 未被调用。
+        """
         result = scheduler_initializer.stop_scheduler()
         assert result is not None
         with pytest.raises(RuntimeError, match="scheduler busy"):
@@ -102,8 +126,11 @@ def test_scheduler_initializer_retains_bindings_when_async_stop_fails(monkeypatc
 
 
 def test_clear_cache_is_manual_only(monkeypatch):
-    """缓存清理任务应仅手动执行，不注册到调度器自动运行。"""
+    """
+    缓存清理任务应仅手动执行，不注册到调度器自动运行。
+    """
     background_scheduler = _BackgroundSchedulerStub()
+    executor_groups = {}
     services = Mock()
     monkeypatch.setattr(scheduler_catalog, "get_plugin_manager", lambda: Mock())
     monkeypatch.setattr(
@@ -114,7 +141,7 @@ def test_clear_cache_is_manual_only(monkeypatch):
     monkeypatch.setattr(
         scheduler_catalog,
         "BackgroundScheduler",
-        lambda **kwargs: background_scheduler,
+        lambda **kwargs: executor_groups.update(kwargs["executors"]) or background_scheduler,
     )
     monkeypatch.setattr(Scheduler, "stop", lambda self: None)
     monkeypatch.setattr(Scheduler, "init_workflow_jobs", lambda self: None)
@@ -125,7 +152,7 @@ def test_clear_cache_is_manual_only(monkeypatch):
         "get_scheduler_runtime_config",
         lambda: SchedulerRuntimeConfig(
             False, "Asia/Shanghai", 1, False, "", 0, None, False, 24,
-            "rss", 30, False, 0, 0, False, None, False, None,
+            "rss", 30, False, 0, 0, True, 1, False, None,
         ),
     )
 
@@ -151,10 +178,16 @@ def test_clear_cache_is_manual_only(monkeypatch):
     outbox_job = next(job for job in background_scheduler.jobs if job["id"] == "outbox_dispatch")
     assert outbox_job["name"] == "重试未完成的后台处理"
     assert background_scheduler.started is True
+    assert set(executor_groups) == {"default", "agent"}
+    heartbeat = next(job for job in background_scheduler.jobs if job["id"] == "agent_heartbeat")
+    assert heartbeat["executor"] == "agent"
+    assert scheduler._jobs["agent_heartbeat"]["execution_group"] == "agent"
 
 
 def test_user_auth_refreshes_plugin_routes_after_runtime_reinitialization(monkeypatch):
-    """自动认证重建插件实例后必须同步刷新动态路由投影。"""
+    """
+    自动认证重建插件实例后必须同步刷新动态路由投影。
+    """
     scheduler = object.__new__(Scheduler)
     scheduler._auth_count = 1
     scheduler._auth_message = False
@@ -196,7 +229,9 @@ def test_user_auth_refreshes_plugin_routes_after_runtime_reinitialization(monkey
 
 
 def test_user_auth_retries_pending_plugin_route_projection(monkeypatch):
-    """认证已成功但路由投影失败时，后续认证任务只重试未完成的投影。"""
+    """
+    认证已成功但路由投影失败时，后续认证任务只重试未完成的投影。
+    """
     scheduler = object.__new__(Scheduler)
     scheduler._auth_count = 1
     scheduler._auth_message = False

@@ -1,4 +1,9 @@
+"""
+适配宿主操作系统、进程、文件系统与设备身份查询。
+"""
+
 import asyncio
+import ctypes
 import datetime
 import hashlib
 import os
@@ -14,12 +19,8 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
-
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
+from types import ModuleType
+from typing import List, Optional, Sequence, Tuple, Union
 
 import psutil
 
@@ -38,7 +39,14 @@ from app.schemas.dashboard import DashboardMemoryInfo as _SchemaDashboardMemoryI
 from app.schemas.dashboard import DashboardSystemInfo as _SchemaDashboardSystemInfo
 from app.schemas.dashboard import ProcessInfo as _SchemaProcessInfo
 
-# Linux amd64/arm64 UAPI: _IOR(BTRFS_IOCTL_MAGIC, 31, struct btrfs_ioctl_fs_info_args)
+try:
+    import fcntl as _fcntl
+except ImportError:
+    fcntl: Optional[ModuleType] = None
+else:
+    fcntl = _fcntl
+
+# Linux amd64/arm64 的用户空间接口定义：_IOR(BTRFS_IOCTL_MAGIC, 31, struct btrfs_ioctl_fs_info_args)
 _BTRFS_IOC_FS_INFO = 0x8400941F
 _BTRFS_FS_INFO_SIZE = 1024
 _BTRFS_FSID_OFFSET = 16
@@ -70,6 +78,9 @@ class SystemUtils:
         脱敏 URL 中的 userinfo，避免命令输出泄露镜像源或代理凭据。
         """
         def replace(match: re.Match[str]) -> str:
+            """
+            把文本中的链接规范化为消息入口可识别的形式，并保留链接后的标点。
+            """
             candidate = match.group(1)
             trailing = ""
             while candidate and candidate[-1] in ".,;:)":
@@ -99,7 +110,7 @@ class SystemUtils:
 
     @staticmethod
     def execute_with_subprocess(
-            command: list,
+            command: list[str],
             env: Optional[dict[str, str]] = None,
             safe_command: Optional[list[str]] = None,
             timeout: Optional[float] = 300,
@@ -173,7 +184,9 @@ class SystemUtils:
 
     @staticmethod
     def _decode_subprocess_output(value: object) -> str:
-        """把 subprocess 的文本或字节输出统一成可脱敏的字符串。"""
+        """
+        把 subprocess 的文本或字节输出统一成可脱敏的字符串。
+        """
         if value is None:
             return ""
         if isinstance(value, bytes):
@@ -186,7 +199,9 @@ class SystemUtils:
             communication_task: "asyncio.Task[tuple[bytes, bytes]]",
             grace_seconds: float = 5,
     ) -> None:
-        """终止安装子进程及其同组子进程，并确保句柄已回收。"""
+        """
+        终止安装子进程及其同组子进程，并确保句柄已回收。
+        """
         process_tree = SystemUtils._process_tree(process.pid)
         if process.returncode is None:
             try:
@@ -249,7 +264,9 @@ class SystemUtils:
 
     @staticmethod
     def _process_tree(pid: int) -> list[psutil.Process]:
-        """收集安装进程及其后代，避免构建进程继续写运行环境。"""
+        """
+        收集安装进程及其后代，避免构建进程继续写运行环境。
+        """
         try:
             parent = psutil.Process(pid)
             return [parent, *parent.children(recursive=True)]
@@ -258,7 +275,9 @@ class SystemUtils:
 
     @staticmethod
     def _alive_processes(processes: list[psutil.Process]) -> list[psutil.Process]:
-        """返回仍可能执行外部副作用的进程，忽略已退出和僵尸进程。"""
+        """
+        返回仍可能执行外部副作用的进程，忽略已退出和僵尸进程。
+        """
         alive = []
         seen_pids = set()
         for process in processes:
@@ -277,7 +296,9 @@ class SystemUtils:
             processes: list[psutil.Process],
             timeout: float,
     ) -> list[psutil.Process]:
-        """在事件循环中有界等待整棵进程树退出，并返回残留进程。"""
+        """
+        在事件循环中有界等待整棵进程树退出，并返回残留进程。
+        """
         deadline = asyncio.get_running_loop().time() + max(timeout, 0)
         while True:
             alive = SystemUtils._alive_processes(processes)
@@ -293,7 +314,9 @@ class SystemUtils:
             processes: list[psutil.Process],
             force: bool = False,
     ) -> None:
-        """向进程树发送终止或强制结束信号。"""
+        """
+        向进程树发送终止或强制结束信号。
+        """
         for child in reversed(processes):
             try:
                 (child.kill if force else child.terminate)()
@@ -302,12 +325,14 @@ class SystemUtils:
 
     @staticmethod
     async def execute_with_subprocess_async(
-            command: list,
+            command: list[str],
             env: Optional[dict[str, str]] = None,
             safe_command: Optional[list[str]] = None,
             timeout: Optional[float] = 300,
     ) -> Tuple[bool, str]:
-        """异步执行可取消的子进程，超时或取消时回收整个进程组。"""
+        """
+        异步执行可取消的子进程，超时或取消时回收整个进程组。
+        """
         display_command = safe_command or command
         process: Optional[asyncio.subprocess.Process] = None
         communication_task: Optional["asyncio.Task[tuple[bytes, bytes]]"] = None
@@ -473,11 +498,23 @@ class SystemUtils:
         return platform.machine()
 
     @staticmethod
-    def copy(src: Path, dest: Path) -> Tuple[int, str]:
+    def copy(src: Path, dest: Path, *, try_reflink: bool = True) -> Tuple[int, str]:
         """
-        复制
+        复制文件。
+
+        若源与目标在同一磁盘且支持写时复制 (reflink)，优先尝试克隆；
+        失败或不支持时自动回退为常规复制。
+
+        :param src: 源文件路径
+        :param dest: 目标文件路径
+        :param try_reflink: 是否优先尝试写时复制引用链接克隆
+        :return: (状态码, 错误信息)，0 表示成功
         """
         try:
+            if try_reflink and SystemUtils.is_same_disk(src, dest):
+                code, _ = SystemUtils.reflink(src, dest)
+                if code == 0:
+                    return 0, ""
             shutil.copy2(src, dest)
             return 0, ""
         except Exception as err:
@@ -525,10 +562,69 @@ class SystemUtils:
             return -1, str(err)
 
     @staticmethod
-    def list_files(directory: Path, extensions: list = None,
+    def reflink(src: Path, dest: Path) -> Tuple[int, str]:
+        """
+        创建引用链接（写时复制 / CoW / Reflink / 克隆）
+
+        采用原子暂存模式将源文件克隆到临时路径，成功后移动至目标路径。
+
+        :param src: 源文件路径
+        :param dest: 目标文件路径
+        :return: (状态码, 错误信息)，0 表示成功
+        """
+        tmp_path = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.mp")
+        try:
+            # 调用私有辅助方法执行底层克隆
+            code, msg = SystemUtils._reflink_copy(src, tmp_path)
+            if code != 0:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                return code, msg
+            # 克隆成功，原子移动替换到目标路径
+            shutil.move(tmp_path, dest)
+            return 0, ""
+        except Exception as err:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+            return -1, str(err)
+
+    @staticmethod
+    def _reflink_copy(src: Path, dest: Path) -> Tuple[int, str]:
+        """
+        调用底层操作系统能力执行文件引用链接（写时复制克隆）
+
+        :param src: 源文件路径
+        :param dest: 目标文件路径
+        :return: (状态码, 错误信息)，0 表示成功
+        """
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL(None, use_errno=True)
+            ret = libc.clonefile(os.fsencode(str(src)), os.fsencode(str(dest)), ctypes.c_uint32(0))
+            if ret != 0:
+                err = ctypes.get_errno()
+                return -1, f"clonefile 失败: {os.strerror(err)}"
+            return 0, ""
+        if sys.platform.startswith("linux"):
+            if fcntl is None:
+                return -1, "fcntl 不可用"
+            try:
+                with open(src, "rb") as s, open(dest, "wb") as d:
+                    fcntl.ioctl(d.fileno(), 0x40049409, s.fileno())
+                shutil.copystat(src, dest)
+                return 0, ""
+            except OSError as err:
+                return -1, f"Linux ioctl(FICLONE) 失败: {err}"
+        return -1, f"当前操作系统 ({sys.platform}) 不支持引用链接 (reflink)"
+
+    @staticmethod
+    def list_files(directory: Path, extensions: Optional[Sequence[str]] = None,
                    min_filesize: int = 0, recursive: bool = True) -> List[Path]:
         """
         获取目录下所有指定扩展名的文件（包括子目录）
+
         :param directory: 指定的父目录
         :param extensions: 需要包含的扩展名列表，例如 ['mkv', 'mp4']
         :param min_filesize: 文件最低大小，单位 MB
@@ -552,7 +648,10 @@ class SystemUtils:
         else:
             pattern = re.compile(r".*")
 
-        def _scan_directory(dir_path: Path, is_recursive: bool):
+        def _scan_directory(dir_path: Path, is_recursive: bool) -> None:
+            """
+            扫描当前目录并将满足扩展名和大小要求的文件追加到结果列表。
+            """
             try:
                 with os.scandir(dir_path) as entries:
                     for entry in entries:
@@ -651,7 +750,7 @@ class SystemUtils:
         raise RuntimeError(f"RAR 压缩包解压失败：{'；'.join(errors)}")
 
     @staticmethod
-    def exits_files(directory: Path, extensions: list, min_filesize: int = 0, recursive: bool = True) -> bool:
+    def exits_files(directory: Path, extensions: Sequence[str], min_filesize: int = 0, recursive: bool = True) -> bool:
         """
         判断目录下是否存在指定扩展名的文件
 
@@ -680,6 +779,9 @@ class SystemUtils:
             return True
 
         def _search_files(dir_path: Path, is_recursive: bool) -> bool:
+            """
+            扫描目录中的有效文件，按调用方要求递归并隔离不可访问的目录。
+            """
             try:
                 with os.scandir(dir_path) as entries:
                     for entry in entries:
@@ -702,7 +804,7 @@ class SystemUtils:
         return _search_files(directory, recursive)
 
     @staticmethod
-    def list_sub_files(directory: Path, extensions: list) -> List[Path]:
+    def list_sub_files(directory: Path, extensions: Sequence[str]) -> List[Path]:
         """
         列出当前目录下的所有指定扩展名的文件(不包括子目录)
         """
@@ -779,16 +881,16 @@ class SystemUtils:
         """
         计算目录的大小
 
-        参数:
-            directory_path (Path): 目录路径
-
-        返回:
-            int: 目录的大小（以字节为单位）
+        :param path: 待统计的文件或目录
+        :return: 总字节数；不存在或无法读取时按可统计部分返回
         """
         if not path or not path.exists():
             return 0
 
-        def _calc_dir_size(dir_path):
+        def _calc_dir_size(dir_path: Union[Path, str]) -> int:
+            """
+            递归统计目录内可读取文件的字节数。
+            """
             total = 0
             try:
                 with os.scandir(dir_path) as entries:
@@ -805,7 +907,9 @@ class SystemUtils:
 
     @staticmethod
     def _get_btrfs_fsid(dir_path: Path) -> Optional[bytes]:
-        """读取目录所属 Btrfs 文件系统的 FSID，无法确认时返回 None。"""
+        """
+        读取目录所属 Btrfs 文件系统的 FSID，无法确认时返回 None。
+        """
         if not sys.platform.startswith("linux") or fcntl is None \
                 or not (SystemUtils.is_x86_64() or SystemUtils.is_aarch64()):
             return None
@@ -853,10 +957,11 @@ class SystemUtils:
             and (SystemUtils.is_x86_64() or SystemUtils.is_aarch64())
         if not use_btrfs_fsid:
             # 默认分支保留原有行为，不打开目录或调用 ioctl。
-            disk_set = set()
+            disk_set: set[Union[str, int]] = set()
             total_free_space = 0.0
             total_space = 0.0
             for dir_path in dir_list:
+                disk: Union[str, int]
                 if not dir_path:
                     continue
                 if not dir_path.exists():
@@ -874,7 +979,7 @@ class SystemUtils:
         total_free_space = 0.0
         total_space = 0.0
         # 先按 st_dev 恢复原有去重语义，再用组内唯一可信的 FSID 合并 Btrfs 子卷。
-        disk_groups = {}
+        disk_groups: dict[int, tuple[Path, set[bytes]]] = {}
         for dir_path in dir_list:
             if not dir_path or not dir_path.exists():
                 continue
@@ -885,13 +990,13 @@ class SystemUtils:
             if btrfs_fsid:
                 disk_groups[st_dev][1].add(btrfs_fsid)
 
-        disk_set = set()
+        grouped_disks: set[Union[tuple[str, bytes], tuple[str, int]]] = set()
         for st_dev, (dir_path, fsids) in disk_groups.items():
             # 同一 st_dev 出现冲突 FSID 可能是挂载变化导致的不一致快照，
             # 此时禁止跨 st_dev 合并，避免少计独立存储。
-            disk = ("btrfs_fsid", next(iter(fsids))) if len(fsids) == 1 else ("st_dev", st_dev)
-            if disk not in disk_set:
-                disk_set.add(disk)
+            disk_key = ("btrfs_fsid", next(iter(fsids))) if len(fsids) == 1 else ("st_dev", st_dev)
+            if disk_key not in grouped_disks:
+                grouped_disks.add(disk_key)
                 total_space += SystemUtils.total_space(dir_path)
                 total_free_space += SystemUtils.free_space(dir_path)
         return total_space, total_free_space
@@ -903,7 +1008,7 @@ class SystemUtils:
         """
         if not os.path.exists(path):
             return 0.0
-        return psutil.disk_usage(str(path)).free
+        return float(psutil.disk_usage(str(path)).free)
 
     @staticmethod
     def total_space(path: Path) -> float:
@@ -912,7 +1017,7 @@ class SystemUtils:
         """
         if not os.path.exists(path):
             return 0.0
-        return psutil.disk_usage(str(path)).total
+        return float(psutil.disk_usage(str(path)).total)
 
     @staticmethod
     def processes() -> List[_SchemaProcessInfo]:
@@ -924,8 +1029,8 @@ class SystemUtils:
             try:
                 if proc.status() != psutil.STATUS_ZOMBIE:
                     runtime = datetime.datetime.now() - datetime.datetime.fromtimestamp(
-                        int(getattr(proc, 'create_time', 0)()))
-                    mem_info = getattr(proc, 'memory_info', None)()
+                        int(proc.create_time()))
+                    mem_info = proc.memory_info()
                     if mem_info is not None:
                         mem_mb = round(mem_info.rss / (1024 * 1024), 1)
                         processes.append(_SchemaProcessInfo(
@@ -952,7 +1057,9 @@ class SystemUtils:
 
     @staticmethod
     def _operating_system_name() -> str:
-        """返回适合在仪表板展示的操作系统名称。"""
+        """
+        返回适合在仪表板展示的操作系统名称。
+        """
         if SystemUtils.is_windows():
             return platform.platform()
         if SystemUtils.is_macos():
@@ -983,7 +1090,7 @@ class SystemUtils:
         return False
 
     @staticmethod
-    def get_windows_drives():
+    def get_windows_drives() -> list[str]:
         """
         获取Windows所有盘符
         """
@@ -995,11 +1102,11 @@ class SystemUtils:
         return vols
 
     @staticmethod
-    def cpu_usage():
+    def cpu_usage() -> float:
         """
         获取CPU使用率
         """
-        return psutil.cpu_percent()
+        return float(psutil.cpu_percent())
 
     @staticmethod
     def memory_usage() -> _SchemaDashboardMemoryInfo:
@@ -1032,7 +1139,8 @@ class SystemUtils:
         import time
         # 获取初始网络统计
         net_io_1 = psutil.net_io_counters()
-        time.sleep(1)  # 等待1秒
+        # 退出探测每秒重试一次，避免忙等。
+        time.sleep(1)
         # 获取1秒后的网络统计
         net_io_2 = psutil.net_io_counters()
 
@@ -1074,6 +1182,7 @@ class SystemUtils:
     ) -> bool:
         """
         检测是否为网络文件系统
+
         :param directory: 目录路径
         :param include_local_fuse: 是否将本地 FUSE 挂载视为挂载文件系统
         :return: 是否为网络文件系统
@@ -1088,10 +1197,11 @@ class SystemUtils:
                     output = result.stdout.lower()
                     # 以下本地文件系统含有fuse关键字
                     local_fs = [
-                        "fuse.shfs",  # Unraid
-                        "zfuse.zfsv",  # 极空间(zfuse.zfsv2、zfuse.zfsv3、...)
+                        # Unraid 的本地 FUSE 文件系统
+                        "fuse.shfs",
+                        # 极空间的本地 FUSE 文件系统，例如 zfuse.zfsv2 和 zfuse.zfsv3
+                        "zfuse.zfsv",
                         "fuseblk",
-                        # TBD
                     ]
                     if (
                             not include_local_fuse
@@ -1151,7 +1261,7 @@ class SystemUtils:
         return SystemUtils.get_config_path() / "app.env"
 
     @staticmethod
-    def clear(temp_path: Path, days: int):
+    def clear(temp_path: Path, days: int) -> None:
         """
         清理指定目录中指定天数前的文件，递归删除子文件及空文件夹
         """
@@ -1170,7 +1280,7 @@ class SystemUtils:
                 folder.rmdir()
 
     @staticmethod
-    def generate_user_unique_id():
+    def generate_user_unique_id() -> Optional[str]:
         """
         根据优先级依次尝试生成稳定唯一ID：
         1. 文件系统唯一标识符。
@@ -1178,7 +1288,7 @@ class SystemUtils:
         3. 主机名。
         """
 
-        def get_filesystem_unique_id():
+        def get_filesystem_unique_id() -> Optional[str]:
             """
             获取文件系统的唯一标识符。
             使用根目录的设备号和 inode。
@@ -1191,13 +1301,14 @@ class SystemUtils:
                 print(str(e))
                 return None
 
-        def get_mac_address_id():
+        def get_mac_address_id() -> Optional[str]:
             """
             获取设备的 MAC 地址并生成唯一标识符。
             """
             try:
                 mac_address = uuid.getnode()
-                if (mac_address >> 40) % 2:  # 检查是否是虚拟MAC地址
+                # 过滤常见虚拟网卡地址，避免把临时设备当作宿主身份。
+                if (mac_address >> 40) % 2:
                     raise ValueError("MAC地址可能是虚拟地址")
                 mac_str = f"{mac_address:012x}"
                 return hashlib.sha256(mac_str.encode("utf-8")).hexdigest()

@@ -1,4 +1,6 @@
-"""插件日志文件路由测试。"""
+"""
+插件日志文件路由测试。
+"""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,25 +10,39 @@ from app.runtime.log import LoggerManager, logger
 
 
 class CapturingLogWriter:
-    """记录日志写入目标，避免测试访问真实文件系统。"""
+    """
+    记录日志写入目标，避免测试访问真实文件系统。
+    """
 
     def __init__(self) -> None:
         self.entries: list[tuple[str, str, Path]] = []
 
     def write_log(
-        self, level: str, message: str, file_path: Path, exc_info: Any = None
+        self,
+        level: str,
+        message: str,
+        file_path: Path,
+        exc_info: Any = None,
     ) -> None:
-        """保存单条日志的级别、内容和目标路径。"""
+        """
+        保存单条日志的级别、内容和目标路径。
+
+        :param exc_info: 随该条日志透传的异常信息（fork：写入器记录 exc_info）
+        """
         self.entries.append((level, message, file_path))
 
     @staticmethod
     def shutdown() -> bool:
-        """测试写入器没有待释放资源。"""
+        """
+        测试写入器没有待释放资源。
+        """
         return True
 
 
 def test_virtual_plugin_routes_log_by_runtime_module_identity(monkeypatch, tmp_path):
-    """共享物理源码的虚拟实例应按运行实例 ID 写入独立日志文件。"""
+    """
+    共享物理源码的虚拟实例应按运行实例 ID 写入独立日志文件。
+    """
     writer = CapturingLogWriter()
     monkeypatch.setattr(LoggerManager, "_writer", writer)
     monkeypatch.setattr(LoggerManager, "_log_path", tmp_path)

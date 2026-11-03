@@ -1,13 +1,20 @@
+"""
+提供系统运维、升级、资源代理及兼容设置路由入口。
+"""
+
 import asyncio
 import io
 import json
 import zipfile
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Any, Optional
 from urllib.parse import urlsplit
 
 import anyio
-import pillow_avif  # noqa: F401  # pylint: disable=unused-import  # AVIF 注册副作用
+
+# 导入时注册 AVIF 解码器，因此保留未直接引用的依赖。
+import pillow_avif  # noqa: F401  # pylint: disable=unused-import
 from fastapi import Body, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
@@ -47,6 +54,8 @@ from app.application.scheduling import get_scheduler
 from app.application.security.image import normalize_image_domain, site_image_domains
 from app.application.security.url import SecurityUtils
 from app.application.site.query import get_configured_site_query_service
+
+# 站点目录由外部资源加载，静态检查无法解析其动态导出。
 from app.application.site.sites import SitesHelper  # pylint: disable=import-error,no-name-in-module
 from app.application.system import LogFileData, LogNotFoundError
 from app.chain.media import MediaChain
@@ -84,7 +93,7 @@ router = ResponseAPIRouter()
 router.routes.extend(system_identifiers_router.routes)
 router.routes.extend(module_router.routes)
 
-# Re-export setting handlers for existing endpoint-level imports and tests.
+# 重导出设置处理函数，兼容既有端点路径的导入和测试。
 __all__ = [
     "catalog_settings",
     "describe_setting",
@@ -111,7 +120,9 @@ _PUBLIC_SETTINGS_KEYS = {"PLUGIN_MARKET"}
 
 
 def _project_public_storages(value: Any) -> list[dict[str, Any]]:
-    """存储配置只公开名称和类型，与 /storage/options 一致，config 中的连接配置不返回。"""
+    """
+    存储配置只公开名称和类型，与 /storage/options 一致，config 中的连接配置不返回。
+    """
     if not isinstance(value, list):
         return []
     return [
@@ -122,7 +133,9 @@ def _project_public_storages(value: Any) -> list[dict[str, Any]]:
 
 
 async def _get_image_proxy_allowed_domains() -> set[str]:
-    """合并站点快照与当前图片代理配置，仍逐请求执行 DNS 安全校验。"""
+    """
+    合并站点快照与当前图片代理配置，仍逐请求执行 DNS 安全校验。
+    """
     runtime_settings = get_runtime_settings()
     allowed_domains = set(runtime_settings.get("SECURITY_IMAGE_DOMAINS", []))
     allowed_domains.update(await site_image_domains.get(get_configured_site_query_service()))
@@ -140,7 +153,9 @@ async def _get_image_proxy_allowed_domains() -> set[str]:
 
 
 def _get_image_proxy_trusted_hosts() -> set[str]:
-    """返回已启用媒体服务器的主机（host / play_host），图片代理可直接信任。"""
+    """
+    返回已启用媒体服务器的主机（host / play_host），图片代理可直接信任。
+    """
     trusted_hosts: set[str] = set()
     try:
         for conf in get_mediaserver_configs():
@@ -151,6 +166,7 @@ def _get_image_proxy_trusted_hosts() -> set[str]:
                 parsed = urlsplit(host if "://" in host else f"https://{host}")
                 if parsed.scheme in {"http", "https"} and parsed.netloc:
                     trusted_hosts.add(parsed.netloc.lower())
+    # 配置异常时继续执行图片代理的兼容回退，不阻断请求。
     except Exception as err:  # noqa: BLE001 - 配置不可用时不影响图片代理
         logger.debug(f"读取媒体服务器配置失败，图片代理不信任任何媒体服务器主机：{err}")
         return set()
@@ -158,7 +174,9 @@ def _get_image_proxy_trusted_hosts() -> set[str]:
 
 
 def _database_backup_artifact_data(artifact: Any) -> _SchemaDatabaseBackupArtifactData:
-    """将内部备份制品映射为不含宿主路径的 Web DTO。"""
+    """
+    将内部备份制品映射为不含宿主路径的 Web DTO。
+    """
     return _SchemaDatabaseBackupArtifactData(
         name=artifact.name,
         db_type=artifact.db_type,
@@ -187,7 +205,9 @@ async def _build_log_zip_response(
     runtime: HostRuntime,
     allow_empty: bool = False,
 ) -> StreamingResponse:
-    """读取受限日志条目并生成兼容 ZIP 响应。"""
+    """
+    读取受限日志条目并生成兼容 ZIP 响应。
+    """
     try:
         entries = await runtime.system.collect_logs(name)
     except LogNotFoundError as error:
@@ -207,7 +227,9 @@ def _build_log_zip_data(
     name: str,
     entries: list[LogFileData],
 ) -> tuple[bytes, str]:
-    """只负责把应用服务提供的日志内容编码为 ZIP framing。"""
+    """
+    只负责把应用服务提供的日志内容编码为 ZIP framing。
+    """
     zip_buffer = io.BytesIO()
     filename_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     safe_name = (name or "logs").strip().lower().replace("/", "-") or "logs"
@@ -225,7 +247,7 @@ async def fetch_image(
     proxy: Optional[bool] = None,
     use_cache: bool = False,
     if_none_match: Optional[str] = None,
-    cookies: Optional[str | dict] = None,
+    cookies: Optional[str | dict[str, str]] = None,
     allowed_domains: Optional[set[str]] = None,
 ) -> Optional[Response]:
     """
@@ -238,23 +260,34 @@ async def fetch_image(
         allowed_domains = await _get_image_proxy_allowed_domains()
 
     fetch_url = SecurityUtils.strip_url_signature(url)
+    private_ranges = get_runtime_settings().get("IMAGE_PROXY_ALLOWED_PRIVATE_RANGES", [])
+    trusted_hosts = _get_image_proxy_trusted_hosts()
     # 验证URL安全性
     if not await SecurityUtils.is_safe_image_url_async(
         url,
         allowed_domains,
-        allowed_private_ranges=get_runtime_settings().get(
-            "IMAGE_PROXY_ALLOWED_PRIVATE_RANGES",
-            [],
-        ),
-        trusted_hosts=_get_image_proxy_trusted_hosts(),
+        allowed_private_ranges=private_ranges,
+        trusted_hosts=trusted_hosts,
     ):
         return None
+
+    async def validate_redirect(target: str) -> bool:
+        """
+        逐跳重新验证目标，不把原图片的签名或主机信任扩散给跳转地址。
+        """
+        return await SecurityUtils.is_safe_image_redirect_url_async(
+            target,
+            allowed_domains,
+            allowed_private_ranges=private_ranges,
+            trusted_hosts=trusted_hosts,
+        )
 
     image_result = await ImageHelper().async_fetch_image_with_mime_type(
         url=fetch_url,
         proxy=proxy,
         use_cache=use_cache,
         cookies=cookies,
+        redirect_validator=validate_redirect,
     )
 
     if image_result:
@@ -303,7 +336,7 @@ async def proxy_img(
     use_cookies: bool = False,
     if_none_match: Annotated[str | None, Header()] = None,
     _: _SchemaTokenPayload = Depends(verify_resource_token),
-) -> Response:
+) -> Optional[Response]:
     """
     图片代理，可选是否使用代理服务器，支持 HTTP 缓存
     """
@@ -340,7 +373,7 @@ async def cache_img(
     url: str,
     if_none_match: Annotated[str | None, Header()] = None,
     _: _SchemaTokenPayload = Depends(verify_resource_token),
-) -> Response:
+) -> Optional[Response]:
     """
     本地缓存图片文件，支持 HTTP 缓存，如果启用全局图片缓存，则使用磁盘缓存
     """
@@ -352,7 +385,7 @@ async def cache_img(
     )
 
 
-@router.get(  # type: ignore[misc]
+@router.get(
     "/notification-image",
     summary="通知图片代理",
     response_model=None,
@@ -398,7 +431,7 @@ async def notification_image(
     summary="查询非敏感系统设置",
     response_model=_SchemaResponse[_SchemaJsonObject],
 )
-def get_global_setting(token: str):
+def get_global_setting(token: str) -> _SchemaResponse[dict[str, Any]]:
     """
     查询非敏感系统设置（默认鉴权）
     仅包含登录前UI初始化必需的字段
@@ -438,7 +471,7 @@ def get_global_setting(token: str):
 async def get_user_global_setting(
     _: ApiPrincipal = Depends(get_current_active_user_async),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
+) -> _SchemaResponse[dict[str, Any]]:
     """
     查询用户相关系统设置（登录后获取）
     包含业务功能相关的配置和用户权限信息
@@ -483,7 +516,9 @@ async def list_database_backups(
     page: CompatiblePageParam = None,
     count: CompatibleCountParam = None,
 ) -> list[_SchemaDatabaseBackupArtifactData]:
-    """列出当前备份目录中的正式制品，不触发内容校验。"""
+    """
+    列出当前备份目录中的正式制品，不触发内容校验。
+    """
     try:
         artifacts = await run_in_threadpool_to_completion(get_database_governance().list_backups)
     except Exception as error:
@@ -500,7 +535,9 @@ async def list_database_backups(
 async def create_database_backup(
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
 ) -> _SchemaDatabaseBackupArtifactData:
-    """创建、校验并原子发布当前活动数据库的一致快照。"""
+    """
+    创建、校验并原子发布当前活动数据库的一致快照。
+    """
     try:
         artifact = await run_in_threadpool_to_completion(get_database_governance().create_backup)
     except DatabaseBackupInProgressError as error:
@@ -520,7 +557,9 @@ async def verify_database_backup(
     name: str,
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
 ) -> _SchemaDatabaseBackupVerificationData:
-    """校验一个受管制品，响应不包含宿主路径或适配器错误明细。"""
+    """
+    校验一个受管制品，响应不包含宿主路径或适配器错误明细。
+    """
     try:
         verification = await run_in_threadpool_to_completion(
             get_database_governance().verify_backup,
@@ -548,7 +587,9 @@ async def delete_database_backup(
     name: str,
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
 ) -> _SchemaResponse[None]:
-    """删除一个受管制品，只接受备份目录内的合法文件名。"""
+    """
+    删除一个受管制品，只接受备份目录内的合法文件名。
+    """
     try:
         await run_in_threadpool_to_completion(
             get_database_governance().delete_backup,
@@ -572,7 +613,7 @@ async def delete_database_backup(
 async def get_env_setting(
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
     runtime: HostRuntime = Depends(get_host_runtime),
-) -> _SchemaResponse:
+) -> _SchemaResponse[dict[str, Any]]:
     """
     查询系统环境变量，包括当前版本号（仅管理员）
     """
@@ -602,7 +643,7 @@ async def get_env_setting(
 async def usage_statistic(
     _: ApiPrincipal = Depends(get_current_active_user_async),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
+) -> _SchemaResponse[dict[str, Any]]:
     """
     查询安装版本统计报表
     """
@@ -610,7 +651,7 @@ async def usage_statistic(
 
 
 @router.get("/ping", summary="服务存活检测", response_model=_SchemaResponse[None])
-async def ping(_: ApiPrincipal = Depends(get_current_active_user_async)) -> _SchemaResponse:
+async def ping(_: ApiPrincipal = Depends(get_current_active_user_async)) -> _SchemaResponse[None]:
     """
     检测服务是否可用
     """
@@ -623,17 +664,17 @@ async def ping(_: ApiPrincipal = Depends(get_current_active_user_async)) -> _Sch
     response_model=_SchemaResponse[_SchemaSystemEnvironmentUpdateData],
 )
 async def set_env_setting(
-    env: dict,
+    env: dict[str, Any],
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
+) -> _SchemaResponse[_SchemaSystemEnvironmentUpdateData]:
     """
     更新系统环境变量（仅管理员）
     """
     result = await runtime.system.update_environment(env)
     return _SchemaResponse(
         success=result.success,
-        message=result.message,
+        message=result.message or "",
         data=result.data,
     )
 
@@ -654,14 +695,17 @@ async def get_progress(
     request: Request,
     process_type: str,
     _: _SchemaTokenPayload = Depends(verify_resource_token),
-):
+) -> StreamingResponse:
     """
     实时获取处理进度，返回格式为SSE
     """
     progress = AsyncProgressHelper(process_type)
     locale = LocaleHelper.get_current_locale()
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        定期输出当前处理进度，在断开或系统停止时退出。
+        """
         try:
             while not runtime_stop_state.is_system_stopped:
                 if await request.is_disconnected():
@@ -680,7 +724,7 @@ async def get_progress(
     summary="查询公开系统设置",
     response_model=_SchemaResponse[_SchemaValueData],
 )
-async def get_public_setting(key: str, _: ApiPrincipal = Depends(get_current_active_user_async)) -> _SchemaResponse:
+async def get_public_setting(key: str, _: ApiPrincipal = Depends(get_current_active_user_async)) -> _SchemaResponse[dict[str, Any]]:
     """
     查询普通用户可读取的非敏感系统设置，存储配置只返回名称和类型
     """
@@ -707,14 +751,14 @@ async def sync_plugin_market_from_wiki(
     request: Optional[_SchemaPluginMarketSyncRequest] = Body(default=None),
     _: ApiPrincipal = Depends(get_current_active_superuser_async),
     runtime: HostRuntime = Depends(get_host_runtime),
-) -> _SchemaResponse:
+) -> _SchemaResponse[_SchemaPluginMarketSyncData]:
     """
     从 Wiki 插件文档同步插件市场仓库地址。
     """
     result = await runtime.system.sync_plugin_market(request.wiki_url if request else None)
     return _SchemaResponse(
         success=result.success,
-        message=result.message,
+        message=result.message or "",
         data=result.data,
     )
 
@@ -735,19 +779,22 @@ async def get_message(
     request: Request,
     role: Optional[str] = "system",
     _: _SchemaTokenPayload = Depends(verify_resource_token),
-):
+) -> StreamingResponse:
     """
     实时获取系统消息，返回格式为SSE
     """
     message = MessageHelper()
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        输出积压消息和空闲心跳，在断开或系统停止时退出。
+        """
         try:
             while not runtime_stop_state.is_system_stopped:
                 if await request.is_disconnected():
                     break
                 # 一次推送全部积压消息，避免页面重新打开后按 3 秒一条逐条补弹
-                details = message.drain(role)
+                details = message.drain(role or "system")
                 if details:
                     for detail in details:
                         yield f"data: {detail}\n\n"
@@ -767,8 +814,10 @@ async def _get_logging_impl(
     logfile: Optional[str] = "moviepilot.log",
     _: _SchemaTokenPayload = Depends(_verify_log_resource_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
-    """把应用服务提供的日志数据映射为文本或 SSE 响应。"""
+) -> Response | StreamingResponse:
+    """
+    把应用服务提供的日志数据映射为文本或 SSE 响应。
+    """
     resolved_logfile = logfile or "moviepilot.log"
     if length == -1:
         try:
@@ -785,8 +834,10 @@ async def _get_logging_impl(
     except LogNotFoundError as error:
         raise HTTPException(status_code=404, detail="Not Found") from error
 
-    async def event_generator():
-        """只为原始日志行添加 SSE data framing。"""
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        仅将原始日志行包装为 SSE 的 data 消息。
+        """
         try:
             async for line in source:
                 yield f"data: {line}\n\n"
@@ -820,8 +871,10 @@ async def get_logging(
     logfile: Optional[str] = "moviepilot.log",
     _: _SchemaTokenPayload = Depends(_verify_log_resource_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
-    """实时日志的兼容公开入口。"""
+) -> Response | StreamingResponse:
+    """
+    实时日志的兼容公开入口。
+    """
     return await _get_logging_impl(request, length, logfile, _, runtime)
 
 
@@ -841,7 +894,7 @@ async def download_logging(
     name: str,
     _: _SchemaTokenPayload = Depends(_verify_log_resource_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
+) -> StreamingResponse:
     """
     按日志标识下载主程序或插件滚动日志，返回 zip 文件。
     """
@@ -858,7 +911,7 @@ async def latest_version(
     runtime: HostRuntime = Depends(get_host_runtime),
     page: CompatiblePageParam = None,
     count: CompatibleCountParam = None,
-):
+) -> _SchemaResponse[list[dict[str, Any]]]:
     """
     查询Github所有Release版本
     """
@@ -878,7 +931,7 @@ def ruletest(
     rulegroup_name: str,
     subtitle: Optional[str] = None,
     _: _SchemaTokenPayload = Depends(verify_token),
-):
+) -> _SchemaResponse[dict[str, Any]]:
     """
     过滤规则测试，规则类型 1-订阅，2-洗版，3-搜索
     """
@@ -889,7 +942,7 @@ def ruletest(
     )
     # 查询规则组详情
     rulegroup = RuleHelper().get_rule_group(rulegroup_name)
-    result_data = {
+    result_data: dict[str, object] = {
         "title": title,
         "subtitle": subtitle,
         "rulegroup_name": rulegroup_name,
@@ -952,7 +1005,7 @@ def ruletest(
 )
 async def nettest_targets(
     _: _SchemaTokenPayload = Depends(verify_token), page: CompatiblePageParam = None, count: CompatibleCountParam = None
-):
+) -> _SchemaResponse[list[dict[str, Any]]]:
     """
     获取网络测试目标。
 
@@ -984,7 +1037,7 @@ async def nettest(
     url: Optional[str] = None,
     include: Optional[str] = None,
     _: _SchemaTokenPayload = Depends(verify_token),
-):
+) -> _SchemaResponse[dict[str, Any]]:
     """
     测试内置目标的网络连通性。
 
@@ -999,8 +1052,8 @@ async def nettest(
     data = {"time": result.elapsed_ms} if result.elapsed_ms is not None else None
     return _SchemaResponse(
         success=result.success,
-        message=result.message,
-        data=data,
+        message=result.message or "",
+        data=data if data is not None else None,
     )
 
 
@@ -1008,12 +1061,12 @@ async def nettest(
 def restart_system(
     _: ApiPrincipal = Depends(get_current_active_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
+) -> _SchemaResponse[None]:
     """
     重启系统（仅管理员）
     """
     result = runtime.system.restart()
-    return _SchemaResponse(success=result.success, message=result.message)
+    return _SchemaResponse(success=result.success, message=result.message or "")
 
 
 @router.post("/upgrade", summary="Dev 更新并重启系统", response_model=_SchemaResponse[None])
@@ -1021,10 +1074,12 @@ def upgrade_system(
     mode: Annotated[str | None, Body()] = None,
     _: ApiPrincipal = Depends(get_current_active_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
-    """保留 Dev 更新入口；Release 更新必须使用后台下载与确认安装流程。"""
+) -> _SchemaResponse[None]:
+    """
+    保留 Dev 更新入口；Release 更新必须使用后台下载与确认安装流程。
+    """
     result = runtime.system.upgrade(mode)
-    return _SchemaResponse(success=result.success, message=result.message)
+    return _SchemaResponse(success=result.success, message=result.message or "")
 
 
 @router.get(
@@ -1035,8 +1090,10 @@ def upgrade_system(
 def system_update_status(
     _: ApiPrincipal = Depends(get_current_active_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
-    """返回后台检查、下载或待安装状态（仅管理员）。"""
+) -> _SchemaResponse[_SchemaSystemUpdateStatus]:
+    """
+    返回后台检查、下载或待安装状态（仅管理员）。
+    """
     return _SchemaResponse(success=True, data=runtime.system.update_status())
 
 
@@ -1048,8 +1105,10 @@ def system_update_status(
 def check_system_update(
     _: ApiPrincipal = Depends(get_current_active_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
-):
-    """查询最高正式 V3 版本和站点资源，可刷新旧待安装目标（仅管理员）。"""
+) -> _SchemaResponse[_SchemaSystemUpdateStatus]:
+    """
+    查询最高正式 V3 版本和站点资源，可刷新旧待安装目标（仅管理员）。
+    """
     return _SchemaResponse(success=True, data=runtime.system.check_update())
 
 
@@ -1062,10 +1121,12 @@ def download_system_update(
     _: ApiPrincipal = Depends(get_current_active_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
     request: Annotated[_SchemaSystemUpdateRequest | None, Body()] = None,
-):
-    """单类或合并下载更新并立即返回状态；all 准备全部最新制品（仅管理员）。"""
+) -> _SchemaResponse[_SchemaSystemUpdateStatus]:
+    """
+    单类或合并下载更新并立即返回状态；all 准备全部最新制品（仅管理员）。
+    """
     result = runtime.system.download_update(request.target if request else "application")
-    return _SchemaResponse(success=result.success, data=result.data, message=result.message)
+    return _SchemaResponse(success=result.success, data=result.data, message=result.message or "")
 
 
 @router.post(
@@ -1077,14 +1138,16 @@ def install_system_update(
     _: ApiPrincipal = Depends(get_current_active_superuser),
     runtime: HostRuntime = Depends(get_host_runtime),
     request: Annotated[_SchemaSystemUpdateRequest | None, Body()] = None,
-):
-    """校验所选制品后重启安装；all 要求全部更新就绪并只重启一次（仅管理员）。"""
+) -> _SchemaResponse[None]:
+    """
+    校验所选制品后重启安装；all 要求全部更新就绪并只重启一次（仅管理员）。
+    """
     result = runtime.system.install_update(request.target if request else "application")
-    return _SchemaResponse(success=result.success, message=result.message)
+    return _SchemaResponse(success=result.success, message=result.message or "")
 
 
 @router.get("/runscheduler", summary="运行服务", response_model=_SchemaResponse[None])
-def run_scheduler(jobid: str, _: ApiPrincipal = Depends(get_current_active_superuser)):
+def run_scheduler(jobid: str, _: ApiPrincipal = Depends(get_current_active_superuser)) -> _SchemaResponse[None]:
     """
     执行命令（仅管理员）
     """
@@ -1098,7 +1161,7 @@ def run_scheduler(jobid: str, _: ApiPrincipal = Depends(get_current_active_super
 
 
 @router.get("/runscheduler2", summary="运行服务（API_TOKEN）", response_model=_SchemaResponse[None])
-def run_scheduler2(jobid: str, _: Annotated[str, Depends(verify_apitoken)]):
+def run_scheduler2(jobid: str, _: Annotated[str, Depends(verify_apitoken)]) -> _SchemaResponse[None]:
     """
     执行命令（API_TOKEN认证）
     """
@@ -1112,5 +1175,5 @@ def run_scheduler2(jobid: str, _: Annotated[str, Depends(verify_apitoken)]):
     return _SchemaResponse(success=True)
 
 
-# Keep the settings routes in the legacy system router while owning their code separately.
+# 设置实现由独立模块维护，路由仍挂载到原有 system 入口。
 router.routes.extend(system_settings_router.routes)

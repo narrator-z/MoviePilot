@@ -1,3 +1,7 @@
+"""
+业务处理链的运行依赖装配、模块调度与通用协作能力。
+"""
+
 from __future__ import annotations
 
 import pickle
@@ -19,7 +23,8 @@ from app.domain.meta.metabase import MetaBase
 from app.runtime.log import logger
 from app.schemas.context import MediaPerson
 from app.schemas.exception import BusinessRejectedError, RateLimitExceededException
-from app.schemas.mediaserver import ExistMediaInfo, WebhookEventInfo
+from app.schemas.file import FileItem
+from app.schemas.mediaserver import ExistMediaInfo, MediaServerQueryOptions, WebhookEventInfo
 from app.schemas.message import IncomingMessage
 from app.schemas.system import TransferDirectoryConf
 from app.schemas.tmdb import TmdbEpisode
@@ -31,7 +36,6 @@ from app.schemas.types import (
     MediaType,
     TorrentStatus,
 )
-from app.schemas.workflow import FileItem
 
 if TYPE_CHECKING:
     from app.application.transfer.workflow import TransferPlanCheckpoint, TransferPlanningInput
@@ -39,12 +43,14 @@ if TYPE_CHECKING:
 
 class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, metaclass=ABCMeta):
     """
-    处理链基类
+    处理链基类。
+
+    具体模块遵守各门面声明的输入与返回契约；按名称动态分发后在门面边界恢复静态类型。
     """
 
-    def __init__(self, runtime_context: Optional[ChainRuntimeContext] = None):
+    def __init__(self, runtime_context: Optional[ChainRuntimeContext] = None) -> None:
         """
-        公共初始化；未显式传入上下文时继续使用兼容运行时 provider。
+        公共初始化；未显式传入上下文时继续使用兼容运行时 能力提供方。
         """
         context = runtime_context or get_chain_runtime_context()
         self.modulemanager = context.module_manager
@@ -90,7 +96,9 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
 
     @property
     def runtime_config(self) -> ChainRuntimeConfig:
-        """返回当前运行配置；显式注入实例仍保留稳定快照语义。"""
+        """
+        返回当前运行配置；显式注入实例仍保留稳定快照语义。
+        """
         provider = cast(
             Optional[Callable[[], ChainRuntimeConfig]],
             getattr(self, "_runtime_config_provider", None),
@@ -107,7 +115,9 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
 
     @runtime_config.setter
     def runtime_config(self, configuration: ChainRuntimeConfig) -> None:
-        """保存显式注入的 Chain 配置快照并停止自动配置读取。"""
+        """
+        保存显式注入的 Chain 配置快照并停止自动配置读取。
+        """
         self._runtime_config_provider = None
         self._runtime_config = configuration
 
@@ -137,14 +147,20 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             logger.error(f"异步加载缓存 {filename} 出错：{str(err)}")
             return None
 
-    async def async_save_cache(self, cache: Any, filename: str) -> None:
+    async def async_save_cache(self, cache: Any, filename: str, *, strict: bool = False) -> None:
         """
-        异步保存缓存
+        异步保存缓存，默认保留旧插件的失败日志合同。
+
+        :param cache: 待序列化的业务快照
+        :param filename: 目标缓存键
+        :param strict: 为True时向需要确认落盘的用例传播失败
         """
         try:
             await self.async_filecache.set(filename, pickle.dumps(cache))
         except Exception as err:
             logger.error(f"异步保存缓存 {filename} 出错：{str(err)}")
+            if strict:
+                raise
             return
 
     def save_cache(self, cache: Any, filename: str) -> None:
@@ -169,7 +185,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         """
         await self.async_filecache.delete(filename)
 
-    def __handle_plugin_error(self, err: Exception, plugin_id: str, plugin_name: str, method: str, **kwargs):
+    def __handle_plugin_error(self, err: Exception, plugin_id: str, plugin_name: str, method: str, **kwargs: Any) -> None:
         """
         处理插件模块执行错误，通知保留调用位置和异常原因，完整堆栈写入日志与事件。
         """
@@ -194,7 +210,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             },
         )
 
-    def __handle_system_error(self, err: Exception, module_id: str, module_name: str, method: str, **kwargs):
+    def __handle_system_error(self, err: Exception, module_id: str, module_name: str, method: str, **kwargs: Any) -> None:
         """
         处理系统模块执行错误，通知保留调用位置和异常原因，完整堆栈写入日志与事件。
         """
@@ -224,7 +240,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
 
     @staticmethod
     def __handle_rate_limit_error(
-        err: RateLimitExceededException, source_type: str, source_id: str, method: str, **kwargs
+        err: RateLimitExceededException, source_type: str, source_id: str, method: str, **kwargs: Any
     ) -> None:
         """
         处理本地限流跳过，避免预期的限流状态进入系统错误告警。
@@ -236,8 +252,8 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     def run_module(
         self,
         method: str,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
         """
         运行包含该方法的所有模块，然后返回结果
@@ -253,14 +269,16 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        """运行模块并传播 provider 异常，供必须区分空结果与查询失败的能力使用。"""
+        """
+        运行模块并传播 能力提供方 异常，供必须区分空结果与查询失败的能力使用。
+        """
         return self._module_dispatcher.dispatch_strict(method, *args, **kwargs)
 
     async def async_run_module(
         self,
         method: str,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
         """
         异步运行包含该方法的所有模块，然后返回结果
@@ -283,17 +301,18 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         year: Optional[str] = None,
         season: Optional[int] = None,
         raise_exception: bool = False,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """
         搜索和匹配豆瓣信息
+
         :param name: 标题
-        :param imdbid: imdbid
+        :param imdbid: IMDb 媒体标识
         :param mtype: 类型
         :param year: 年份
         :param season: 季
         :param raise_exception: 触发速率限制时是否抛出异常
         """
-        return self.run_module(
+        return cast(Optional[dict[str, Any]], self.run_module(
             "match_doubaninfo",
             name=name,
             imdbid=imdbid,
@@ -301,7 +320,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             year=year,
             season=season,
             raise_exception=raise_exception,
-        )
+        ))
 
     async def async_match_doubaninfo(
         self,
@@ -311,17 +330,18 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         year: Optional[str] = None,
         season: Optional[int] = None,
         raise_exception: bool = False,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """
         搜索和匹配豆瓣信息（异步版本）
+
         :param name: 标题
-        :param imdbid: imdbid
+        :param imdbid: IMDb 媒体标识
         :param mtype: 类型
         :param year: 年份
         :param season: 季
         :param raise_exception: 触发速率限制时是否抛出异常
         """
-        return await self.async_run_module(
+        return cast(Optional[dict[str, Any]], await self.async_run_module(
             "async_match_doubaninfo",
             name=name,
             imdbid=imdbid,
@@ -329,7 +349,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             year=year,
             season=season,
             raise_exception=raise_exception,
-        )
+        ))
 
     def match_tmdbinfo(
         self,
@@ -337,15 +357,16 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         mtype: Optional[MediaType] = None,
         year: Optional[str] = None,
         season: Optional[int] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """
         搜索和匹配TMDB信息
+
         :param name: 标题
         :param mtype: 类型
         :param year: 年份
         :param season: 季
         """
-        return self.run_module("match_tmdbinfo", name=name, mtype=mtype, year=year, season=season)
+        return cast(Optional[dict[str, Any]], self.run_module("match_tmdbinfo", name=name, mtype=mtype, year=year, season=season))
 
     async def async_match_tmdbinfo(
         self,
@@ -353,35 +374,38 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         mtype: Optional[MediaType] = None,
         year: Optional[str] = None,
         season: Optional[int] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """
         搜索和匹配TMDB信息（异步版本）
+
         :param name: 标题
         :param mtype: 类型
         :param year: 年份
         :param season: 季
         """
-        return await self.async_run_module("async_match_tmdbinfo", name=name, mtype=mtype, year=year, season=season)
+        return cast(Optional[dict[str, Any]], await self.async_run_module("async_match_tmdbinfo", name=name, mtype=mtype, year=year, season=season))
 
     def obtain_images(self, mediainfo: MediaInfo) -> Optional[MediaInfo]:
         """
         补充抓取媒体信息图片
+
         :param mediainfo:  识别的媒体信息
         :return: 更新后的媒体信息
         """
         if mediainfo and mediainfo.type == MediaType.MUSIC:
             return mediainfo
-        return self.run_module("obtain_images", mediainfo=mediainfo)
+        return cast(Optional[MediaInfo], self.run_module("obtain_images", mediainfo=mediainfo))
 
     async def async_obtain_images(self, mediainfo: MediaInfo) -> Optional[MediaInfo]:
         """
         补充抓取媒体信息图片（异步版本）
+
         :param mediainfo:  识别的媒体信息
         :return: 更新后的媒体信息
         """
         if mediainfo and mediainfo.type == MediaType.MUSIC:
             return mediainfo
-        return await self.async_run_module("async_obtain_images", mediainfo=mediainfo)
+        return cast(Optional[MediaInfo], await self.async_run_module("async_obtain_images", mediainfo=mediainfo))
 
     def obtain_specific_image(
         self,
@@ -394,6 +418,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     ) -> Optional[str]:
         """
         获取指定媒体信息图片，返回图片地址
+
         :param mediaid:     媒体ID
         :param mtype:       媒体类型
         :param image_type:  图片类型
@@ -401,7 +426,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         :param season:      季
         :param episode:     集
         """
-        return self.run_module(
+        return cast(Optional[str], self.run_module(
             "obtain_specific_image",
             mediaid=mediaid,
             mtype=mtype,
@@ -409,99 +434,107 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             image_type=image_type,
             season=season,
             episode=episode,
-        )
+        ))
 
     def douban_info(
         self,
         doubanid: str,
         mtype: Optional[MediaType] = None,
         raise_exception: bool = False,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """
         获取豆瓣信息
+
         :param doubanid: 豆瓣ID
         :param mtype: 媒体类型
         :return: 豆瓣信息
         :param raise_exception: 触发速率限制时是否抛出异常
         """
-        return self.run_module(
+        return cast(Optional[dict[str, Any]], self.run_module(
             "douban_info",
             doubanid=doubanid,
             mtype=mtype,
             raise_exception=raise_exception,
-        )
+        ))
 
     async def async_douban_info(
         self,
         doubanid: str,
         mtype: Optional[MediaType] = None,
         raise_exception: bool = False,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """
         获取豆瓣信息（异步版本）
+
         :param doubanid: 豆瓣ID
         :param mtype: 媒体类型
         :return: 豆瓣信息
         :param raise_exception: 触发速率限制时是否抛出异常
         """
-        return await self.async_run_module(
+        return cast(Optional[dict[str, Any]], await self.async_run_module(
             "async_douban_info",
             doubanid=doubanid,
             mtype=mtype,
             raise_exception=raise_exception,
-        )
+        ))
 
-    def tvdb_info(self, tvdbid: int) -> Optional[dict]:
+    def tvdb_info(self, tvdbid: int) -> Optional[dict[str, Any]]:
         """
         获取TVDB信息
-        :param tvdbid: int
+
+        :param tvdbid: TVDB 电视剧标识
         :return: TVDB信息
         """
-        return self.run_module("tvdb_info", tvdbid=tvdbid)
+        return cast(Optional[dict[str, Any]], self.run_module("tvdb_info", tvdbid=tvdbid))
 
     def tvdb_slug(self, tvdbid: int) -> Optional[str]:
         """
         获取TVDB剧集 slug（别名），用于构建 TheTvDb 直达链接。
-        :param tvdbid: int
+
+        :param tvdbid: TVDB 电视剧标识
         :return: slug 字符串
         """
-        return self.run_module("tvdb_slug", tvdbid=tvdbid)
+        return cast(Optional[str], self.run_module("tvdb_slug", tvdbid=tvdbid))
 
-    def tmdb_info(self, tmdbid: int, mtype: MediaType, season: Optional[int] = None) -> Optional[dict]:
+    def tmdb_info(self, tmdbid: int, mtype: MediaType, season: Optional[int] = None) -> Optional[dict[str, Any]]:
         """
         获取TMDB信息
-        :param tmdbid: int
+
+        :param tmdbid: TMDB 媒体标识
         :param mtype:  媒体类型
         :param season: 季
         :return: TVDB信息
         """
-        return self.run_module("tmdb_info", tmdbid=tmdbid, mtype=mtype, season=season)
+        return cast(Optional[dict[str, Any]], self.run_module("tmdb_info", tmdbid=tmdbid, mtype=mtype, season=season))
 
-    async def async_tmdb_info(self, tmdbid: int, mtype: MediaType, season: Optional[int] = None) -> Optional[dict]:
+    async def async_tmdb_info(self, tmdbid: int, mtype: MediaType, season: Optional[int] = None) -> Optional[dict[str, Any]]:
         """
         获取TMDB信息（异步版本）
-        :param tmdbid: int
+
+        :param tmdbid: TMDB 媒体标识
         :param mtype:  媒体类型
         :param season: 季
         :return: TVDB信息
         """
-        return await self.async_run_module("async_tmdb_info", tmdbid=tmdbid, mtype=mtype, season=season)
+        return cast(Optional[dict[str, Any]], await self.async_run_module("async_tmdb_info", tmdbid=tmdbid, mtype=mtype, season=season))
 
-    def bangumi_info(self, bangumiid: int) -> Optional[dict]:
+    def bangumi_info(self, bangumiid: int) -> Optional[dict[str, Any]]:
         """
         获取Bangumi信息
-        :param bangumiid: int
+
+        :param bangumiid: Bangumi 条目标识
         :return: Bangumi信息
         """
-        return self.run_module("bangumi_info", bangumiid=bangumiid)
+        return cast(Optional[dict[str, Any]], self.run_module("bangumi_info", bangumiid=bangumiid))
 
-    async def async_bangumi_info(self, bangumiid: int) -> Optional[dict]:
+    async def async_bangumi_info(self, bangumiid: int) -> Optional[dict[str, Any]]:
         """
         获取Bangumi信息（异步版本）
-        :param bangumiid: int
+
+        :param bangumiid: Bangumi 条目标识
         :return: Bangumi信息
         """
-        return await self.async_run_module("async_bangumi_info", bangumiid=bangumiid)
+        return cast(Optional[dict[str, Any]], await self.async_run_module("async_bangumi_info", bangumiid=bangumiid))
 
     def message_parser(self, source: str, body: Any, form: Any, args: Any) -> Optional[IncomingMessage]:
         """
@@ -509,116 +542,125 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         userid: 用户ID
         username: 用户名
         text: 内容
+
         :param source: 消息来源（渠道配置名称）
         :param body: 请求体
         :param form: 表单
         :param args: 参数
         :return: 消息渠道、消息内容
         """
-        return self.run_module("message_parser", source=source, body=body, form=form, args=args)
+        return cast(Optional[IncomingMessage], self.run_module("message_parser", source=source, body=body, form=form, args=args))
 
     def webhook_parser(self, body: Any, form: Any, args: Any) -> Optional[WebhookEventInfo]:
         """
         解析Webhook报文体
+
         :param body:  请求体
         :param form:  请求表单
         :param args:  请求参数
         :return: 字典，解析为消息时需要包含：title、text、image
         """
-        return self.run_module("webhook_parser", body=body, form=form, args=args)
+        return cast(Optional[WebhookEventInfo], self.run_module("webhook_parser", body=body, form=form, args=args))
 
     def search_medias(
         self, meta: MetaBase, media_source: Optional[MediaSourceSelection] = None
     ) -> Optional[List[MediaInfo]]:
         """
         搜索媒体信息
+
         :param meta:  识别的元数据
         :param media_source: 请求级搜索数据源
         :return: 媒体信息列表
         """
-        return self.run_module("search_medias", meta=meta, media_source=media_source)
+        return cast(Optional[List[MediaInfo]], self.run_module("search_medias", meta=meta, media_source=media_source))
 
     async def async_search_medias(
         self, meta: MetaBase, media_source: Optional[MediaSourceSelection] = None
     ) -> Optional[List[MediaInfo]]:
         """
         搜索媒体信息（异步版本）
+
         :param meta:  识别的元数据
         :param media_source: 请求级搜索数据源
         :return: 媒体信息列表
         """
-        return await self.async_run_module("async_search_medias", meta=meta, media_source=media_source)
+        return cast(Optional[List[MediaInfo]], await self.async_run_module("async_search_medias", meta=meta, media_source=media_source))
 
     def search_persons(
         self, name: str, media_source: Optional[MediaSourceSelection] = None
     ) -> Optional[List[Union[MediaPerson, MusicArtistInfo]]]:
         """
         搜索影视人物和音乐艺术家
+
         :param name:  人物或艺术家名称
         :param media_source: 请求级搜索数据源
         :return: 影视人物或音乐艺术家信息列表
         """
-        return self.run_module("search_persons", name=name, media_source=media_source)
+        return cast(Optional[List[Union[MediaPerson, MusicArtistInfo]]], self.run_module("search_persons", name=name, media_source=media_source))
 
     async def async_search_persons(
         self, name: str, media_source: Optional[MediaSourceSelection] = None
     ) -> Optional[List[Union[MediaPerson, MusicArtistInfo]]]:
         """
         搜索影视人物和音乐艺术家（异步版本）
+
         :param name:  人物或艺术家名称
         :param media_source: 请求级搜索数据源
         :return: 影视人物或音乐艺术家信息列表
         """
-        return await self.async_run_module("async_search_persons", name=name, media_source=media_source)
+        return cast(Optional[List[Union[MediaPerson, MusicArtistInfo]]], await self.async_run_module("async_search_persons", name=name, media_source=media_source))
 
     def search_collections(
         self, name: str, media_source: Optional[MediaSourceSelection] = None
     ) -> Optional[List[MediaInfo]]:
         """
         搜索集合信息
+
         :param name:  集合名称
         :param media_source: 请求级搜索数据源
         :return: 合集信息列表
         """
-        return self.run_module("search_collections", name=name, media_source=media_source)
+        return cast(Optional[List[MediaInfo]], self.run_module("search_collections", name=name, media_source=media_source))
 
     async def async_search_collections(
         self, name: str, media_source: Optional[MediaSourceSelection] = None
     ) -> Optional[List[MediaInfo]]:
         """
         搜索集合信息（异步版本）
+
         :param name:  集合名称
         :param media_source: 请求级搜索数据源
         :return: 合集信息列表
         """
-        return await self.async_run_module("async_search_collections", name=name, media_source=media_source)
+        return cast(Optional[List[MediaInfo]], await self.async_run_module("async_search_collections", name=name, media_source=media_source))
 
     def get_search_page_size(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: Optional[str] = None,
     ) -> Optional[int]:
         """
         获取站点搜索单页容量；返回 None 表示当前搜索入口不支持可靠翻页。
         """
-        return self.run_module("get_search_page_size", site=site, keyword=keyword)
+        return cast(Optional[int], self.run_module("get_search_page_size", site=site, keyword=keyword))
 
     def search_torrents(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: str,
         mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
         """
         搜索一个站点的种子资源
+
         :param site:  站点
         :param keyword:  搜索关键词
         :param mtype:  媒体类型
         :param page:  页码
         :reutrn: 资源列表
         """
-        return self.run_module("search_torrents", site=site, keyword=keyword, mtype=mtype, page=page)
+        return cast(List[TorrentInfo], self.run_module("search_torrents", site=site, keyword=keyword, mtype=mtype, page=page))
 
     def search_plugin_torrents(
         self,
@@ -626,7 +668,9 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
-        """仅搜索插件提供的资源源，避免依赖或重复绑定站点索引器。"""
+        """
+        仅搜索插件提供的资源源，避免依赖或重复绑定站点索引器。
+        """
         return (
             self._module_dispatcher.execute_plugin_modules(
                 "search_torrents", None, site={}, keyword=keyword, mtype=mtype, page=page
@@ -636,60 +680,54 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
 
     def search_site_torrents(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: str,
         mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
-        """搜索指定站点索引器；插件注册的索引器优先交由插件模块认领，未认领时回落宿主索引器。"""
-        plugin_results = cast(
-            List[TorrentInfo],
-            self._module_dispatcher.execute_plugin_modules(
-                "search_torrents", None, site=site, keyword=keyword, mtype=mtype, page=page
-            )
-            or [],
-        )
-        if plugin_results:
-            return plugin_results
-        return cast(
-            List[TorrentInfo],
+        """
+        仅搜索指定站点索引器；插件资源源由搜索链统一调用一次。
+        """
+        return (
             self._module_dispatcher.execute_system_modules(
                 "search_torrents", None, site=site, keyword=keyword, mtype=mtype, page=page
             )
-            or [],
+            or []
         )
 
     def search_subtitles(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: str,
         page: Optional[int] = 0,
     ) -> List[SubtitleInfo]:
         """
         搜索一个站点的字幕资源。
+
         :param site: 站点
         :param keyword: 搜索关键词
         :param page: 页码
         :return: 字幕列表
         """
-        return self.run_module("search_subtitles", site=site, keyword=keyword, page=page)
+        return cast(List[SubtitleInfo], self.run_module("search_subtitles", site=site, keyword=keyword, page=page))
 
     async def async_search_torrents(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: str,
         mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
         """
         异步搜索一个站点的种子资源
+
         :param site:  站点
         :param keyword:  搜索关键词
         :param mtype:  媒体类型
         :param page:  页码
         :reutrn: 资源列表
         """
-        return await self.async_run_module("async_search_torrents", site=site, keyword=keyword, mtype=mtype, page=page)
+        return cast(List[TorrentInfo], await self.async_run_module("async_search_torrents", site=site, keyword=keyword, mtype=mtype, page=page))
 
     async def async_search_plugin_torrents(
         self,
@@ -697,7 +735,9 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
-        """异步搜索插件提供的资源源。"""
+        """
+        异步搜索插件提供的资源源。
+        """
         return (
             await self._module_dispatcher.async_execute_plugin_modules(
                 "async_search_torrents", None, site={}, keyword=keyword, mtype=mtype, page=page
@@ -707,49 +747,40 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
 
     async def async_search_site_torrents(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: str,
         mtype: Optional[MediaType] = None,
         page: Optional[int] = 0,
     ) -> List[TorrentInfo]:
-        """异步搜索指定站点索引器；插件注册的索引器优先交由插件模块认领，未认领时回落宿主索引器。"""
-        plugin_results = cast(
-            List[TorrentInfo],
-            (await self._module_dispatcher.async_execute_plugin_modules(
-                "async_search_torrents", None,
-                site=site, keyword=keyword, mtype=mtype, page=page
-            ))
-            or [],
-        )
-        if plugin_results:
-            return plugin_results
-        return cast(
-            List[TorrentInfo],
-            (await self._module_dispatcher.async_execute_system_modules(
-                "async_search_torrents", None,
-                site=site, keyword=keyword, mtype=mtype, page=page
-            ))
-            or [],
+        """
+        仅搜索指定站点索引器；插件资源源由搜索链统一调用一次。
+        """
+        return (
+            await self._module_dispatcher.async_execute_system_modules(
+                "async_search_torrents", None, site=site, keyword=keyword, mtype=mtype, page=page
+            )
+            or []
         )
 
     async def async_search_subtitles(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: str,
         page: Optional[int] = 0,
     ) -> List[SubtitleInfo]:
         """
         异步搜索一个站点的字幕资源。
+
         :param site: 站点
         :param keyword: 搜索关键词
         :param page: 页码
         :return: 字幕列表
         """
-        return await self.async_run_module("async_search_subtitles", site=site, keyword=keyword, page=page)
+        return cast(List[SubtitleInfo], await self.async_run_module("async_search_subtitles", site=site, keyword=keyword, page=page))
 
     def refresh_torrents(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: Optional[str] = None,
         cat: Optional[str] = None,
         page: Optional[int] = 0,
@@ -757,6 +788,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     ) -> List[TorrentInfo]:
         """
         获取站点最新一页的种子，多个站点需要多线程处理
+
         :param site:  站点
         :param keyword:  标题
         :param cat:  分类
@@ -764,11 +796,11 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         :param mtype: 媒体类型
         :reutrn: 种子资源列表
         """
-        return self.run_module("refresh_torrents", site=site, keyword=keyword, cat=cat, page=page, mtype=mtype)
+        return cast(List[TorrentInfo], self.run_module("refresh_torrents", site=site, keyword=keyword, cat=cat, page=page, mtype=mtype))
 
     async def async_refresh_torrents(
         self,
-        site: dict,
+        site: dict[str, Any],
         keyword: Optional[str] = None,
         cat: Optional[str] = None,
         page: Optional[int] = 0,
@@ -776,6 +808,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     ) -> List[TorrentInfo]:
         """
         异步获取站点最新一页的种子，多个站点需要多线程处理
+
         :param site:  站点
         :param keyword:  标题
         :param cat:  分类
@@ -783,9 +816,9 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         :param mtype: 媒体类型
         :reutrn: 种子资源列表
         """
-        return await self.async_run_module(
+        return cast(List[TorrentInfo], await self.async_run_module(
             "async_refresh_torrents", site=site, keyword=keyword, cat=cat, page=page, mtype=mtype
-        )
+        ))
 
     def filter_torrents(
         self,
@@ -795,40 +828,44 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     ) -> List[TorrentInfo]:
         """
         过滤种子资源
+
         :param rule_groups:  过滤规则组名称列表
         :param torrent_list:  资源列表
         :param mediainfo:  识别的媒体信息
         :return: 过滤后的资源列表，添加资源优先级
         """
-        return self.run_module(
+        return cast(List[TorrentInfo], self.run_module(
             "filter_torrents",
             rule_groups=rule_groups,
             torrent_list=torrent_list,
             mediainfo=mediainfo,
-        )
+        ))
 
     def download(
         self,
         content: Union[Path, str, bytes],
         download_dir: Path,
-        cookie: str,
-        episodes: Set[int] = None,
+        cookie: Optional[str],
+        episodes: Optional[Set[int]] = None,
         category: Optional[str] = None,
         label: Optional[str] = None,
         downloader: Optional[str] = None,
+        custom_words: Optional[str] = None,
     ) -> Optional[Tuple[Optional[str], Optional[str], Optional[str], str]]:
         """
         根据种子文件，选择并添加下载任务
+
         :param content:  种子文件地址或者磁力链接或者种子内容
         :param download_dir:  下载目录
-        :param cookie:  cookie
+        :param cookie: 下载种子所需的站点 Cookie
         :param episodes:  需要下载的集数
         :param category:  种子分类
         :param label:  标签
         :param downloader:  下载器
+        :param custom_words: 来源识别词，选集须与订阅解析采用相同规则
         :return: 下载器名称、种子Hash、种子文件布局、错误原因
         """
-        return self.run_module(
+        return cast(Optional[Tuple[Optional[str], Optional[str], Optional[str], str]], self.run_module(
             "download",
             content=content,
             download_dir=download_dir,
@@ -837,70 +874,74 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             category=category,
             label=label,
             downloader=downloader,
-        )
+            custom_words=custom_words,
+        ))
 
     def download_added(
         self,
         context: Context,
         download_dir: Path,
-        torrent_content: Union[str, bytes] = None,
+        torrent_content: Optional[Union[str, bytes]] = None,
     ) -> None:
         """
         添加下载任务成功后的模块附加处理分发，站点字幕下载由 DownloadChain 另行编排
+
         :param context:  上下文，包括识别信息、媒体信息、种子信息
         :param download_dir:  下载目录
         :param torrent_content: 种子内容，如果有则直接使用该内容，否则从 context 中获取种子文件路径
         :return: None，该方法可被多个模块同时处理
         """
-        return self.run_module(
+        return cast(None, self.run_module(
             "download_added",
             context=context,
             torrent_content=torrent_content,
             download_dir=download_dir,
-        )
+        ))
 
     def list_torrents(
         self,
-        status: TorrentStatus = None,
-        hashs: Union[list, str] = None,
+        status: Optional[TorrentStatus] = None,
+        hashs: Optional[Union[list[str], str]] = None,
         downloader: Optional[str] = None,
         include_all_tags: bool = False,
     ) -> Optional[List[DownloaderTorrent]]:
         """
         获取下载器种子列表
+
         :param status:  种子状态
         :param hashs:  种子Hash
         :param downloader:  下载器
         :param include_all_tags:  是否包含未打内置标签的下载任务
         :return: 下载器中符合状态的种子列表
         """
-        return self.run_module(
+        return cast(Optional[List[DownloaderTorrent]], self.run_module(
             "list_torrents",
             status=status,
             hashs=hashs,
             downloader=downloader,
             include_all_tags=include_all_tags,
-        )
+        ))
 
     def transfer(
         self,
         fileitem: FileItem,
         meta: MetaBase,
         mediainfo: Union[MediaInfo, MusicInfo],
-        target_directory: TransferDirectoryConf = None,
+        target_directory: Optional[TransferDirectoryConf] = None,
         target_storage: Optional[str] = None,
-        target_path: Path = None,
+        target_path: Optional[Path] = None,
         transfer_type: Optional[str] = None,
-        scrape: bool = None,
-        library_type_folder: bool = None,
-        library_category_folder: bool = None,
-        episodes_info: List[TmdbEpisode] = None,
-        source_oper: Callable = None,
-        target_oper: Callable = None,
+        scrape: Optional[bool] = None,
+        library_type_folder: Optional[bool] = None,
+        library_category_folder: Optional[bool] = None,
+        episodes_info: Optional[List[TmdbEpisode]] = None,
+        source_oper: Optional[object] = None,
+        target_oper: Optional[object] = None,
         preview: bool = False,
     ) -> Optional[TransferInfo]:
         """
-        经启动组合根注入的 canonical durable command 执行旧整理 ABI。
+        通过启动组合根注入的标准持久化命令执行旧整理接口。
+
         :param fileitem:  文件信息
         :param meta: 预识别的元数据
         :param mediainfo:  识别的媒体信息
@@ -915,11 +956,11 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         :param source_oper:  源存储操作类
         :param target_oper:  目标存储操作类
         :param preview: 是否仅预览，不执行实际转移
-        :return: {path, target_path, message}
+        :return: 整理结果，包含源文件、目标文件及执行说明；具体失败或空结果遵循注入命令的契约
         """
         if self._legacy_transfer_command is None:
             raise RuntimeError("旧整理兼容命令尚未由启动组合根配置")
-        return self._legacy_transfer_command(
+        return cast(Optional[TransferInfo], self._legacy_transfer_command(
             fileitem=fileitem,
             meta=meta,
             mediainfo=mediainfo,
@@ -934,7 +975,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             source_oper=source_oper,
             target_oper=target_oper,
             preview=preview,
-        )
+        ))
 
     def plan_transfer(
         self,
@@ -953,7 +994,9 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         preview: bool = False,
         planning_input: Optional[TransferPlanningInput] = None,
     ) -> Optional[TransferPlanCheckpoint]:
-        """调用文件管理模块生成无文件写入的冻结整理计划。"""
+        """
+        调用文件管理模块生成无文件写入的冻结整理计划。
+        """
         return cast(
             "Optional[TransferPlanCheckpoint]",
             self.run_module_strict(
@@ -985,7 +1028,9 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         target_oper: Any = None,
         cleanup_media_file: Optional[Callable[[FileItem], bool]] = None,
     ) -> Optional[TransferInfo]:
-        """调用文件管理模块执行已冻结计划，并注入统一安全删除能力。"""
+        """
+        调用文件管理模块执行已冻结计划，并注入统一安全删除能力。
+        """
         return cast(
             Optional[TransferInfo],
             self.run_module(
@@ -1002,58 +1047,63 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     def transfer_completed(self, hashs: str, downloader: Optional[str] = None) -> None:
         """
         下载器转移完成后的处理
+
         :param hashs:  种子Hash
         :param downloader:  下载器
         """
-        return self.run_module("transfer_completed", hashs=hashs, downloader=downloader)
+        return cast(None, self.run_module("transfer_completed", hashs=hashs, downloader=downloader))
 
     def remove_torrents(
         self,
-        hashs: Union[str, list],
+        hashs: Union[str, list[str]],
         delete_file: bool = True,
         downloader: Optional[str] = None,
     ) -> bool:
         """
         删除下载器种子
+
         :param hashs:  种子Hash
         :param delete_file: 是否删除文件
         :param downloader:  下载器
-        :return: bool
+        :return: 下载器模块报告的操作结果，成功时为 True
         """
-        return self.run_module(
+        return cast(bool, self.run_module(
             "remove_torrents",
             hashs=hashs,
             delete_file=delete_file,
             downloader=downloader,
-        )
+        ))
 
-    def start_torrents(self, hashs: Union[list, str], downloader: Optional[str] = None) -> bool:
+    def start_torrents(self, hashs: Union[list[str], str], downloader: Optional[str] = None) -> bool:
         """
         开始下载
+
         :param hashs:  种子Hash
         :param downloader:  下载器
-        :return: bool
+        :return: 下载器模块报告的操作结果，成功时为 True
         """
-        return self.run_module("start_torrents", hashs=hashs, downloader=downloader)
+        return cast(bool, self.run_module("start_torrents", hashs=hashs, downloader=downloader))
 
-    def stop_torrents(self, hashs: Union[list, str], downloader: Optional[str] = None) -> bool:
+    def stop_torrents(self, hashs: Union[list[str], str], downloader: Optional[str] = None) -> bool:
         """
         停止下载
+
         :param hashs:  种子Hash
         :param downloader:  下载器
-        :return: bool
+        :return: 下载器模块报告的操作结果，成功时为 True
         """
-        return self.run_module("stop_torrents", hashs=hashs, downloader=downloader)
+        return cast(bool, self.run_module("stop_torrents", hashs=hashs, downloader=downloader))
 
-    def set_torrents_tag(self, hashs: Union[list, str], tags: list, downloader: Optional[str] = None) -> bool:
+    def set_torrents_tag(self, hashs: Union[list[str], str], tags: list[str], downloader: Optional[str] = None) -> bool:
         """
         设置种子标签
+
         :param hashs:  种子Hash
         :param tags:  标签列表
         :param downloader:  下载器
-        :return: bool
+        :return: 下载器模块报告的操作结果，成功时为 True
         """
-        return self.run_module("set_torrents_tag", hashs=hashs, tags=tags, downloader=downloader)
+        return cast(bool, self.run_module("set_torrents_tag", hashs=hashs, tags=tags, downloader=downloader))
 
     def update_torrent(
         self,
@@ -1061,7 +1111,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         downloader: Optional[str] = None,
         download_limit: Optional[float] = None,
         upload_limit: Optional[float] = None,
-        tracker_list: Optional[list] = None,
+        tracker_list: Optional[list[str]] = None,
         save_path: Optional[str] = None,
         category: Optional[str] = None,
         ratio_limit: Optional[float] = None,
@@ -1069,6 +1119,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     ) -> Optional[Dict[str, bool]]:
         """
         修改下载任务属性。
+
         :param hash_string: 种子Hash
         :param downloader: 下载器
         :param download_limit: 下载限速，单位 KB/s
@@ -1080,7 +1131,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
         :param seeding_time_limit: 做种时间限制，单位分钟
         :return: 各项修改结果
         """
-        return self.run_module(
+        return cast(Optional[Dict[str, bool]], self.run_module(
             "update_torrent",
             hash_string=hash_string,
             downloader=downloader,
@@ -1091,7 +1142,7 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
             category=category,
             ratio_limit=ratio_limit,
             seeding_time_limit=seeding_time_limit,
-        )
+        ))
 
     def get_torrent_trackers(
         self,
@@ -1100,63 +1151,77 @@ class ChainBase(RecognitionMixin, MessageProcessingMixin, NotificationMixin, met
     ) -> Optional[Dict[str, List[str]]]:
         """
         查询下载任务Tracker列表。
+
         :param hash_string: 种子Hash
         :param downloader: 下载器
         :return: 下载器名称到Tracker列表的映射
         """
-        return self.run_module(
+        return cast(Optional[Dict[str, List[str]]], self.run_module(
             "get_torrent_trackers",
             hash_string=hash_string,
             downloader=downloader,
-        )
+        ))
 
     def torrent_files(self, tid: str, downloader: Optional[str] = None) -> Optional[List[DownloaderFile]]:
         """
         获取种子文件
+
         :param tid:  种子Hash
         :param downloader:  下载器
         :return: 与下载器 SDK 解耦的统一文件项列表
         """
-        return self.run_module("torrent_files", tid=tid, downloader=downloader)
+        return cast(Optional[List[DownloaderFile]], self.run_module("torrent_files", tid=tid, downloader=downloader))
 
     def media_exists(
         self,
-        mediainfo: MediaInfo,
+        mediainfo: Union[MediaInfo, MusicInfo],
         itemid: Optional[str] = None,
         server: Optional[str] = None,
+        *,
+        query: Optional[MediaServerQueryOptions] = None,
     ) -> Optional[ExistMediaInfo]:
         """
         判断媒体文件是否存在
+
         :param mediainfo:  识别的媒体信息
         :param itemid:  媒体服务器ItemID
         :param server:  媒体服务器
+        :param query: 可选查询内容投影，省略时保留原有请求和返回内容
         :return: 如不存在返回None，存在时返回信息，包括每季已存在所有集{type: movie/tv, seasons: {season: [episodes]}}
         """
-        return self.run_module("media_exists", mediainfo=mediainfo, itemid=itemid, server=server)
+        return cast(Optional[ExistMediaInfo], self.run_module(
+            "media_exists",
+            mediainfo=mediainfo,
+            itemid=itemid,
+            server=server,
+            **({"query": query} if query is not None else {}),
+        ))
 
     def media_files(self, mediainfo: MediaInfo) -> Optional[List[FileItem]]:
         """
         获取媒体文件清单
+
         :param mediainfo:  识别的媒体信息
         :return: 媒体文件列表
         """
-        return self.run_module("media_files", mediainfo=mediainfo)
+        return cast(Optional[List[FileItem]], self.run_module("media_files", mediainfo=mediainfo))
 
     def metadata_img(
         self,
         mediainfo: MediaInfo,
         season: Optional[int] = None,
         episode: Optional[int] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """
         获取图片名称和url
+
         :param mediainfo: 媒体信息
         :param season: 季号
         :param episode: 集号
         """
-        return self.run_module("metadata_img", mediainfo=mediainfo, season=season, episode=episode)
+        return cast(Optional[dict[str, Any]], self.run_module("metadata_img", mediainfo=mediainfo, season=season, episode=episode))
 
-    def register_commands(self, commands: Dict[str, dict]) -> None:
+    def register_commands(self, commands: Dict[str, dict[str, Any]]) -> None:
         """
         注册菜单命令
         """

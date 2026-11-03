@@ -1,8 +1,10 @@
-"""订阅下载事实、缺失集与完成状态收敛"""
+"""
+订阅下载事实、缺失集与完成状态收敛
+"""
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from app.application.classification.reference import effective_classification_snapshot
 from app.application.subscription.contract import (
@@ -34,7 +36,9 @@ from app.schemas.types import (
 
 
 class SubscribeCompletionOwner(_SubscribeOwnerBase):
-    """订阅下载事实、缺失集与完成状态收敛，作为 SubscribeChain 的单一职责实现 owner。"""
+    """
+    订阅下载事实、缺失集与完成状态收敛，作为 SubscribeChain 的单一职责组件。
+    """
 
     def _SubscribeChain__update_movie_download_priority(
         self,
@@ -47,7 +51,14 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         """
         if not downloads:
             return subscribe
-        priority = max([item.torrent_info.pri_order for item in downloads])
+        priorities = [
+            item.torrent_info.pri_order
+            for item in downloads
+            if item.torrent_info is not None
+        ]
+        if not priorities:
+            return subscribe
+        priority = max(priorities)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if subscribe.type != MediaType.MOVIE.value:
@@ -69,7 +80,9 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         mediainfo: MediaInfo,
         meta: MetaBase,
     ) -> None:
-        """完成订阅事务，并在提交成功后委托通知 owner 投递副作用。"""
+        """
+        完成订阅事务，并在提交成功后委托通知组件 投递副作用。
+        """
         if subscribe.state == "P":
             return
         completion_event = self.eventmanager.send_event(
@@ -95,7 +108,9 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         )
 
         def notify() -> None:
-            """提交成功后发送完成通知，保持历史消息 ABI。"""
+            """
+            提交成功后发送完成通知，保持历史消息 ABI。
+            """
             self.post_message(completion_message)
 
         with self.subscription_completion_scope() as command:
@@ -133,9 +148,10 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         lefts: Optional[Dict[Union[int | str], Dict[int, _SchemaNotExistMediaInfo]]] = None,
         force: Optional[bool] = False,
     ) -> None:
-        """在所属订阅日志上下文内检查剩余内容并执行原有完成策略。"""
+        """
+        在所属订阅日志上下文内检查剩余内容并执行原有完成策略。
+        """
         media_keys = subscribe_media_keys(subscribe)
-        # 是否有剩余集
         no_lefts = not lefts or not any(lefts.get(media_key) for media_key in media_keys)
         if downloads and meta.type == MediaType.TV:
             facts = self._SubscribeChain__record_subscribe_download_facts(
@@ -159,9 +175,8 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                 mediainfo=mediainfo,
                 downloads=downloads,
             )
-        # 是否完成订阅
         if not subscribe.best_version:
-            # 普通订阅：先按 lefts 写 lack，再判断完成
+            # 普通订阅先保存本次下载后剩余缺集，再判断是否完成。
             if meta.type == MediaType.TV:
                 self._SubscribeChain__refresh_subscribe_progress_with_no_exists(
                     no_exists=lefts,
@@ -195,7 +210,6 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
             logger.info(f"{mediainfo.title_year} 未下载完整，继续洗版 ...")
             return
         if self._SubscribeChain__is_best_version_complete(subscribe):
-            # 洗版完成
             self._SubscribeChain__finish_subscribe(subscribe=subscribe, meta=meta, mediainfo=mediainfo)
         elif not downloads:
             logger.info(f"{mediainfo.title_year} 继续洗版 ...")
@@ -206,7 +220,9 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         meta: MetaBase,
         mediainfo: MediaInfo,
     ) -> bool:
-        """使用已取得的新鲜媒体事实独立对账订阅完成状态。"""
+        """
+        使用已取得的新鲜媒体事实独立对账订阅完成状态。
+        """
         mediakey = subscribe_media_key(subscribe)
         completed, _no_exists = self.check_and_handle_existing_media(
             subscribe=subscribe,
@@ -224,7 +240,6 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         """
         更新已下载信息到note字段
         """
-        # 查询现有Note
         if not downloads:
             return subscribe
         note = []
@@ -233,6 +248,8 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         for context in downloads:
             meta = context.meta_info
             mediainfo = context.media_info
+            if meta is None or not isinstance(mediainfo, (MediaInfo, MusicInfo)):
+                continue
             subscribe_source, subscribe_media_id = resolve_media_identity(media=subscribe)
             media_source, media_id = resolve_media_identity(media=mediainfo)
             if (
@@ -242,7 +259,7 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                 or subscribe_media_id != media_id
             ):
                 continue
-            items = []
+            items: list[int] = []
             if mediainfo.type == MediaType.TV:
                 # 电视剧有集数，使用 episode_list
                 items = meta.episode_list
@@ -257,11 +274,10 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                 continue
             # 合并已下载的集数或电影项（去重）
             note = list(set(note).union(set(items)))
-        # 更新订阅
         if note:
             updated = self._SubscribeChain__apply_subscribe_update(
                 subscribe,
-                {"note": note},
+                {"note": list[JsonData](note)},
                 scene="download_note",
             )
             return updated or subscribe
@@ -344,7 +360,7 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         update_data: Dict[str, Any] = {}
 
         for download in downloads:
-            media = download.media_info
+            media = cast(Union[MediaInfo, MusicInfo], download.media_info)
             subscribe_identity = resolve_media_identity(media=subscribe)
             media_identity = resolve_media_identity(media=media)
             if subscribe_identity != media_identity:
@@ -381,7 +397,7 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
             if not valid_episodes:
                 continue
 
-            priority = download.torrent_info.pri_order
+            priority = cast(Any, download.torrent_info).pri_order
             if (
                 self._SubscribeChain__is_full_best_version_enabled(subscribe)
                 and download.confirmed_full_coverage
@@ -432,37 +448,32 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         begin_season: int,
         total_episode: Optional[int],
         start_episode: Optional[int],
-        downloaded_episodes: List[int] = None,
+        downloaded_episodes: Optional[List[int]] = None,
     ) -> Tuple[bool, Dict[Union[int, str], Dict[int, _SchemaNotExistMediaInfo]]]:
         """
         根据订阅开始集数和总集数，结合TMDB信息计算当前订阅的缺失集数
+
         :param subscribe_name: 订阅名称
         :param no_exists: 缺失季集列表
         :param mediakey: TMDB ID或豆瓣ID
         :param begin_season: 开始季
         :param total_episode: 订阅设定总集数
         :param start_episode: 订阅设定开始集数
-        :param downloaded_episodes: 已下载集数
+        :param downloaded_episodes: 已下载集数；None 按空集数处理
         """
-        # 使用订阅的总集数和开始集数替换no_exists
+        # 用订阅限定的总集数和起始集裁剪缺集范围。
         if not no_exists or not no_exists.get(mediakey):
             return False, no_exists
-        no_exists_item = no_exists.get(mediakey)
+        no_exists_item = no_exists[mediakey]
         if total_episode or start_episode:
             logger.info(f"订阅 {subscribe_name} 设定的开始集数：{start_episode}、总集数：{total_episode}")
-            # 该季原缺失信息
             no_exist_season = no_exists_item.get(begin_season)
             if no_exist_season:
-                # 原集列表
                 episode_list = no_exist_season.episodes
-                # 原总集数
                 total = no_exist_season.total_episode
-                # 原开始集数
                 start = no_exist_season.start_episode
 
-                # 更新剧集列表、开始集数、总集数
                 if not episode_list:
-                    # 整季缺失
                     start_episode = start_episode or start
                     total_episode = total_episode or total
                     original_start = start if start is not None else 1
@@ -474,24 +485,19 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                     else:
                         episodes = []
                 else:
-                    # 部分缺失
                     if not start_episode and not total_episode:
-                        # 无需调整
                         return False, no_exists
                     if not start_episode:
-                        # 没有自定义开始集
                         start_episode = start
                     if not total_episode:
-                        # 没有自定义总集数
                         total_episode = total
-                    # 新的集列表
-                    new_episodes = list(range(max(start_episode, start), total_episode + 1))
-                    # 与原集列表取交集
+                    effective_start = start_episode if start_episode is not None else (start or 1)
+                    effective_total = total_episode if total_episode is not None else (total or effective_start - 1)
+                    new_episodes = list(range(max(effective_start, start or effective_start), effective_total + 1))
                     episodes = list(set(episode_list).intersection(set(new_episodes)))
                     # 交集为空时，说明订阅的剧集均已入库
                     if not episodes:
                         return True, {}
-                # 更新集合
                 no_exists[mediakey][begin_season] = _SchemaNotExistMediaInfo(
                     season=begin_season,
                     episodes=episodes,
@@ -502,24 +508,17 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
         # 根据订阅已下载集数更新缺失集数
         if downloaded_episodes:
             logger.info(f"订阅 {subscribe_name} 已下载集数：{downloaded_episodes}")
-            # 该季原缺失信息
             no_exist_season = no_exists_item.get(begin_season)
             if no_exist_season:
-                # 原集列表
                 episode_list = no_exist_season.episodes
-                # 原总集数
                 total = no_exist_season.total_episode
-                # 原开始集数
                 start = no_exist_season.start_episode
-                # 整季缺失
                 if not episode_list:
-                    episode_list = list(range(start, total + 1))
-                # 更新剧集列表
+                    episode_list = list(range(start or 1, (total or (start or 1) - 1) + 1))
                 episodes = list(set(episode_list).difference(set(downloaded_episodes)))
                 # 如果存在已下载剧集，则差集为空时，说明所有均已存在
                 if not episodes:
                     return True, {}
-                # 更新集合
                 no_exists[mediakey][begin_season] = _SchemaNotExistMediaInfo(
                     season=begin_season,
                     episodes=episodes,
@@ -528,10 +527,10 @@ class SubscribeCompletionOwner(_SubscribeOwnerBase):
                     require_complete_coverage=no_exist_season.require_complete_coverage,
                 )
             else:
-                # 开始集数
                 start = start_episode or 1
-                # 更新剧集列表
-                episodes = list(set(range(start, total_episode + 1)).difference(set(downloaded_episodes)))
+                effective_start = start or 1
+                effective_total = total_episode or (effective_start - 1)
+                episodes = list(set(range(effective_start, effective_total + 1)).difference(set(downloaded_episodes)))
                 # 如果存在已下载剧集，则差集为空时，说明所有均已存在
                 if not episodes:
                     return True, {}
@@ -553,7 +552,9 @@ def _record_music_download_facts(
         downloads: Optional[List[Context]],
         mediainfo: Union[MediaInfo, MusicInfo],
 ) -> SubscriptionSnapshot:
-    """合并经专辑身份校验的曲目；仅完整入库证据可调整发行版完成上界。"""
+    """
+    合并经专辑身份校验的曲目；仅完整入库证据可调整发行版完成上界。
+    """
     if not downloads:
         return subscribe
     if getattr(subscribe, "music_type", None) != MUSIC_ENTITY_ALBUM:

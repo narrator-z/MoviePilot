@@ -63,9 +63,18 @@ UV_PROJECT_ENVIRONMENT="${MOVIEPILOT_WORKSPACE}/.venv-test" \
 主程序不再维护 `requirements.in`、`requirements-dev.in` 或 `requirements.txt`，也不生成
 平台专属的 requirements 锁文件。Docker、CLI 和 CI 都以提交的 `uv.lock` 为安装输入。
 
+标准运行时的 Brotli 使用 1.2.1。free-threaded 运行时使用上游源码提交
+`0ed4268a4401abcb4472096340477cf4af7d1a2b`，该提交同时保留无 GIL 声明并包含
+[CVE-2026-111497 的官方修复](https://github.com/google/brotli/commit/0ed4268a4401abcb4472096340477cf4af7d1a2b)。
+源码分支的包版本仍为 1.2.0，不能仅凭版本字符串判断补丁是否存在；1.2.1 发布分支
+尚未声明无 GIL 支持，不能直接替换 free-threaded 的源码依赖。
+发布审计脚本会将这个已核实修复提交按 1.2.1 版本匹配漏洞公告，安装仍使用锁文件中的源码地址。
+
 ### 2.1 本地启动脚本
 
 不需要打开 IDE 时，可以直接使用仓库内的启动脚本。脚本会自动定位项目根目录和虚拟环境，并以模块方式启动后端，避免 `ModuleNotFoundError: No module named 'app'`。
+
+后端开发入口优先使用 `uv sync` 创建的 `.venv/bin/python`，没有该解释器时使用旧的 `venv/bin/python`。`./scripts/start-local.sh help` 不要求先安装虚拟环境。
 
 ```bash
 # 默认启动后端开发服务，前台运行，按 Ctrl+C 停止
@@ -215,6 +224,8 @@ uvx --from pip-audit pip-audit \
 Docker 镜像直接基于官方基础镜像构建，只安装应用运行所需的系统依赖；不运行镜像漏洞扫描，
 也不为扫描结果刷新系统包、删除基础镜像自带工具或维护漏洞忽略清单。正式版和 Beta 均直接构建
 并发布标准版与 free-threaded 版的双架构镜像。应用锁定依赖仍按上述流程审计。
+`v3` 分支自动发布仅在 `version.py` 的 `APP_VERSION` 或 `FRONTEND_VERSION` 值发生变化时运行；
+只修改该文件的说明文字不会重建正式镜像。维护者仍可通过手动触发正式发布工作流重建当前版本。
 
 ### 6. Contributor 提交准备
 
@@ -230,15 +241,25 @@ Docker 镜像直接基于官方基础镜像构建，只安装应用运行所需�
 3. **架构与静态检查**：按受影响合同选择架构策略、snapshot 和 ratchet；策略测试先于 snapshot。Pylint 候选范围分别取 PR base 到 HEAD、暂存 diff、未暂存 diff 及本次新文件的并集；以实际待提交的索引 tree 过滤路径并检查内容。仅暂存本次选择的路径/hunks；代码、项目配置与仓内 lint 依赖必须来自同一 tree。只有全部 tracked 工作树与索引一致（`git diff --quiet`）且没有会影响 lint 的额外配置或导入输入时才使用工作树快捷路径，否则（含部分暂存）按 `AGENTS.md` 导出索引验证。这是现有 lint 的输入选择，不增加门禁；大范围 Python 变化在同一待提交 tree 中检查 `app/`。
 4. **最终核对**：复用仍有效的证据，只重跑被后续变化失效的检查；检查最终 diff、`git diff --check` 和工作树。CI 失败归属及维护者预授权按 [协作规则](rules/12-collaboration-and-distribution.md) 处理。
 
+提交前还须按 [注释规范](rules/08-comment-styles.md) 审查本次新增和修改的对象：说明文字使用中文，
+文档字符串使用多行三双引号，参数与返回值统一使用 `:param:` / `:return:` 字段列表，
+dataclass、Pydantic 和 Protocol 的声明项逐项提供说明。Pydantic 字段使用 `Field(description=...)`，
+不得因注释调整改变模型行为。旧文件风格不构成例外；现有 Pylint / Ruff 检查未覆盖全部注释要求，
+检查通过不能代替这项审查。
+
 主仓架构检查不依赖独立插件仓；官方插件兼容观察通过每周或手工工作流单独运行，仅上传语义差异
 报告，不自动更新基线。普通主仓改动不要求额外检出插件仓或运行观察任务。宿主架构门禁和 changed-file
 Pylint 由 `v3` PR/push 的 GitHub Actions 执行，`app/` 全量 Pylint 是建议性报告。
 
 站点采集器源码与构建工作流位于 [MoviePilot-Site-Collector](https://github.com/jxxghp/MoviePilot-Site-Collector)，使用独立的 `site-adapter-collector-v1.0.x` Release，仅在采集器发布输入变化时递增版本并构建，不跟随后端 Release。下载入口为 [采集器独立 Release](https://github.com/jxxghp/MoviePilot-Site-Collector/releases/latest)，自动版本和手动测试构建规则见 [采集器发布说明](https://github.com/jxxghp/MoviePilot-Site-Collector/blob/main/docs/site-adapter-collector-release.md#维护者发布流程)。
 
-Ruff/Mypy 基线只允许收紧，不接受新增诊断或类型错误增长；受治零错误文件由 `mypy.ini` 的
-`files=` 维护。Mypy 完整 ratchet 固定按 Linux/Python 3.14 分析。Coverage job 在 `v3` PR/push
-运行，按 `tests/run.py` 的分片合同执行并合并报告，Application 与 Domain 固定不低于 80%。
+Ruff/Mypy 基线只允许收紧，不接受新增诊断或类型错误增长。`mypy.ini` 默认严格检查整个 `app/`，
+仅排除由插件发布链路治理的运行时 `app/plugins/` 副本；新宿主文件自动纳入检查。
+Mypy 完整 ratchet 固定按 Linux/Python 3.14 分析。Coverage job 在 `v3` PR/push
+运行，按 `tests/run.py` 的分片合同执行并合并报告，除 `app/plugins` 外全部 `app` 文件按逐文件
+低水位检查，存量只能提升，新文件必须达到 80%。
+宿主类型错误基线 `tests/fixtures/architecture/mypy-baseline.json` 已清零，不能重新添加诊断预算；
+兼容例外使用下文的精确登记，不以定向扫描结果宣称全量交付。
 每个 Coverage 分片预算为 15 分钟（测试 step 为 10 分钟），报告与 ratchet 为 10 分钟；不得靠
 跳过测试或产物规避超时。Coverage 只接受 GitHub Actions 的 Ubuntu/Python 3.14、locked
 依赖和全量测试工件，本机 macOS 报告仅供诊断，不得写入并提交 canonical baseline。
@@ -257,8 +278,36 @@ uv run --locked --no-sync python scripts/architecture/complexity.py
 ```
 
 `--write` 拒绝接受已有基线上的增长；减少或删除热点后必须固化低水位。
-CI 上传 `complexity-report` 工件，门禁失败时也保留已生成的指标。指标含义、限制与后续扩围见
-[代码门禁说明](code-quality.md)。
+CI 上传 `complexity-report` 工件，门禁失败时也保留已生成的指标。指标口径以
+`scripts/architecture/complexity.py` 与 `scripts/architecture/mypy_ratchet.py` 的实现为准。
+
+### 6.2 类型兼容例外门禁
+
+`scripts/architecture/mypy_policy.py` 核对
+`tests/fixtures/architecture/mypy-policy.json` 中每项兼容原因、所属方法、错误码和语法指纹。
+保留例外涉及异步工具旧接口、动态 Facade 描述符、运行时 MRO/元类、FastAPI Response
+注入默认值和供应方类型限制；
+例外只作用于登记语句，方法体继续严格检查。二进制站点接口的 `sites.pyi` 按文件摘要登记。
+
+门禁拒绝新增或变化的 `type: ignore`、没有错误码的忽略、`no_type_check`、文件内 mypy
+配置和未经复核的本地类型桩；同时锁定完整 mypy 配置，防止缩小检查范围或扩大导入豁免。
+供应方导入仍使用现有 `follow_imports=skip` 边界；已接入的 LangChain/LangGraph、Pydantic、
+FastAPI/Starlette、Slack 等读取真实供应方声明，不允许用本地类型桩遮蔽它们。
+缺失导入豁免只覆盖配置中逐一列出的既有无类型 SDK，新依赖不会自动得到豁免。
+psutil、regex、tqdm 的正式类型声明由锁文件中的开发依赖提供。
+默认检查同时保留既有的异步阻塞治理脚本，并覆盖新的类型例外门禁自身。
+
+```bash
+uv run --locked --no-sync python scripts/architecture/mypy_policy.py
+uv run --locked --no-sync mypy --config-file mypy.ini
+uv run --locked --no-sync python scripts/architecture/mypy_ratchet.py
+# 修复例外后仅删除已失效的登记；存在任何增长时拒绝写入
+uv run --locked --no-sync python scripts/architecture/mypy_policy.py --write
+```
+
+新增兼容边界必须说明真实运行合同与无法直接使用供应方声明的原因，补充行为验证，
+人工复核登记和配置差异；不能用写入命令自动接收。CI 执行同一门禁，并测试新文件报错、
+例外转移、类型桩遮蔽和写入拒绝行为。发布前以最终提交的全量检查结果为准。
 
 ### 7. 参考资源
 
@@ -272,6 +321,8 @@ CI 上传 `complexity-report` 工件，门禁失败时也保留已生成的指�
 独立消息库位于 Agent 运行目录，不参与主库 Alembic。使用临时运行目录运行 `tests/test_agent_recall_persistence.py`，不得用真实用户的 `state.db` 做索引破坏或重建测试。CJK tokenizer 保留 Hermes 原版源码及许可证于 `native/fts5_cjk/`；Docker 构建与 CLI 依赖安装使用该目录的 `install.py`，按本机架构编译并用目标解释器实际验证两字中文查询，安装到 `<sys.prefix>/lib/moviepilot/libfts5_cjk.so`。旧配置目录内的手工扩展作为加载回退；编译器要求和补装/检查命令见该目录 README。测试有本地 C 编译器时在临时目录构建，无编译器时只跳过原生扩展用例，不能宣称该分词路径已验证。常规 FTS5 与 trigram、短中文回退无需该扩展，扩展缺失或失效时索引状态会明确降级。独立 schema 版本不等于产品版本；后续新增主库升级脚本从 3.1.0 命名。
 
 ### Agent 学习验证
+
+交互执行隔离、后台避让及超时配置见 [智能助手执行优先策略](agent-execution.md)。
 
 `tests/test_agent_learning_skills.py`、`tests/test_agent_learning_memory.py` 和
 `tests/test_agent_learning_review.py` 用临时目录与确定性模型核对 Hermes 学习契约，

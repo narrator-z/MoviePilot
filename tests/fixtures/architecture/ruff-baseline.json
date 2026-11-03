@@ -2,12 +2,6 @@
   "app/domain/media.py": {
     "E731": 1
   },
-  "app/domain/meta/customization.py": {
-    "E731": 1
-  },
-  "app/domain/meta/releasegroup.py": {
-    "E731": 1
-  },
   "app/domain/meta/runtime.py": {
     "E731": 2
   },
@@ -31,9 +25,6 @@
   },
   "app/modules/slack/__init__.py": {
     "F401": 2
-  },
-  "app/modules/themoviedb/tmdbv3api/__init__.py": {
-    "F401": 25
   },
   "app/modules/zspace/__init__.py": {
     "F401": 4

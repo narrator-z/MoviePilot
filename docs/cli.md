@@ -219,6 +219,7 @@ moviepilot install frontend --config-dir /path/to/moviepilot-config
 - 如需覆盖默认行为，仍可显式传入 `--version latest` 或指定具体 tag
 - 会自动安装本地 Node 运行时
 - 会自动安装 `service.js` 所需的运行依赖
+- 新版前端及其依赖全部准备成功后才替换当前版本；依赖安装失败时保留已有页面和依赖
 
 安装资源文件：
 
@@ -281,6 +282,7 @@ moviepilot setup --config-dir /path/to/moviepilot-config
   与 `LLM_WEB_SEARCH_MODE`。联网搜索支持 MoviePilot 本地搜索、模型服务端搜索、
   服务端优先自动回退与完全关闭；服务端模式仅在当前模型目录声明支持时生效。
   向导会尝试读取当前提供商的模型目录；目录服务不可用时仍可手动输入模型 ID。
+  Google 新配置默认使用 `gemini-3.8-flash`，已有的 `LLM_MODEL` 配置继续保留。
   当前可识别 OpenAI、Anthropic Claude、Google Gemini、xAI Grok 与 DeepSeek
   官方端点已公布的服务端联网搜索能力，第三方兼容端点不会被自动误判。
 - 下载目录按下载器内部路径原样保存，可用于远程下载器和路径映射；向导不会在本机解析或创建它。
@@ -298,6 +300,9 @@ moviepilot setup --config-dir /path/to/moviepilot-config
 显式填写 `0`、`1` 等数值仍按填写值发送。
 清空后保存、重新进入设置页及重启均保留这一语义。
 
+Gemini 3.8 Flash 不支持完全关闭思考，也不接受 `minimal`。选择“关闭思考”或“最小”时，
+使用该模型支持的最低级别 `low`；自动及其他思考级别按原设置处理。
+
 如果希望在自动化安装时直接预设超级管理员，也可以在一键安装脚本中透传：
 
 ```shell
@@ -309,6 +314,8 @@ curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/scripts/bootst
 
 - `--superuser-password` 更适合自动化场景，命令可能会出现在 shell 历史中
 - 交互式 `--wizard` 会在初始化过程中提示输入超级管理员用户名和密码
+- 重复初始化会更新已有账号的权限和显式指定的密码；向导留空保留原密码中的引号与反斜杠
+- 引导脚本的 `--non-interactive` 即使连接终端也跳过向导，`--link-path` 保留显式指定的命令路径
 
 ## 开机自启命令
 
@@ -404,12 +411,14 @@ moviepilot agent --new-session 帮我总结当前系统配置有什么明显问�
 说明：
 
 - `moviepilot agent` 直接在本地环境里发起一次智能体请求
+- 请在独立 CLI 进程中执行；入口会装配正式数据、配置及 Agent/Chain 能力，完成后按依赖顺序关闭资源
 - 默认每次可自动创建新会话，也可以通过 `--session` 指定会话 ID
+- 使用相同用户和 `--session` 可在下一次 CLI 调用恢复持久化历史；模型异常或取消也会执行资源关闭
 - 使用前需要先正确配置 LLM 相关参数，并打开 `AI_AGENT_ENABLE`
 
 ## 服务管理命令
 
-`moviepilot start/stop/restart/status` 统一管理前后端。
+`moviepilot start/stop/restart/status` 统一管理前后端。本地状态文件必须是 JSON 对象；无法解析或包含数组、字符串等非对象值时，按无有效状态记录处理，再按既有流程探测服务。
 
 启动、停止、重启与状态：
 
@@ -432,7 +441,8 @@ moviepilot version
 - `start --safe` 会以安全模式启动后端，本次启动跳过插件、调度器、监控、命令和工作流等后台扩展能力，不修改用户配置
 - `MOVIEPILOT_AUTO_UPDATE` 为布尔开关，默认 `false`；只有 `true` 启用后台 Release 检查和版本提醒，保存后定时服务热更新。`AUTO_UPDATE_RESOURCE` 独立控制站点资源检查和提醒；任一开关开启即启用检测服务，且只检查对应目标，两者均关闭才移除服务。`MOVIEPILOT_UPDATE_DEV` 为独立布尔开关，默认 `false`；设为 `true` 时手动 `moviepilot update` 默认使用 DEV 更新模式。旧 `dev/release` 值统一转换为 `MOVIEPILOT_AUTO_UPDATE=true`；旧 `dev` 在未显式配置新开关时迁移为 `MOVIEPILOT_UPDATE_DEV=true`
 - Release 更新由后台每 6 小时检查 GitHub Release；管理员确认后先静默下载安装包并显示进度，下载完成后再次确认重启，通过专门的内部更新入口安装已下载且通过 SHA-256 校验的包后再启动服务
-- Web 更新提示支持“全部下载 / 一次重启安装”：一起准备主程序、后端声明的配套前端和最新站点资源，全部就绪后只重启一次，也保留单独更新入口。手动“检查最新版本”可将旧待安装目标替换为更高版本；定时检查、检查失败及无更高版本时仍保留已下载包，下载和安装中不会更换目标。正式 V3 更新按版本号选择最高版本，支持跨多个 V3 小版本直接安装完整包；V2 到 V3 不属于此流程。站点原生扩展随重启加载，普通启动/重启不会检查或下载更新。
+- Web 更新提示沿用“升级 / 立即重启”入口：同时发现主程序和站点资源更新时，依次准备主程序、后端声明的配套前端和最新站点资源，全部就绪后只重启一次；只有一类更新时保持对应卡片，底部只显示一个升级或重启按钮。重启前主动检查最新版本，可将旧待安装目标替换为更高版本并继续下载；API 仍支持指定单类更新。定时检查、检查失败及无更高版本时仍保留已下载包，下载和安装中不会更换目标。正式 V3 更新按版本号选择最高版本，支持跨多个 V3 小版本直接安装完整包；V2 到 V3 不属于此流程。站点原生扩展随重启加载，普通启动/重启不会检查或下载更新。
+- `GITHUB_PROXY` 镜像前缀可省略尾斜杠，允许带路径；修改配置仍遵循设置项的重启提示。站点资源清单、目录和文件遇到连接失败、超时或暂时性 HTTP 错误时最多尝试三次，间隔一秒、两秒；文件重试从头下载，失败内容不会进入安装清单。下载动作刷新一次清单并在后台复用，避免重复请求或沿用旧检查结果。错误摘要包含检查或下载阶段及具体网络原因；`state=failed` 表示操作失败，`can_update=true` 表示允许重试，只有 `can_install=true` 才能安装。
 - 页面中的“稍后”会在当前浏览器暂停提醒 24 小时，“忽略此版本”只屏蔽当前版本；出现更高版本时会重新提示
 - 通过系统内置的重启入口触发重启时，本地 CLI 安装模式也会复用同一套前后端进程管理完成重启
 - 前端默认监听 `NGINX_PORT`，默认值 `3000`
@@ -507,9 +517,16 @@ moviepilot config set LYRICS_BATCH_TIMEOUT 120
 moviepilot config set LYRICS_PROVIDER_RETRY_MAX_WAIT 5
 moviepilot config set MUSIC_METADATA_TO_SIMPLIFIED true
 moviepilot config set MUSIC_LYRICS_TO_SIMPLIFIED true
+moviepilot config set MUSIC_LOCAL_COVER_ENABLE true
+moviepilot config set MUSIC_COVER_FILE_PATTERNS 'cover.jpg,folder.jpg,front.jpg,*.png'
 moviepilot config set MUSIC_RELEASE_REGION_PRIORITY CN,TW,HK
 moviepilot config set MUSIC_RELEASE_SCRIPT_PRIORITY Hans,Hant,Latn
 ```
+
+`MUSIC_LOCAL_COVER_ENABLE` 开启时，下载器监控和文件系统监控的自动音乐整理会同步同目录中
+符合 `MUSIC_COVER_FILE_PATTERNS` 的封面，再由刮削按在线优先、本地回退的顺序写入音轨。
+封面须在该次规划时已存在，并能关联到唯一专辑；后来才落盘的封面需要重新提交专辑目录整理。
+手动整理仍遵循附加文件同步选项，手选曲目不会自动扩大文件范围。
 
 查看所有可配置项：
 
@@ -531,6 +548,7 @@ moviepilot config describe API_TOKEN --show-secrets
 - `AMLL_BASE_URL` 默认使用无需 API Key 的 AMLL TTML API，也可指向兼容原生接口的自建实例。来源优先按 ISRC 查询，再严格核对歌曲、艺术家及已有专辑信息；下载的 TTML 主唱时间轴转换为 Lyricsfile 和 LRC，限流时短暂冷却并让其他歌词来源继续处理
 - `THEAUDIODB_API_KEY` 用于音乐元数据及纯文本歌词兜底，默认 `123` 为官方公开 V1 Key；额外歌词来源可通过插件提供，接入方式见[歌词插件开发说明](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/faq/21-register-lyrics-provider.md)
 - `MUSIC_METADATA_TO_SIMPLIFIED` 默认开启；开启后会将识别结果中的曲名、艺术家、专辑和分类等标准音乐元数据转换为简体中文，不转换歌词与来源原始响应
+- `MUSIC_COVER_FILE_PATTERNS` 控制同目录音乐封面的文件名匹配与选择顺序，逗号分隔、大小写不敏感；附加文件整理和内嵌封面回退共用此配置
 - `MUSIC_LYRICS_TO_SIMPLIFIED` 默认关闭，独立控制生成的 `.lrc` / `.txt` 歌词正文转简体；时间轴、LRC 标签及来源 Lyricsfile 保持原样。已有歌词仍遵循原刮削策略，需要转换时选择“总是刮削”重新刮削
 - `MUSIC_RELEASE_REGION_PRIORITY` 与 `MUSIC_RELEASE_SCRIPT_PRIORITY` 分别使用逗号分隔的 ISO 3166-1 地区代码和 ISO 15924 文字代码；仅在 MusicBrainz 候选结构同样可信时作为发行版本排序依据，最多使用前三项
 - `config describe` 显示单个配置项的类型、默认值和当前值

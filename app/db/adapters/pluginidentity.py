@@ -1,4 +1,6 @@
-"""插件来源身份 Application Port 的 SQLAlchemy 实现。"""
+"""
+插件来源身份 Application Port 的 SQLAlchemy 实现。
+"""
 
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -26,12 +28,16 @@ from app.runtime.log import logger
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
-    """把数据库 ISO 时间还原为带时区应用值。"""
+    """
+    把数据库 ISO 时间还原为带时区应用值。
+    """
     return datetime.fromisoformat(value) if value else None
 
 
 def _normalize_plugin_id_for_read(plugin_id: str) -> str | None:
-    """读取历史安装清单时，将不属于身份合同的条目标记为无身份。"""
+    """
+    读取历史安装清单时，将不属于身份合同的条目标记为无身份。
+    """
     if not isinstance(plugin_id, str):
         return None
     try:
@@ -151,7 +157,9 @@ def _to_record(model: IdentityModel) -> PluginIdentity:
 
 
 def _to_model(identity: PluginIdentity) -> IdentityModel:
-    """把应用身份映射为不拥有事务的持久化模型。"""
+    """
+    把应用身份映射为不拥有事务的持久化模型。
+    """
     return IdentityModel(
         plugin_id=identity.plugin_id,
         normalized_plugin_id=identity.normalized_plugin_id,
@@ -181,26 +189,36 @@ def _to_model(identity: PluginIdentity) -> IdentityModel:
 
 
 class _SqlAlchemyIdentityRepository:
-    """绑定一个调用方 Session 的来源身份仓储。"""
+    """
+    绑定一个调用方 Session 的来源身份仓储。
+    """
 
     def __init__(self, session: Session) -> None:
-        """保存由事务适配器拥有的 Session。"""
+        """
+        保存由事务适配器拥有的 Session。
+        """
         self._oper = PluginIdentityOper(session)
 
     def get(self, plugin_id: str) -> PluginIdentity | None:
-        """读取并映射指定来源身份。"""
+        """
+        读取并映射指定来源身份。
+        """
         model = self._oper.get_by_plugin_id(plugin_id)
         return _to_record(model) if model else None
 
     def list(self, plugin_ids: Sequence[str]) -> list[PluginIdentity]:
-        """批量读取并映射指定来源身份。"""
+        """
+        批量读取并映射指定来源身份。
+        """
         return [
             _to_record(model)
             for model in self._oper.list_by_plugin_ids(plugin_ids)
         ]
 
     def stage_create(self, identity: PluginIdentity) -> None:
-        """暂存首次身份。"""
+        """
+        暂存首次身份。
+        """
         try:
             self._oper.stage_create(_to_model(identity))
         except IntegrityError as error:
@@ -214,7 +232,9 @@ class _SqlAlchemyIdentityRepository:
         *,
         expected_revision: int,
     ) -> bool:
-        """按 revision 条件暂存替换。"""
+        """
+        按 revision 条件暂存替换。
+        """
         return self._oper.stage_replace(
             _to_model(identity),
             expected_revision=expected_revision,
@@ -222,14 +242,20 @@ class _SqlAlchemyIdentityRepository:
 
 
 class TransactionalPluginIdentityStore:
-    """为每次来源身份读写创建独占同步数据库会话。"""
+    """
+    为每次来源身份读写创建独占同步数据库会话。
+    """
 
     def __init__(self, session_factory: Callable[[], Session]) -> None:
-        """保存由组合根提供的同步 Session 工厂。"""
+        """
+        保存由组合根提供的同步 Session 工厂。
+        """
         self._session_factory = session_factory
 
     def get(self, plugin_id: str) -> PluginIdentity | None:
-        """在短会话内读取指定物理插件身份；不合规历史 ID 视为未建立身份。"""
+        """
+        在短会话内读取指定物理插件身份；不合规历史 ID 视为未建立身份。
+        """
         normalized_id = _normalize_plugin_id_for_read(plugin_id)
         if normalized_id is None:
             return None
@@ -240,7 +266,9 @@ class TransactionalPluginIdentityStore:
             session.close()
 
     def list(self, plugin_ids: Sequence[str]) -> list[PluginIdentity]:
-        """批量读取规范化插件身份，并忽略不合规的历史安装清单项。"""
+        """
+        批量读取规范化插件身份，并忽略不合规的历史安装清单项。
+        """
         normalized_ids: list[str] = []
         seen: set[str] = set()
         for plugin_id in plugin_ids:
@@ -261,7 +289,9 @@ class TransactionalPluginIdentityStore:
         *,
         expected_revision: int | None,
     ) -> PluginIdentity:
-        """在一个事务内执行首次创建或 revision 条件替换。"""
+        """
+        在一个事务内执行首次创建或 revision 条件替换。
+        """
         session = self._session_factory()
         try:
             return WritePluginIdentityCommand(
@@ -277,7 +307,9 @@ class TransactionalPluginIdentityStore:
         *,
         expected_revision: int,
     ) -> PluginIdentity:
-        """在独占事务内提交明确的在线来源转换。"""
+        """
+        在独占事务内提交明确的在线来源转换。
+        """
         session = self._session_factory()
         try:
             return ChangePluginIdentitySourceCommand(
@@ -293,7 +325,9 @@ class TransactionalPluginIdentityStore:
         *,
         expected_revision: int,
     ) -> PluginIdentity:
-        """在独占事务内提交 legacy_unbound 到 local_only 的转换。"""
+        """
+        在独占事务内提交 legacy_unbound 到 local_only 的转换。
+        """
         session = self._session_factory()
         try:
             return BindLocalPluginIdentityCommand(
@@ -309,7 +343,9 @@ class TransactionalPluginIdentityStore:
         *,
         expected_revision: int,
     ) -> PluginIdentity:
-        """在独占事务内提交未绑定身份的首次在线来源绑定。"""
+        """
+        在独占事务内提交未绑定身份的首次在线来源绑定。
+        """
         session = self._session_factory()
         try:
             return BindOnlinePluginIdentityCommand(

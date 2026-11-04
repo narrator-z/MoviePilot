@@ -12,7 +12,7 @@ from app.application.plugin.identity import (
     PluginPayloadSourceType,
     TrustedPluginSourceType,
 )
-from app.db.adapters.pluginidentity import _to_record
+from app.db.adapters.pluginidentity import _normalize_plugin_id_for_read, _to_record
 from app.db.models.pluginidentity import PluginIdentity as PluginIdentityModel
 
 ISO = "2026-08-31T10:19:45+00:00"
@@ -179,3 +179,124 @@ def test_valid_official_row_is_preserved() -> None:
     assert record.trusted_source_type is TrustedPluginSourceType.OFFICIAL
     assert record.trusted_source_key == "github:jxxghp/moviepilot-plugins"
     assert record.bound_at is not None
+
+
+def test_official_payload_without_source_key_is_downgraded_to_unknown() -> None:
+    """在线载荷缺少来源键时降级为未知载荷并清空全部载荷事实。"""
+    record = _to_record(
+        _model(
+            payload_source_type="official",
+            payload_source_key=None,
+            declared_version="1.0.0",
+            package_generation="v3",
+            declared_metadata=PluginDeclaredMetadata.from_package(
+                {
+                    "name": "Demo",
+                    "description": "Demo plugin",
+                    "v3": True,
+                    "v3t": False,
+                    "release": True,
+                },
+                declaration_version="1.0.0",
+                manifest_matches_payload=True,
+            ).to_json(),
+            payload_receipt="sha256:" + "0" * 64,
+            payload_applied_at=ISO,
+        )
+    )
+    assert record.payload_source_type is PluginPayloadSourceType.UNKNOWN
+    assert record.payload_source_key is None
+    assert record.declared_version is None
+    assert record.package_generation is None
+    assert record.declared_metadata is None
+    assert record.payload_receipt is None
+    assert record.payload_applied_at is None
+
+
+def test_unknown_payload_row_drops_dirty_payload_facts() -> None:
+    """未知载荷行携带的在线载荷事实在读取时被整体清空。"""
+    record = _to_record(
+        _model(
+            payload_source_type="unknown",
+            payload_source_key="github:example/foo",
+            declared_version="1.0.0",
+            package_generation="v3",
+            declared_metadata=PluginDeclaredMetadata.from_package(
+                {
+                    "name": "Demo",
+                    "description": "Demo plugin",
+                    "v3": True,
+                    "v3t": False,
+                    "release": True,
+                },
+                declaration_version="1.0.0",
+                manifest_matches_payload=True,
+            ).to_json(),
+            payload_receipt="sha256:" + "0" * 64,
+            payload_applied_at=ISO,
+        )
+    )
+    assert record.payload_source_type is PluginPayloadSourceType.UNKNOWN
+    assert record.payload_source_key is None
+    assert record.declared_version is None
+    assert record.package_generation is None
+    assert record.declared_metadata is None
+    assert record.payload_receipt is None
+    assert record.payload_applied_at is None
+
+
+def test_unrecognized_contradiction_falls_back_to_unbound_identity(monkeypatch) -> None:
+    """归一化后仍不满足身份合同的存量行降级为未绑定身份并记录告警。"""
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture_warning(msg: str, *args: object) -> None:
+        """捕获兜底降级时输出的告警模板与插件标识。"""
+        warnings.append((msg, args))
+
+    monkeypatch.setattr("app.db.adapters.pluginidentity.logger.warning", capture_warning)
+    record = _to_record(
+        _model(
+            trusted_source_type="third_party",
+            trusted_source_key="github:example/foo",
+            binding_basis="tofu",
+            bound_at=ISO,
+            payload_source_type="third_party",
+            payload_source_key="github:example/foo",
+            declared_version=None,
+            package_generation="v3",
+            declared_metadata=PluginDeclaredMetadata.from_package(
+                {
+                    "name": "Demo",
+                    "description": "Demo plugin",
+                    "v3": True,
+                    "v3t": False,
+                    "release": True,
+                },
+                declaration_version="1.0.0",
+                manifest_matches_payload=True,
+            ).to_json(),
+            payload_receipt="sha256:" + "0" * 64,
+            payload_applied_at=ISO,
+        )
+    )
+    assert record.trusted_source_type is TrustedPluginSourceType.UNKNOWN
+    assert record.trusted_source_key is None
+    assert record.binding_basis is PluginBindingBasis.LEGACY_UNBOUND
+    assert record.payload_source_type is PluginPayloadSourceType.UNKNOWN
+    assert record.payload_source_key is None
+    assert record.declared_version is None
+    assert record.package_generation is None
+    assert record.declared_metadata is None
+    assert record.payload_receipt is None
+    assert record.payload_applied_at is None
+    assert record.bound_at is None
+    assert len(warnings) == 1
+    assert warnings[0][0] == "插件 %s 的来源身份存在未识别的矛盾字段，已降级为未绑定身份"
+    assert warnings[0][1] == ("DemoPlugin",)
+
+
+def test_normalize_plugin_id_for_read_rejects_non_string() -> None:
+    """读取路径遇到非字符串或非法插件标识时返回 None。"""
+    assert _normalize_plugin_id_for_read(123) is None
+    assert _normalize_plugin_id_for_read("1illegal") is None
+    assert _normalize_plugin_id_for_read("DemoPlugin") == "demoplugin"

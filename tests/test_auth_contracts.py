@@ -860,3 +860,63 @@ def test_access_token_round_trips_agent_channel_claims():
     assert (partial.agent_channel, partial.agent_channel_user) == (None, None)
     assert (plain.agent_channel, plain.agent_channel_user) == (None, None)
     assert (resource.agent_channel, resource.agent_channel_user) == (None, None)
+
+
+def test_verify_resource_token_accepts_valid_resource_cookie(monkeypatch) -> None:
+    """有效资源 Cookie 直接返回其身份载荷。"""
+
+    def validate(_payload) -> None:
+        """模拟组合根提供的当前用户身份校验端口。"""
+
+    monkeypatch.setattr(access, "_token_identity_validator", validate)
+    token = create_access_token(userid=7, username="tester", purpose="resource")
+
+    payload = access.verify_resource_token(token)
+
+    assert payload.username == "tester"
+    assert payload.purpose == "resource"
+
+
+def test_verify_resource_token_falls_back_to_bearer_when_cookie_invalid(monkeypatch) -> None:
+    """资源 Cookie 校验失败时回落到有效 Bearer 令牌。"""
+
+    def validate(_payload) -> None:
+        """模拟组合根提供的当前用户身份校验端口。"""
+
+    monkeypatch.setattr(access, "_token_identity_validator", validate)
+    bearer = create_access_token(userid=7, username="tester")
+
+    payload = access.verify_resource_token("invalid-cookie", bearer)
+
+    assert payload.username == "tester"
+    assert payload.purpose == "authentication"
+
+
+def test_verify_resource_token_accepts_bearer_without_cookie(monkeypatch) -> None:
+    """资源 Cookie 缺失时直接接受 Bearer 兜底。"""
+
+    def validate(_payload) -> None:
+        """模拟组合根提供的当前用户身份校验端口。"""
+
+    monkeypatch.setattr(access, "_token_identity_validator", validate)
+    bearer = create_access_token(userid=7, username="tester")
+
+    payload = access.verify_resource_token(None, bearer)
+
+    assert payload.username == "tester"
+    assert payload.purpose == "authentication"
+
+
+def test_verify_resource_token_rejects_when_both_credentials_invalid(monkeypatch) -> None:
+    """资源 Cookie 与 Bearer 均无效时返回带 Bearer 挑战的 401。"""
+
+    def validate(_payload) -> None:
+        """模拟组合根提供的当前用户身份校验端口。"""
+
+    monkeypatch.setattr(access, "_token_identity_validator", validate)
+
+    with pytest.raises(HTTPException) as exc_info:
+        access.verify_resource_token("invalid-cookie", "invalid-bearer")
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.headers == {"WWW-Authenticate": "Bearer"}

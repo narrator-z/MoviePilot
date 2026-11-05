@@ -129,3 +129,36 @@ def test_main_emits_workflow_body_without_evaluating_commit_text(tmp_path, monke
     assert ("## 本次更新内容" in content) is not frontend
     assert ("手工公告" in content) is not frontend
     assert ("## 版本对比" in content) is not frontend
+
+
+def test_trim_records_keeps_short_records_verbatim() -> None:
+    """
+    未超出上限时正文原样保留，不引入省略标记。
+    """
+    assert release_notes.trim_records("- a\n- b", limit=1000) == "- a\n- b"
+
+
+def test_trim_records_keeps_newest_entries_and_reports_omitted() -> None:
+    """
+    超限时保留最近的提交条目，并在首行声明被省略的条数。
+    """
+    records = "\n".join(f"- commit {index}" for index in range(50))
+    trimmed = release_notes.trim_records(records, limit=80)
+    lines = trimmed.splitlines()
+    kept = lines[1:]
+    assert lines[0] == f"- 更早的 {50 - len(kept)} 条提交见版本对比章节"
+    assert 0 < len(kept) < 50
+    assert len(trimmed) <= 80
+    assert lines[-1] == "- commit 49"
+    assert "- commit 0" not in trimmed
+
+
+def test_release_body_stays_within_publish_limit() -> None:
+    """
+    大跨度发布时正文仍低于接口上限，版本对比章节承担完整历史。
+    """
+    records = "\n".join(f"- 提交 {index} " + "x" * 400 for index in range(300))
+    body = release_notes.release_body("摘要", records, "owner/repo", "v3.0.0", "v3.9.9")
+    assert len(body) < 125000
+    assert "见版本对比章节" in body
+    assert "https://github.com/owner/repo/compare/v3.0.0...v3.9.9" in body

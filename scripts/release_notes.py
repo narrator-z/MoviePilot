@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+# 发布正文的字符上限，为手工摘要与版本对比章节预留余量（GitHub 接口上限 125000）。
+MAX_RECORDS_LENGTH = 100_000
+
 
 def command(*args: str) -> str:
     """
@@ -92,10 +95,35 @@ def manual_summary(body: str) -> str:
     return body[:legacy_generated.start()].strip() if legacy_generated else body.strip()
 
 
+def trim_records(records: str, limit: int = MAX_RECORDS_LENGTH) -> str:
+    """
+    正文超出发布上限时保留最近提交，较早部分交给版本对比章节承载。
+    """
+    if len(records) <= limit:
+        return records
+    kept: list[str] = []
+    used = 0
+    for line in reversed(records.splitlines()):
+        if used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept.reverse()
+    total = len(records.splitlines())
+    while kept:
+        header = f"- 更早的 {total - len(kept)} 条提交见版本对比章节"
+        body = "\n".join([header, *kept])
+        if len(body) <= limit:
+            return body
+        kept.pop(0)
+    return ""
+
+
 def release_body(summary: str, records: str, repository: str, previous: str | None, tag: str) -> str:
     """
     生成后端固定三章节；首版无比较起点时仅保留空的版本对比章节。
     """
+    records = trim_records(records)
     comparison = ""
     if previous:
         url = f"https://github.com/{repository}/compare/{previous}...{tag}"

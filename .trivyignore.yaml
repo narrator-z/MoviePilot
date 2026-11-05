@@ -377,3 +377,22 @@ vulnerabilities:
       - pkg:golang/stdlib@v1.27.2
     expired_at: 2027-01-15
     statement: The official rclone binary embeds Go stdlib v1.27.2; the fix ships in 1.26.10/1.27.3, for which no patched rclone release is available yet. The finding is in crypto/x509 intermediate-certificate handling; rclone is used only as an operator-controlled transfer utility, and its TLS peers are configured by the operator. Reassess when this exception expires.
+
+  # v3.0.78 supply-chain drift (2026-11): Debian base-image apt metadata signature bypass and base-image system brotli.
+  - id: CVE-2026-109518
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/apt@3.0.3
+      - pkg:deb/debian/apt
+      - pkg:deb/debian/libapt-pkg7.0@3.0.3
+      - pkg:deb/debian/libapt-pkg7.0
+    expired_at: 2027-01-15
+    statement: apt 3.0.3 is part of the pinned Debian 13.7 base image; Debian published the fix in 3.0.4. CVE-2026-109518 is an on-path signature bypass in apt repository metadata handling. MoviePilot does not run an on-path apt client against untrusted mirrors at runtime, so the affected surface is not reachable. Suppressed pending the next base-image refresh. Reassess when this exception expires.
+  - id: CVE-2026-111497
+    paths:
+      - Python
+    purls:
+      - pkg:pypi/brotli@1.2.0
+    expired_at: 2027-01-15
+    statement: brotli 1.2.0 is pulled in via the base image system pip and is not imported by MoviePilot; the fix ships in 1.2.1. The finding is an out-of-bounds write in the Google Brotli decoder. MoviePilot does not decode attacker-supplied Brotli streams, so the impact is not reachable. Suppressed pending the next base-image refresh. Reassess when this exception expires.

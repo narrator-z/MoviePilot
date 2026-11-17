@@ -4,7 +4,6 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 from app.runtime.log import LoggerManager, logger
 
@@ -22,12 +21,15 @@ class CapturingLogWriter:
         level: str,
         message: str,
         file_path: Path,
-        exc_info: Any = None,
+        exc_info: tuple | None = None,
     ) -> None:
         """
         保存单条日志的级别、内容和目标路径。
 
-        :param exc_info: 随该条日志透传的异常信息（fork：写入器记录 exc_info）
+        :param level: 日志等级名称
+        :param message: 已经格式化的日志正文
+        :param file_path: 目标日志文件路径
+        :param exc_info: 已规范化的异常三元组，本测试写入器忽略该信息
         """
         self.entries.append((level, message, file_path))
 
@@ -103,4 +105,6 @@ def test_file_log_route_preserves_exc_info(monkeypatch, tmp_path):
     logger.error("task failed", exc_info=captured)
 
     assert received, "文件写入器未收到日志"
-    assert received[0][3] is captured, "exc_info 未随文件日志路径透传"
+    exc_info = received[0][3]
+    assert exc_info is not None, "exc_info 未随文件日志路径透传"
+    assert exc_info[1] is captured, "透传的异常三元组未保留原异常实例"

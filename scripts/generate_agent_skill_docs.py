@@ -17,11 +17,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-MOVIEPILOT_API_SKILL_VERSION = "71"
-DATABASE_OPERATION_SKILL_VERSION = "17"
+# 与对应 SKILL.md 同步维护，重新生成不能回退用户同步所需的版本。
+MOVIEPILOT_API_SKILL_VERSION = "77"
+DATABASE_OPERATION_SKILL_VERSION = "20"
 
 
 DATABASE_TABLE_GUIDES: dict[str, tuple[str, str, str]] = {
+    "channelauthorization": (
+        "Stores per-instance channel authorization, approval state, scopes, and immutable business ownership.",
+        "Inspecting requests, member capabilities, suspension, and legacy whitelist migration.",
+        "Owned by channel authorization; never bypass approval, account linking, or live revocation with direct writes.",
+    ),
+    "channelbinding": (
+        "Stores web-initiated one-time channel binding digests and their five-minute expiry.",
+        "Checking expiry or consumption without reading or reconstructing the original binding code.",
+        "Consumed atomically by two-sided identity verification; never extend expiry, forge digests, or replace owners directly.",
+    ),
     "alembic_version": (
         "Records the Alembic migration revision currently applied to the database.",
         "Diagnosing startup migration failures or a database/code revision mismatch.",
@@ -183,10 +194,13 @@ DATABASE_TABLE_GUIDES: dict[str, tuple[str, str, str]] = {
     "transferhistory": (
         "Stores transfer source, destination, mode, media identity, download linkage, and outcome.",
         "Reviewing success/failure history, destination paths, media classification, and download linkage.",
-        "Written by transfer settlement; delete or retry through transfer-history business APIs.",
+        "Written by transfer settlement or the external registration API; never insert history rows directly. "
+        "External rows preserve administrator audit and file verification evidence; actor_id is the authoritative "
+        "identity and actor_name is a bounded display snapshot. Old rows have unknown origin.",
     ),
     "transferpending": (
-        "Durably stores pending transfer input, plans, checkpoints, leases, retries, and manual review state.",
+        "Durably stores pending transfer input, plans, checkpoints, leases, retries, manual review state, "
+        "and one short-lived pending manual identity authorization.",
         "Diagnosing restart recovery, expired leases, retry_wait, terminal failures, or manual review.",
         "Core durable state machine advanced only by planning, execution, retry, and review services.",
     ),
@@ -302,6 +316,26 @@ _MEDIA_TYPE_FIELD_VALUES: dict[tuple[str, str, str], str] = {
 # OpenAPI 无法表达的操作级 Agent 指引，在生成时追加到操作参数组之后，
 # 保证运行中的 Skill 包含这些指引，无需手动修改生成的 api/*.md。
 _OPERATION_NOTES: dict[str, list[str]] = {
+    "transfer.history.replan": [
+        "- `path_params.history_id` 使用本次失败历史 ID，`body.task_id` 和 `body.settlement_revision` "
+        "原样保留接管上下文中的任务与结算版本。",
+        "- `body.media_source`、`body.media_id`、`body.media_type` 必须来自同一次核实的媒体身份。"
+        "重新规划会清空旧识别结果，再按该身份直接查询，预览与提交使用同一身份及季集。",
+        "- 受理后通过 `transfer.history` 核实整理结果，受理或排队仅表示任务等待执行。",
+    ],
+    "transfer.history.register": [
+        "- **Completed external work only:** Register a completed copy, native local hard link, or move; "
+        "this operation only writes history and never moves files, scrapes metadata, or changes downloads.",
+        "- Supply administrator-confirmed media identity and absolute paths. The server queries file facts. "
+        "Copy requires equal file sizes; link requires distinct local directory entries with the same inode; "
+        "move requires a confirmed absent source and verifies only the destination. These are not content checksums.",
+        "- Retrying the same source, destination and metadata returns the original receipt. Conflicting or "
+        "internal history returns a conflict and is never overwritten. Actor and registration time come from the server.",
+        "- The complete `actor_id` is authoritative. `actor_name` is a display snapshot: nonempty names up to "
+        "128 characters stay unchanged; longer names use the first 127 characters plus `…`; empty names use `#<actor_id>`.",
+        "- Use transfer.history with query origin=external to page through external registrations; "
+        "older records have no recorded origin.",
+    ],
     "plugin.instance.purge": [
         "- **Historical invalid-ID recovery:** If the exact instance ID from a warning is "
         "rejected by normal validation, send only `config: true` (all other scope flags false). "
@@ -365,8 +399,10 @@ _OPERATION_NOTES: dict[str, list[str]] = {
 # 在生成的 Schema 字段旁保留经过维护的操作指引。
 _OPERATION_PURPOSE_NOTES: dict[str, str] = {
     "subscription.find": (
-        "For movies and TV, if exact identity misses and mtype/title are supplied, match across "
-        "sources by type, normalized title, optional season, and year. An exact year ranks first; "
+        "For movies and TV, if exact identity misses and mtype is supplied, first confirm "
+        "cross-source subscriptions through a shared TMDB identity, preserving season, episode "
+        "group and owner boundaries. If projection fails and title is supplied, retain the "
+        "type/title/year fallback as a display hint. An exact year ranks first; "
         "a subscription with no year may match when the card has a year, while a card with no "
         "year only matches a subscription with no year. Music uses exact identity only."
     ),

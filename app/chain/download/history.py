@@ -13,6 +13,7 @@ from app.application.chain.events import (
 from app.application.classification.reference import effective_classification_snapshot
 from app.application.history import DownloadFileWrite, DownloadHistoryWrite
 from app.chain.download.contract import _DownloadOwnerBase
+from app.domain import torrent as torrent_rules
 from app.domain.context import (
     Context,
     MediaInfo,
@@ -20,7 +21,6 @@ from app.domain.context import (
     TorrentInfo,
 )
 from app.domain.meta.metabase import MetaBase
-from app.domain.metainfo import MetaInfo
 from app.runtime.log import logger
 from app.schemas.media import resolve_media_identity
 from app.schemas.types import (
@@ -82,6 +82,8 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
         """
         提交下载历史、文件明细和 durable 下载事件。
 
+        选集文件按集号交集保留，确保跨目标边界的多集视频也有文件明细。
+
         :param already_exists: 下载器中已存在同一任务时为 True，仅补记历史，不再重复通知与文件明细；
                                若整包全部媒体文件已记录过，同时为这个资源登记提交退避
         """
@@ -126,7 +128,6 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
             custom_words=custom_words,
         )
         files_to_add: list[DownloadFileWrite] = []
-        custom_word_list = custom_words.splitlines() if custom_words else []
         for file in file_list:
             if not Path(file).suffix or Path(file).suffix.lower() not in self.runtime_config.media_extensions:
                 continue
@@ -140,6 +141,7 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
                     torrentname=meta.org_string,
                 )
             )
+        media_file_count = len(files_to_add)
         if already_exists:
             retained_files = self._filter_unrecorded_download_files(files_to_add, download_hash)
             if files_to_add and not retained_files:
@@ -152,13 +154,13 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
                 )
             files_to_add = retained_files
         if episodes:
-            selected_files = []
-            for item in files_to_add:
-                # 与订阅选集使用相同识别词，避免偏移前的文件集数被目标集数过滤。
-                file_meta = MetaInfo(Path(cast(str, item.filepath)).stem, custom_words=custom_word_list)
-                if file_meta.begin_episode and file_meta.begin_episode in episodes:
-                    selected_files.append(item)
-            files_to_add = selected_files
+            wanted, _unwanted, _matched = torrent_rules.select_torrent_files(
+                ((index, cast(str, item.filepath)) for index, item in enumerate(files_to_add)),
+                episodes, self.runtime_config.media_extensions, custom_words,
+                torrent_rules.episode_selection_for_context(context),
+                allow_single_fallback=media_file_count == 1,
+            )
+            files_to_add = [files_to_add[index] for index in wanted]
         frozen_files = tuple(files_to_add)
         event_payload = {
             "hash": download_hash, "context": context, "username": username,

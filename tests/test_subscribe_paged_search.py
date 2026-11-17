@@ -83,6 +83,62 @@ def _missing(scope, item):
         subscribe=item, meta=build_subscribe_meta(item), mediainfo=scope.media, mediakey="tmdb:1")[1]
 
 
+def test_cumulative_episode_subscription_reaches_download_submission(subscription, monkeypatch):
+    """
+    人工累计范围经真实缺集计算、分页识别和下载选集后提交 1180 集，且不提前完成订阅。
+    """
+    scope = subscription
+    subscribe = replace(
+        scope.initial, name="One Piece", year="1999", season=23,
+        start_episode=1156, total_episode=2000, note=list(range(1156, 1180)),
+        custom_words=r"(?i)(One[.\s]Piece.*?)S01E(?=\d{4}) => \1S23E",
+    )
+    scope.current["value"] = subscribe
+    scope.media.title = scope.media.original_title = "One Piece"
+    scope.media.names = ["One Piece"]
+    scope.media.year = "1999"
+    scope.media.season = 23
+    scope.media.season_years = {1: "1999", 23: "2026"}
+    scope.media.seasons = {1: list(range(1, 62)), 23: list(range(1, 26))}
+    scope.download.download_torrent.return_value = (b"torrent", None, [1180])
+    target = SubscriptionSearchTarget(
+        subscribe, build_subscribe_meta(subscribe), scope.media, _missing(scope, subscribe), "tmdb:1",
+    )
+    search = SearchChain()
+    monkeypatch.setattr(search, "_sync_indexers", lambda _sites: [{"id": 1, "name": "A"}])
+    monkeypatch.setattr(search, "get_search_page_size", lambda **_params: 100)
+    monkeypatch.setattr(search, "search_plugin_torrents", lambda **_params: [])
+    monkeypatch.setattr(scope.chain, "get_sub_sites", lambda _subscribe: [1])
+    calls = []
+
+    def request(**params):
+        """
+        仅回放站点原始累计资源，保留真实识别词和所有后续匹配逻辑。
+        """
+        calls.append(params["page"])
+        items = [TorrentInfo(
+            site=1, site_name="A", title="One Piece 1999 S01E1180 2160p WEB-DL H265 AAC-PTerWEB",
+            enclosure="https://site.example/download?id=1180", pri_order=100,
+        )] if params["page"] == 0 else []
+        report_site_search_outcome(attempted=True, outcome="success")
+        report_site_search_page(raw_count=len(items), has_more=False)
+        return items
+
+    monkeypatch.setattr(search, "search_site_torrents", request)
+
+    _process_paged_subscription(
+        scope.chain, subscribe, search, target, SystemConfigKey.SubscribeFilterRuleGroups, None,
+    )
+
+    assert calls == [0]
+    scope.download.download_single.assert_called_once()
+    assert 1180 in scope.current["value"].note
+    assert 1180 not in _missing(scope, scope.current["value"])["tmdb:1"][23].episodes
+    assert 1181 in _missing(scope, scope.current["value"])["tmdb:1"][23].episodes
+    assert scope.media.seasons[23] == list(range(1, 26))
+    scope.finished.assert_not_called()
+
+
 def test_full_pack_candidate_without_torrent_cannot_submit_download(subscription, monkeypatch):
     """
     整包候选缺少种子信息时不比较优先级或提交下载，保留原始缺集范围。
@@ -701,9 +757,12 @@ def test_ready_batch_cannot_expand_existing_candidate_episode_restriction(subscr
     assert lefts["tmdb:1"][1].total_episode == 2
 
 
-def test_all_ready_season_pack_with_extra_episode_downloads_whole_pack_like_original(subscription):
+def test_all_ready_season_pack_with_extra_episode_selects_subscribed_range(subscription):
     """
-    整季缺集全部就绪时不加本批集数限制，与原 MP 一致：整季包多出一集仍整包下载、不做选集。
+    整季缺集全部就绪时不加本批集数限制，含范围外剧集的整季包仍被接受。
+
+    若误加本批限制，整季包会因多出的集被整体拒绝；接受后只选择订阅范围内的集，
+    不下载订阅范围外的剧集。
     """
     scope = subscription
     current = replace(scope.initial, total_episode=2)
@@ -715,7 +774,37 @@ def test_all_ready_season_pack_with_extra_episode_downloads_whole_pack_like_orig
         contexts=[pack], no_exists=_missing(scope, current), subscribe=current,
         mediakey="tmdb:1", eligible_targets={"1:1", "1:2"})
     assert downloads == [pack]
-    assert "episodes" not in scope.download.download_single.call_args.kwargs
+    assert scope.download.download_single.call_args.kwargs["episodes"] == {1, 2}
+    assert not lefts
+
+
+@pytest.mark.parametrize("pack_first", [True, False], ids=["pack-first", "single-first"])
+def test_single_episode_subscription_never_downloads_other_episodes(subscription, pack_first):
+    """
+    只订阅第 5 集时，无论整季包还是单集胜出，提交的剧集都只有第 5 集。
+
+    回归：首次整包优先把单集订阅视为完整目标，整季包胜出后不做选集，
+    整季全部下载。
+    """
+    scope = subscription
+    scope.media.seasons = {1: list(range(1, 11))}
+    current = replace(scope.initial, start_episode=5, total_episode=5)
+    scope.current["value"] = current
+    pack = Context(meta_info=MetaInfo("Example Show S01"), media_info=scope.media,
+                   torrent_info=TorrentInfo(site=1, title="Example Show S01", pri_order=100))
+    single = Context(meta_info=MetaInfo("Example Show S01E05"), media_info=scope.media,
+                     torrent_info=TorrentInfo(site=1, title="Example Show S01E05", pri_order=100))
+    files = {"Example Show S01": list(range(1, 11)), "Example Show S01E05": [5]}
+    scope.download.download_torrent.side_effect = lambda torrent, **_params: (b"torrent", None, files[torrent.title])
+    missing = _missing(scope, current)
+    assert missing["tmdb:1"][1].episodes == [5]
+    downloads, lefts = scope.chain._SubscribeChain__download_best_version_with_full_pack_first(
+        contexts=[pack, single] if pack_first else [single, pack], no_exists=missing,
+        subscribe=current, mediakey="tmdb:1")
+    assert downloads == [pack if pack_first else single]
+    scope.download.download_single.assert_called_once()
+    call = scope.download.download_single.call_args
+    assert (call.kwargs.get("episodes") or set(files[call.kwargs["context"].torrent_info.title])) == {5}
     assert not lefts
 
 
@@ -735,7 +824,7 @@ def test_all_ready_missing_season_keeps_original_whole_pack_priority(subscriptio
         mediakey="tmdb:1", eligible_targets={"1:1", "1:2"})
     assert downloads == [pack]
     scope.download.download_single.assert_called_once()
-    assert "episodes" not in scope.download.download_single.call_args.kwargs
+    assert scope.download.download_single.call_args.kwargs.get("episodes") is None
     assert not lefts
 
 

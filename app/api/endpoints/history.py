@@ -5,9 +5,9 @@
 import asyncio
 import time
 from collections.abc import Coroutine
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Literal, Optional
 
-from fastapi import Depends, Response
+from fastapi import Depends, HTTPException, Response
 
 from app.adapters.web.security.access import verify_token
 from app.agent.contracts import ReplyMode
@@ -30,6 +30,7 @@ from app.api.dependencies.history import (
     get_history_query_service,
     get_transfer_execution_repository,
     get_transfer_history_mutation_command,
+    get_transfer_registration_command,
 )
 from app.api.response import (
     COLLECTION_TOTAL_HEADER,
@@ -42,6 +43,12 @@ from app.application.history import (
     DownloadHistoryMutationCommand,
     HistoryQueryService,
     TransferHistoryMutationCommand,
+)
+from app.application.history.registration import (
+    RegistrationActor,
+    RegistrationConflictError,
+    RegistrationValidationError,
+    TransferRegistrationCommand,
 )
 from app.application.transfer.execution import (
     TransferExecutionCommand,
@@ -60,6 +67,8 @@ from app.schemas.history import TransferHistory as _SchemaTransferHistory
 from app.schemas.history import TransferHistoryDeleteResult as _SchemaTransferHistoryDeleteResult
 from app.schemas.history import TransferHistoryDiscardResult as _SchemaTransferHistoryDiscardResult
 from app.schemas.history import TransferHistoryPage as _SchemaTransferHistoryPage
+from app.schemas.history import TransferHistoryRegisterRequest as _SchemaTransferHistoryRegisterRequest
+from app.schemas.history import TransferHistoryRegisterResult as _SchemaTransferHistoryRegisterResult
 from app.schemas.history import TransferHistoryReplanRequest as _SchemaTransferHistoryReplanRequest
 from app.schemas.response import Response as _SchemaResponse
 from app.schemas.token import TokenPayload as _SchemaTokenPayload
@@ -270,6 +279,19 @@ async def download_history(
     """
     page = page if page is not None else 1
     count = count if count is not None else 30
+    if isinstance(_, _SchemaTokenPayload) and _.agent_authorization_id:
+        from app.application.security.authorization import get_channel_authorization
+        from app.runtime.execution import run_in_threadpool
+
+        authorization = get_channel_authorization()
+        if authorization is None:
+            raise HTTPException(status_code=503, detail="渠道授权服务不可用")
+        user = await run_in_threadpool(authorization.authorize_operation, _.agent_authorization_id, _.agent_operation or "")
+        username = None if user.is_superuser else user.name
+        results = await query.list_download(page=page, count=count, username=username)
+        if response is not None:
+            response.headers[COLLECTION_TOTAL_HEADER] = str(await query.count_download(username=username))
+        return results
     results = await query.list_download(page=page, count=count)
     if response is not None:
         response.headers[COLLECTION_TOTAL_HEADER] = str(await query.count_download())
@@ -303,6 +325,7 @@ async def transfer_history(
     page: Optional[int] = 1,
     count: Optional[int] = 30,
     status: Optional[bool] = None,
+    origin: Optional[Literal["external"]] = None,
     query: HistoryQueryService = Depends(get_history_query_service),
     _: _SchemaTokenPayload = Depends(verify_token),
 ) -> Any:
@@ -311,13 +334,44 @@ async def transfer_history(
     """
     page = page if page is not None else 1
     count = count if count is not None else 30
-    result = await query.list_transfer(
-        title=title,
-        page=page,
-        count=count,
-        status=status,
-    )
+    if origin is None:
+        result = await query.list_transfer(title=title, page=page, count=count, status=status)
+    else:
+        result = await query.list_transfer(
+            title=title,
+            page=page,
+            count=count,
+            status=status,
+            origin=origin,
+        )
     return _SchemaResponse(success=True, data=result)
+
+
+@router.post(
+    "/transfer",
+    summary="登记已完成的外部整理",
+    response_model=_SchemaResponse[_SchemaTransferHistoryRegisterResult],
+)
+def register_transfer_history(
+    payload: _SchemaTransferHistoryRegisterRequest,
+    command: TransferRegistrationCommand = Depends(get_transfer_registration_command),
+    user: Any = Depends(get_current_active_superuser),
+) -> Any:
+    """
+    管理员登记外部复制、硬链接或移动事实，只写历史，不操作文件、下载器或订阅。
+    """
+    try:
+        result = command.execute(payload, RegistrationActor(id=user.id, name=user.name))
+    except RegistrationConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except RegistrationValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return _SchemaResponse(
+        success=True,
+        data=_SchemaTransferHistoryRegisterResult(
+            history=_SchemaTransferHistory.model_validate(result.history), created=result.created,
+        ),
+    )
 
 
 def _clear_transfer_history(
@@ -466,6 +520,34 @@ def replan_transfer_history(
     return _SchemaResponse(success=result.accepted, message=result.message)
 
 
+async def _grant_manual_identity_authorization(
+        history: Any,
+        execution_repository: TransferExecutionRepository,
+) -> None:
+    """
+    在启动智能助手分析时覆盖任务上唯一的待消费身份修正授权。
+
+    :param history: 本次点击对应的整理历史视图
+    :param execution_repository: 拥有短事务的执行仓储
+    """
+    task_id = getattr(history, "transfer_task_id", None)
+    settlement_revision = getattr(history, "transfer_settlement_revision", None)
+    if not task_id or not settlement_revision:
+        return
+    try:
+        granted = await asyncio.to_thread(
+            TransferExecutionCommand(execution_repository).grant_manual_identity_authorization,
+            history_id=history.id,
+            task_id=task_id,
+            settlement_revision=settlement_revision,
+        )
+    except Exception as error:
+        logger.warning(f"整理历史 {history.id} 的人工身份授权登记失败：{error}")
+        return
+    if not granted:
+        logger.warning(f"整理历史 {history.id} 的任务或结算版本已变化，未登记人工身份授权")
+
+
 @router.post(
     "/transfer/{history_id}/ai-redo",
     summary="智能助手重新整理",
@@ -495,6 +577,8 @@ async def ai_redo_transfer_history(
     )
     if rejection:
         return _SchemaResponse(success=False, message=rejection)
+
+    await _grant_manual_identity_authorization(history, execution_repository)
 
     prompt = build_manual_redo_prompt(history)
     progress_key = f"ai_redo_transfer_{history_id}_{int(time.time() * 1000)}"
@@ -546,6 +630,9 @@ async def batch_ai_redo_transfer_history(
         )
         if rejection:
             return _SchemaResponse(success=False, message=f"第 {history.id} 条：{rejection}")
+
+    for history in histories:
+        await _grant_manual_identity_authorization(history, execution_repository)
 
     return _submit_batch_ai_redo(
         histories=histories,

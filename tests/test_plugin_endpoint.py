@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Request
 from starlette.responses import Response
+from starlette.testclient import TestClient
 
 from app import schemas
 from app.api.endpoints import plugin as plugin_endpoint
@@ -106,6 +108,28 @@ def _catalog_query(plugin_manager: MagicMock, persistence: MagicMock) -> PluginC
         identities=persistence.list_identities,
         free_threaded=lambda: False,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("found", [False, True])
+async def test_single_plugin_metadata_avoids_market_aggregation(monkeypatch, found):
+    """
+    指定已安装插件 ID 时沿用绑定来源查询，不读取全市场；不存在时返回 404。
+    """
+    plugin = schemas.Plugin(id="Demo", installed=True) if found else None
+    history = AsyncMock(return_value=plugin)
+    catalog = MagicMock()
+    monkeypatch.setattr(plugin_endpoint, "get_plugin_release_service", lambda: SimpleNamespace(history=history))
+    monkeypatch.setattr(plugin_endpoint, "get_plugin_catalog_query", catalog)
+
+    if found:
+        assert await plugin_endpoint.plugin_history("Demo", force=False) == plugin
+    else:
+        with pytest.raises(plugin_endpoint.HTTPException) as error:
+            await plugin_endpoint.plugin_history("Demo", force=False)
+        assert error.value.status_code == 404
+    history.assert_awaited_once_with("Demo", force=False)
+    catalog.assert_not_called()
 
 
 def test_update_candidates_report_source_and_binding_relationship():
@@ -1298,6 +1322,7 @@ def test_reset_plugin_sends_pre_reset_chain_event_before_deleting_data():
         )
 
     command = PluginConfigCommand(
+        read_config=plugin_manager.get_plugin_config,
         save_config=plugin_manager.save_plugin_config,
         initialize=plugin_manager.init_plugin,
         stop=plugin_manager.stop,
@@ -1363,17 +1388,12 @@ def test_virtual_instance_static_file_reads_from_source_directory(tmp_path, monk
         lambda: MagicMock(root_path=tmp_path),
     )
 
-    response = asyncio.run(plugin_static_file("DemoPluginwork", "dist/remoteEntry.js", None))
+    request = Request({"type": "http", "headers": [], "query_string": b""})
+    response = asyncio.run(plugin_static_file("DemoPluginwork", "dist/remoteEntry.js", request, None))
 
-    async def read_body() -> bytes:
-        """
-        读取流式响应的全部测试内容。
-        """
-        return b"".join([chunk async for chunk in response.body_iterator])
-
-    assert asyncio.run(read_body()) == b"export default 'shared'"
+    assert TestClient(response).get("/").content == b"export default 'shared'"
     assert response.media_type == "application/javascript"
-    assert response.headers["cache-control"] == "no-cache, must-revalidate"
+    assert response.headers["cache-control"] == "private, no-cache"
     plugin_manager.get_plugin_source_id.assert_called_once_with("DemoPluginwork")
 
 

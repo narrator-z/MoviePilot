@@ -139,42 +139,14 @@ class MediaServerChain(ChainBase):
         query: Optional[MediaServerQueryOptions] = None,
     ) -> Generator[Any, None, None]:
         """
-        获取媒体服务器项目列表，支持分页和不分页逻辑，默认不分页获取所有数据
+        委托具体客户端枚举媒体条目，由客户端处理协议分页、类型过滤与目录展开。
 
         :param server: 媒体服务器名称
         :param library_id: 媒体库ID，用于标识要获取的媒体库
-        :param start_index: 起始索引，用于分页获取数据。默认为 0，即从第一个项目开始获取
-        :param limit: 每次请求的最大项目数，用于分页。如果为 None 或 -1，则表示一次性获取所有数据，默认为 -1
-
+        :param start_index: 服务端原始条目的起始索引，默认为 0
+        :param limit: 单页请求上限；None 或 -1 表示读取全部，由支持内部分页的客户端分批请求
         :param query: 可选查询内容投影，省略时保留原有请求和返回内容
-        :return: 返回一个生成器对象，用于逐步获取媒体服务器中的项目
-
-        说明：
-        - 特别注意的是，这里使用yield from返回迭代器，避免同时使用return与yield导致Python生成器解析异常
-        - 如果 `limit` 为 None 或 -1 时，表示一次性获取所有数据，分页处理将不再生效
-        - 在这种情况下，内存消耗可能会较大，特别是在数据量非常大的场景下
-        - 如果未来评估结果显示，不分页场景下的内存消耗远大于分页处理时的网络请求开销，可以考虑在此方法中实现自分页的处理
-        - 即通过 `while` 循环在上层进行分页控制，逐步获取所有数据，避免内存爆炸，当前该逻辑由具体实例来实现不分页的处理
-        - Plex 实际上已默认支持内部分页处理，Jellyfin 与 Emby 获取数据时存在内部过滤场景，如排除合集等，分页数据可能是错误的
-        if limit is not None and limit != -1:
-            yield from self.run_module("mediaserver_items", server=server, library_id=library_id,
-                                   start_index=start_index, limit=limit)
-        else:
-            # 自分页逻辑，通过循环逐步获取所有数据
-            page_size = 10
-            while True:
-                data_generator = self.run_module("mediaserver_items", server=server, library_id=library_id,
-                                                 start_index=start_index, limit=page_size)
-                if not data_generator:
-                    break
-                count = 0
-                for item in data_generator:
-                    if item:
-                        count += 1
-                        yield item
-                if count < page_size:
-                    break
-                start_index += page_size
+        :yields: 统一媒体条目；结果数量可能因过滤或子目录展开与原始页长不同
         """
         yield from self.run_module(
             "mediaserver_items",
@@ -227,6 +199,72 @@ class MediaServerChain(ChainBase):
         return cast(MediaServerItem, self.run_module(
             "mediaserver_iteminfo", server=server, item_id=item_id, **({"query": query} if query is not None else {})
         ))
+
+    def find_item(
+        self,
+        item_id: str,
+        *,
+        server: Optional[str] = None,
+        query: Optional[MediaServerQueryOptions] = None,
+    ) -> Optional[Tuple[str, MediaServerItem]]:
+        """
+        在已启用的媒体服务器中按条目标识查找首个匹配项。
+
+        :param item_id: 媒体服务器条目标识
+        :param server: 可选的媒体服务器配置名称，用于避免跨服务器条目标识冲突
+        :param query: 可选查询内容投影
+        :return: 配置名称和匹配条目；未找到时返回 None
+        """
+        if not item_id:
+            return None
+        servers = [server] if server else [config.name for config in get_mediaserver_configs() if config.name]
+        for server_name in servers:
+            if not server_name:
+                continue
+            item = self.iteminfo(server=server_name, item_id=item_id, query=query)
+            if item and str(item.item_id or item.id or "") == item_id:
+                return server_name, item
+        return None
+
+    def search_library(
+        self,
+        keyword: str,
+        types: Optional[List[str]] = None,
+        limit: int = 30,
+    ) -> List[MediaServerPlayItem]:
+        """
+        在已配置媒体服务器中搜索电视剧和音乐单曲，并代理签名海报地址。
+
+        :param keyword: 用户输入的搜索词
+        :param types: 允许的业务类型；省略时搜索电视剧和音乐
+        :param limit: 返回的最大结果数，服务端适配器也会按此限制请求
+        :return: 带媒体服务器配置名的海报结果
+        """
+        query = keyword.strip()
+        if not query:
+            return []
+        selected_types = [value for value in (types or [MediaType.TV.value, MediaType.MUSIC.value]) if value]
+        items = cast(
+            List[MediaServerPlayItem],
+            self.run_module(
+                "mediaserver_search",
+                keyword=query,
+                types=selected_types,
+                limit=max(1, min(limit, 50)),
+            ),
+        )
+        filtered = [item for item in items or [] if item.type in selected_types and item.item_id]
+        seen: set[tuple[Optional[str], str]] = set()
+        results: List[MediaServerPlayItem] = []
+        for item in filtered:
+            key = (item.server, str(item.item_id))
+            if key in seen:
+                continue
+            seen.add(key)
+            if item.image:
+                item.image = self._sign_image_url(item.image)
+            results.append(item)
+        return results[:max(1, min(limit, 50))]
 
     def episodes(
         self, server: str, item_id: Union[str, int], *, query: Optional[MediaServerQueryOptions] = None

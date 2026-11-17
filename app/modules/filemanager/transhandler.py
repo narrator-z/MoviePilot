@@ -11,6 +11,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union, cast
 
 from jinja2 import Template
 
+from app.adapters.system.fsproxy import fsproxy
 from app.adapters.system.host import SystemUtils
 from app.application.audio import AudioMetadataHelper
 from app.application.classification.reference import (
@@ -56,6 +57,8 @@ from app.schemas.system import TransferDirectoryConf
 from app.schemas.tmdb import TmdbEpisode
 from app.schemas.transfer import TransferInfo
 from app.schemas.types import ChainEventType, MediaType
+
+_MEDIA_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 
 class TransHandler:
@@ -251,24 +254,53 @@ class TransHandler:
     @staticmethod
     def __is_subtitle_file(fileitem: FileItem) -> bool:
         """
-        按运行配置检查文件是否为字幕附件。
+        按运行配置检查文件是否为字幕或歌词附件。
 
         :param fileitem: 带扩展名的文件项
-        :return: 扩展名属于字幕配置时为 True
+        :return: 扩展名属于字幕或歌词配置时为 True
         """
         return bool(
             fileitem.extension
-            and f".{fileitem.extension.lower()}" in get_runtime_setting("RMT_SUBEXT")
+            and (
+                f".{fileitem.extension.lower()}" in get_runtime_setting("RMT_SUBEXT")
+                or TransHandler.__is_configured_lyrics_file(fileitem)
+            )
         )
 
     @staticmethod
-    def __is_extra_file(fileitem: FileItem, mediainfo: MediaInfo | MusicInfo) -> bool:
+    def __is_configured_lyrics_file(fileitem: FileItem) -> bool:
+        """
+        按运行时歌词后缀配置判断文件是否为歌词附件。
+
+        :param fileitem: 待判断的文件项
+        :return: 文件名以配置的歌词后缀结尾时返回 True
+        """
+        path = str(fileitem.path or fileitem.name or "").casefold()
+        return any(
+            path.endswith(str(extension).casefold())
+            for extension in get_runtime_setting("RMT_LYRICSEXT")
+        )
+
+    @staticmethod
+    def __is_media_image_file(fileitem: FileItem) -> bool:
+        """
+        判断文件是否为整理链支持的媒体图片附件。
+
+        :param fileitem: 待判断的源文件
+        :return: 图片后缀受支持时返回 True
+        """
+        return bool(
+            fileitem.extension
+            and f".{fileitem.extension.lower()}" in _MEDIA_IMAGE_SUFFIXES
+        )
+
+    def __is_extra_file(self, fileitem: FileItem, mediainfo: MediaInfo | MusicInfo) -> bool:
         """
         识别不参与主媒体质量比较的附属文件。
 
         :param fileitem: 待判断的文件项
         :param mediainfo: 决定音频或歌词附件规则的主媒体信息
-        :return: 字幕、音乐歌词或影视外置音轨时为 True
+        :return: 字幕、歌词或影视外置音轨时为 True
         """
         if not fileitem.extension:
             return False
@@ -276,8 +308,9 @@ class TransHandler:
         path = str(fileitem.path or fileitem.name or "").casefold()
         if extension in get_runtime_setting("RMT_SUBEXT"):
             return True
-        if mediainfo.type == MediaType.MUSIC and path.endswith(
-            (".lrc", ".txt", ".lyricsfile.yaml")
+        if TransHandler.__is_configured_lyrics_file(fileitem) or (
+            mediainfo.type == MediaType.MUSIC
+            and path.endswith((".txt", ".lyricsfile.yaml"))
         ):
             return True
         return (
@@ -607,16 +640,11 @@ class TransHandler:
             )
             if self.__is_subtitle_file(fileitem):
                 final_target = self.__rename_subtitles(fileitem, final_target)
-            target_directory_path = DirectoryHelper.get_media_root_path(
-                rename_format,
-                rename_path=final_target,
-                media_type=mediainfo.type,
+            final_target, target_directory_path = self.__resolve_file_target_paths(
+                planning_input, mediainfo, target_path, final_target, rename_format,
             )
-            if not target_directory_path:
-                raise ValueError("重命名格式无效")
-            if (mediainfo.type == MediaType.MUSIC
-                    and Path(str(fileitem.path)).suffix.casefold() in {".jpg", ".jpeg", ".png", ".webp"}):
-                # 封面保持原名并放到专辑根，不套用曲序/曲名模板或进入 Disc 子目录。
+            if self.__is_media_image_file(fileitem):
+                # 封面保持原名并放到媒体根，不套用曲序/曲名模板或进入 Disc 子目录。
                 final_target = target_directory_path / Path(str(fileitem.path)).name
             if getattr(planning_meta, "music_layout", None) == "image_cue":
                 # 整轨与索引只调整专辑目录，保留原名才能让 CUE FILE 引用继续有效。
@@ -653,6 +681,28 @@ class TransHandler:
             overwrite_mode=overwrite_mode,
             preview=preview,
         )
+
+    @staticmethod
+    def __resolve_file_target_paths(
+            planning_input: TransferPlanningInput,
+            mediainfo: MediaInfo | MusicInfo,
+            target_path: Path,
+            rendered_path: Path,
+            rename_format: str,
+    ) -> tuple[Path, Path]:
+        """
+        解析模板文件与媒体根目录，手动音乐最终目录仅保留已渲染的文件名。
+
+        先渲染完整模板可保留跨目录层级的 Jinja 条件语义。
+        """
+        if mediainfo.type == MediaType.MUSIC and planning_input.options.get("music_target_path"):
+            return target_path / rendered_path.name, target_path
+        media_root = DirectoryHelper.get_media_root_path(
+            rename_format, rename_path=rendered_path, media_type=mediainfo.type,
+        )
+        if not media_root:
+            raise ValueError("重命名格式无效")
+        return rendered_path, media_root
 
     @staticmethod
     def __intercept_transfer(
@@ -726,6 +776,7 @@ class TransHandler:
 
         未知目标状态返回失败结果；明确策略拒绝标记为覆盖跳过，以保留已有成功历史。
         字幕及其他附件优先覆盖；普通文件允许插件先作裁决，再按配置和音乐音质或大小判断。
+        本地链接有效性以目标路径的严格查询结果为准，悬空链接由存储适配器在落地时修复。
 
         :param fileitem: 源文件项，提供大小及附件判断信息
         :param meta: 源元数据，提供音乐音质信息
@@ -762,17 +813,8 @@ class TransHandler:
                 ".jpg", ".jpeg", ".png", ".webp"
             }, None
 
-        checked_target = target_file
-        over_flag = False
-        if target_storage == "local" and target_file.is_symlink():
-            checked_target = target_file.readlink()
-            if not checked_target.exists():
-                over_flag = True
-        if over_flag:
-            return True, False, None
-
         logger.info(
-            f"目的文件系统中已经存在同名文件 {checked_target}，"
+            f"目的文件系统中已经存在同名文件 {target_file}，"
             f"当前整理覆盖模式设置为 {overwrite_mode}"
         )
         event_data = TransferOverwriteCheckEventData(
@@ -900,7 +942,8 @@ class TransHandler:
         清理前比对冻结文件的大小、类型及可用身份；证据不足时保留文件。
 
         本地链接的查询沿用 stat 语义，硬链接和软链接均比较实际内容的身份。
-        本地必须核对修改时间，优先纳秒证据；同路径还核对状态时间，防止等长改写后还原 mtime。
+        本地必须核对修改时间，优先纳秒证据；同路径还核对状态时间。
+        FUSE 可在写入收尾后单独更新状态时间，完整身份一致时按挂载类型兼容。
         rename 合法改变状态时间，因此跨路径只比较修改时间。旧本地快照回退到秒级修改时间，
         缺少时间凭据时转人工复核。云盘修改时间可能在上传后变化或缺失，不参与校验。
 
@@ -923,21 +966,64 @@ class TransHandler:
             if expected.fileid != current.fileid:
                 raise TransferExecutionConflictError(f"文件 {expected.path} 已被替换，禁止清理")
         if expected.storage == "local":
-            expected_time: Optional[int | float]
-            current_time: Optional[int | float]
-            if expected.modify_time_ns is not None:
-                expected_time, current_time = expected.modify_time_ns, current.modify_time_ns
-            else:
-                expected_time, current_time = expected.modify_time, current.modify_time
-            if expected_time is None or current_time is None:
-                raise StorageQueryError(f"文件 {expected.path} 缺少修改时间身份凭据，需人工复核")
-            if expected_time != current_time:
-                raise TransferExecutionConflictError(f"文件 {expected.path} 的修改时间已变化，禁止清理")
-            if expected.path == current.path and expected.change_time_ns is not None:
-                if current.change_time_ns is None:
-                    raise StorageQueryError(f"文件 {expected.path} 缺少状态时间身份凭据，需人工复核")
-                if expected.change_time_ns != current.change_time_ns:
-                    raise TransferExecutionConflictError(f"文件 {expected.path} 的状态时间已变化，禁止清理")
+            TransHandler.__assert_local_file_version(expected, current)
+
+    @staticmethod
+    def __assert_local_file_version(expected: FileItem, current: FileItem) -> None:
+        """
+        在大小、类型和稳定 ID 已核对后，检查本地文件的时间版本凭据。
+
+        同路径状态时间可识别等长改写后还原 mtime 的变化。仅在稳定 ID 和纳秒修改时间
+        均一致且当前挂载确认为 FUSE 时，允许单独的 ctime 变化并记录告警。
+        旧快照凭据不足、挂载未知或查询失败时继续保留文件。
+
+        :param expected: 已完成基础身份核验的冻结本地文件
+        :param current: 当前严格查询结果
+        :raises TransferExecutionConflictError: 修改时间或不满足兼容条件的状态时间变化
+        :raises StorageQueryError: 缺少冻结快照要求的时间凭据
+        :raises OSError: FUSE 挂载识别失败
+        """
+        expected_time: Optional[int | float]
+        current_time: Optional[int | float]
+        if expected.modify_time_ns is not None:
+            expected_time, current_time = expected.modify_time_ns, current.modify_time_ns
+        else:
+            expected_time, current_time = expected.modify_time, current.modify_time
+        if expected_time is None or current_time is None:
+            raise StorageQueryError(f"文件 {expected.path} 缺少修改时间身份凭据，需人工复核")
+        if expected_time != current_time:
+            raise TransferExecutionConflictError(f"文件 {expected.path} 的修改时间已变化，禁止清理")
+        if expected.path != current.path or expected.change_time_ns is None:
+            return
+        if current.change_time_ns is None:
+            raise StorageQueryError(f"文件 {expected.path} 缺少状态时间身份凭据，需人工复核")
+        if expected.change_time_ns == current.change_time_ns:
+            return
+        if (expected.fileid and expected.modify_time_ns is not None
+                and fsproxy.is_fuse_path(Path(cast(str, current.path)))):
+            logger.warning(f"文件 {expected.path} 的 FUSE 状态时间已变化，大小、类型、文件 ID 和纳秒修改时间一致，继续清理")
+            return
+        raise TransferExecutionConflictError(f"文件 {expected.path} 的状态时间已变化，禁止清理")
+
+    @classmethod
+    def __inherit_shared_local_identity(cls, expected: FileItem, receipt: Optional[FileItem]) -> FileItem:
+        """
+        从本次已完成操作的回执继承共享 inode 的状态时间，保留原路径和内容身份。
+
+        硬链接及跟随源文件的软链接共享 stat 身份。创建链接、改名和删除链接均可能
+        改变同一 inode 的状态时间；只有操作回执的本地文件 ID 相同且内容身份一致时才能继承。
+
+        :param expected: 操作前冻结的文件身份
+        :param receipt: 本次操作后取得的另一条路径回执；为空或不共享 inode 时不更新
+        :return: 继承已知状态时间的身份；大小、类型、文件 ID 和修改时间仍沿用原证据
+        """
+        if (receipt is None or expected.storage != "local" or receipt.storage != "local"
+                or not expected.fileid or expected.fileid != receipt.fileid):
+            return expected
+        cls.__assert_file_identity(expected, receipt)
+        if expected.change_time_ns is not None and receipt.change_time_ns is None:
+            raise StorageQueryError(f"文件 {receipt.path} 缺少状态时间身份凭据，需人工复核")
+        return expected.model_copy(update={"change_time_ns": receipt.change_time_ns})
 
     @staticmethod
     def __restore_move_target_identity(source: FileItem, target: FileItem) -> FileItem:
@@ -961,6 +1047,7 @@ class TransHandler:
     def __observe_safe_delete(
             cls, storage_oper: StorageBase, path: Path, *,
             frozen_item: Optional[FileItem], before_delete: Optional[Callable[[], None]],
+            retained_item: Optional[FileItem] = None,
     ) -> TransferOperationObservation:
         """
         只在删除对象和保留副本的身份都可确认时，允许未执行删除步骤重试。
@@ -969,10 +1056,15 @@ class TransHandler:
         :param path: 待删除文件路径
         :param frozen_item: 可选的待删除文件冻结身份
         :param before_delete: 删除前核验保留副本的回调；可为空
+        :param retained_item: 与待删除项共享 inode 的保留副本；无删除回执时仍须核对原状态时间
         :return: 可恢复删除状态和证据；身份冲突或查询未知时拒绝猜测
         """
         try:
             current = storage_oper.get_item_strict(path)
+            retained = None
+            if retained_item is not None:
+                retained = storage_oper.get_item_strict(Path(cast(str, retained_item.path)))
+                cls.__assert_file_identity(retained_item, retained)
             if current is None:
                 state = TransferOperationObservationState.APPLIED
             else:
@@ -992,7 +1084,10 @@ class TransHandler:
                 evidence=TransferStepResult(payload={"query_error": str(error)}),
             )
         return TransferOperationObservation(
-            state=state, evidence=TransferStepResult(payload={"path": path.as_posix(), "deleted": current is None}),
+            state=state, evidence=TransferStepResult(payload={
+                "path": path.as_posix(), "deleted": current is None,
+                "item": cls.__serialize_step_item(retained),
+            }),
         )
 
     @staticmethod
@@ -1238,6 +1333,9 @@ class TransHandler:
             """
             if require_target_absent and target_oper.get_item_strict(target_file) is not None:
                 raise RuntimeError(f"暂存目标已存在，需确认上次整理结果：{target_file}")
+            if require_target_absent and fileitem.storage == "local":
+                # 创建硬链接也会改变源 inode 的状态时间，必须在副作用前验证冻结源。
+                cls.__assert_file_identity(fileitem, source_oper.get_item_strict(source_path))
             new_item, error = cls.__transfer_command(
                 fileitem=fileitem,
                 target_storage=target_storage,
@@ -1321,6 +1419,57 @@ class TransHandler:
         return new_item, str(materialized.payload.get("message") or "")
 
     @classmethod
+    def __observe_rename(
+            cls, storage_oper: StorageBase, source: Path, target: Path, *,
+            expected_source: Optional[FileItem], before_rename: Optional[Callable[[], None]],
+    ) -> TransferOperationObservation:
+        """
+        严格查询改名两端及关联文件，只接纳身份一致且仅一端存在的结果。
+
+        无回执的改名若同时改变了共享 inode 的状态时间，关联文件无法沿用旧身份，
+        此时保留所有副本并转人工复核，不能用当前查询结果覆盖旧凭据。
+
+        :param storage_oper: 提供严格文件查询的存储适配器
+        :param source: 改名前的路径
+        :param target: 改名后的路径
+        :param expected_source: 冻结的改名对象身份；为空时只校验两端存在性
+        :param before_rename: 关联文件身份的只读核验；为空时不额外核验
+        :return: 已执行、未执行、冲突或未知的观察结论及文件证据
+        """
+        try:
+            source_item = storage_oper.get_item_strict(source)
+            target_item = storage_oper.get_item_strict(target)
+            if (source_item is None) != (target_item is None):
+                if expected_source is not None:
+                    cls.__assert_file_identity(expected_source, source_item or target_item)
+                if before_rename:
+                    before_rename()
+        except TransferExecutionConflictError as error:
+            return TransferOperationObservation(
+                state=TransferOperationObservationState.CONFLICT,
+                evidence=TransferStepResult(payload={"identity_error": str(error)}),
+            )
+        except Exception as error:
+            return TransferOperationObservation(
+                state=TransferOperationObservationState.UNKNOWN,
+                evidence=TransferStepResult(payload={"query_error": str(error)}),
+            )
+        if source_item is None and target_item is not None:
+            state = TransferOperationObservationState.APPLIED
+        elif source_item is not None and target_item is None:
+            state = TransferOperationObservationState.NOT_APPLIED
+        else:
+            state = TransferOperationObservationState.CONFLICT
+        return TransferOperationObservation(
+            state=state,
+            evidence=TransferStepResult(payload={
+                "source_exists": source_item is not None,
+                "target_exists": target_item is not None,
+                "item": cls.__serialize_step_item(target_item),
+            }),
+        )
+
+    @classmethod
     def __rename_with_step(
             cls,
             *,
@@ -1332,6 +1481,7 @@ class TransHandler:
             kind: str,
             expected_source: Optional[FileItem] = None,
             allow_missing_source: bool = False,
+            before_rename: Optional[Callable[[], None]] = None,
     ) -> Optional[FileItem]:
         """
         执行同目录无覆盖重命名，并用两端严格查询恢复中断操作。
@@ -1347,6 +1497,7 @@ class TransHandler:
         :param kind: 步骤操作类别
         :param expected_source: 可选的冻结源身份；提供时在操作前后核对
         :param allow_missing_source: 旧目标已被外部删除时是否将重命名记录为跳过
+        :param before_rename: 操作或无回执恢复时核验关联文件身份的只读回调
         :return: 重命名后的文件项；允许旧目标缺失并跳过时返回 None
         """
         def execute() -> TransferStepResult:
@@ -1361,6 +1512,8 @@ class TransHandler:
                 raise RuntimeError(f"重命名路径状态冲突：{source} -> {target}")
             if expected_source is not None:
                 cls.__assert_file_identity(expected_source, source_item)
+            if before_rename:
+                before_rename()
             if not storage_oper.rename(source_item, target.name):
                 raise RuntimeError(f"【{storage}】{source} 重命名失败")
             target_item = storage_oper.get_item_strict(target)
@@ -1370,45 +1523,15 @@ class TransHandler:
                 cls.__assert_file_identity(expected_source, target_item)
             return TransferStepResult(payload={"item": cls.__serialize_step_item(target_item)})
 
-        def observe() -> TransferOperationObservation:
-            """
-            只接受一端存在的明确结果，两端同时存在或消失均禁止重放。
-            """
-            try:
-                source_item = storage_oper.get_item_strict(source)
-                target_item = storage_oper.get_item_strict(target)
-                if source_item is None and target_item is not None and expected_source is not None:
-                    cls.__assert_file_identity(expected_source, target_item)
-            except TransferExecutionConflictError as error:
-                return TransferOperationObservation(
-                    state=TransferOperationObservationState.CONFLICT,
-                    evidence=TransferStepResult(payload={"identity_error": str(error)}),
-                )
-            except Exception as error:
-                return TransferOperationObservation(
-                    state=TransferOperationObservationState.UNKNOWN,
-                    evidence=TransferStepResult(payload={"query_error": str(error)}),
-                )
-            if source_item is None and target_item is not None:
-                state = TransferOperationObservationState.APPLIED
-            elif source_item is not None and target_item is None:
-                state = TransferOperationObservationState.NOT_APPLIED
-            else:
-                state = TransferOperationObservationState.CONFLICT
-            return TransferOperationObservation(
-                state=state,
-                evidence=TransferStepResult(payload={
-                    "source_exists": source_item is not None,
-                    "target_exists": target_item is not None,
-                    "item": cls.__serialize_step_item(target_item),
-                }),
-            )
-
         renamed = cls.__run_persisted_step(
             step_runner, phase="transfer", kind=kind,
             payload={"storage": storage, "source_path": source.as_posix(),
                      "target_path": target.as_posix()},
-            execute=execute, observe=observe,
+            execute=execute,
+            observe=lambda: cls.__observe_rename(
+                storage_oper, source, target,
+                expected_source=expected_source, before_rename=before_rename,
+            ),
         )
         item = cls.__restore_step_item(renamed)
         if item is None and not (
@@ -1463,17 +1586,36 @@ class TransHandler:
         )
         if new_item is None:
             return None, message
+        staged_item = new_item
+        source_identity = cls.__inherit_shared_local_identity(FileItem(**source_fileitem), new_item)
+
+        def confirm_staged_source() -> None:
+            """
+            备份前核对暂存和本地源，避免把外部改写误记为本次改名的状态时间变化。
+            """
+            cls.__assert_file_identity(staged_item, target_oper.get_item_strict(stage))
+            if source_identity.storage == "local":
+                cls.__assert_file_identity(
+                    source_identity, source_oper.get_item_strict(Path(cast(str, source_identity.path))),
+                )
+
         backup_item = cls.__rename_with_step(
             step_runner=step_runner, storage_oper=target_oper,
             storage=target_storage, source=target_file, target=backup,
             kind="backup_overwrite_target",
             allow_missing_source=True,
+            before_rename=confirm_staged_source,
         )
+        new_item = cls.__inherit_shared_local_identity(new_item, backup_item)
+        source_identity = cls.__inherit_shared_local_identity(source_identity, backup_item)
         new_item = cast(FileItem, cls.__rename_with_step(
             step_runner=step_runner, storage_oper=target_oper,
             storage=target_storage, source=stage, target=target_file,
             kind="promote_overwrite_target", expected_source=new_item,
         ))
+        source_identity = cls.__inherit_shared_local_identity(source_identity, new_item)
+        if backup_item is not None:
+            backup_item = cls.__inherit_shared_local_identity(backup_item, new_item)
 
         def confirm_replacement() -> None:
             """
@@ -1482,12 +1624,20 @@ class TransHandler:
             cls.__assert_file_identity(new_item, target_oper.get_item_strict(target_file))
 
         if transfer_type == "move":
-            cls.__delete_target_with_step(
+            retained_backup = (
+                backup_item if backup_item is not None and source_identity.storage == "local"
+                and backup_item.storage == "local" and source_identity.fileid
+                and source_identity.fileid == backup_item.fileid else None
+            )
+            refreshed_backup = cls.__delete_target_with_step(
                 step_runner=step_runner, target_oper=source_oper,
                 target_storage=str(source_fileitem["storage"]),
                 target_file=Path(source_fileitem["path"]), kind="delete_overwrite_source",
-                before_delete=confirm_replacement, frozen_item=FileItem(**source_fileitem),
+                before_delete=confirm_replacement, frozen_item=source_identity,
+                retained_item=retained_backup,
             )
+            if refreshed_backup is not None:
+                backup_item = refreshed_backup
         cls.__delete_target_with_step(
             step_runner=step_runner, target_oper=target_oper,
             target_storage=target_storage, target_file=backup,
@@ -1617,7 +1767,8 @@ class TransHandler:
             kind: str,
             before_delete: Optional[Callable[[], None]] = None,
             frozen_item: Optional[FileItem] = None,
-    ) -> None:
+            retained_item: Optional[FileItem] = None,
+    ) -> Optional[FileItem]:
         """
         在身份核验通过后删除目标，并记录可恢复的清理证据。
 
@@ -1630,6 +1781,8 @@ class TransHandler:
         :param kind: 清理操作类别
         :param before_delete: 删除前核对保留副本的回调；为空时不作此项核对
         :param frozen_item: 可选的待删除文件身份；提供时必须与当前文件一致
+        :param retained_item: 与待删除项共享本地 inode 的保留副本；删除前校验，删除后记录新身份
+        :return: 删除回执中保留副本的新身份；未指定保留副本时返回 None
         """
         def execute() -> TransferStepResult:
             """
@@ -1640,11 +1793,20 @@ class TransHandler:
             current = target_oper.get_item_strict(target_file)
             if current is not None and frozen_item is not None:
                 cls.__assert_file_identity(frozen_item, current)
+            if retained_item is not None:
+                cls.__assert_file_identity(
+                    retained_item, target_oper.get_item_strict(Path(cast(str, retained_item.path))),
+                )
             if current is not None and not target_oper.delete(current):
                 raise RuntimeError(f"【{target_storage}】{target_file} 删除失败")
-            return TransferStepResult(payload={"deleted": True})
+            payload: dict[str, Any] = {"deleted": True}
+            if retained_item is not None:
+                retained = target_oper.get_item_strict(Path(cast(str, retained_item.path)))
+                cls.__assert_file_identity(current or retained_item, retained)
+                payload["item"] = cls.__serialize_step_item(retained)
+            return TransferStepResult(payload=payload)
 
-        cls.__run_persisted_step(
+        result = cls.__run_persisted_step(
             step_runner,
             phase="cleanup",
             kind=kind,
@@ -1652,8 +1814,10 @@ class TransHandler:
             execute=execute,
             observe=lambda: cls.__observe_safe_delete(
                 target_oper, target_file, frozen_item=frozen_item, before_delete=before_delete,
+                retained_item=retained_item,
             ),
         )
+        return cls.__restore_step_item(result)
 
     def __resolve_leaf_overwrite_with_step(
             self,

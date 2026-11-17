@@ -11,7 +11,7 @@ from requests import Response
 from app.adapters.network.http import RequestUtils
 from app.application.mediaserver import MediaServerIdentityHelper, format_emby_family_item
 from app.foundation.url import UrlUtils
-from app.modules._base.mediaserver import emby_episode_numbers, emby_query_params
+from app.modules._base.mediaserver import emby_episode_numbers, emby_query_params, iter_emby_items
 from app.runtime.cache import MemoryBackend
 from app.runtime.log import logger
 from app.runtime.settings import get_runtime_setting
@@ -248,6 +248,26 @@ class Jellyfin:
             elif library.get("CollectionType") in ("music", "musicvideos"):
                 library_type = MediaType.MUSIC.value
                 link = f"{self._playhost or self._host}web/index.html#!/music.html?topParentId={library.get('Id')}"
+            elif library.get("CollectionType") in ("boxsets", "books", "playlists"):
+                library_type = MediaType.UNKNOWN.value
+                collection_type = library.get("CollectionType")
+                link = (
+                    f"{self._playhost or self._host}web/index.html#!/{collection_type}"
+                    f"?topParentId={library.get('Id')}&collectionType={collection_type}"
+                )
+            elif library.get("CollectionType") in ("homevideos", "livetv"):
+                library_type = MediaType.UNKNOWN.value
+                link = (
+                    f"{self._playhost or self._host}web/index.html#!/{library.get('CollectionType')}"
+                    f"?topParentId={library.get('Id')}"
+                )
+            elif library.get("CollectionType") is None and library.get("Type") == "CollectionFolder":
+                # 混合内容库：Jellyfin 前端没有 library 路由，自身对该类库使用 mixed 路由。
+                library_type = MediaType.UNKNOWN.value
+                link = (
+                    f"{self._playhost or self._host}web/index.html#!/mixed"
+                    f"?topParentId={library.get('Id')}&collectionType=mixed"
+                )
             else:
                 library_type = MediaType.UNKNOWN.value
                 link = f"{self._playhost or self._host}web/index.html#!/library.html?topParentId={library.get('Id')}"
@@ -629,6 +649,75 @@ class Jellyfin:
             return [item for item in (self.__format_item_info(item) for item in items) if item]
         except Exception as e:
             logger.debug(f"查询Jellyfin音乐出错：{e}")
+            return []
+
+    def search_library(
+        self, keyword: str, types: list[str], limit: int
+    ) -> List[_SchemaMediaServerPlayItem]:
+        """
+        通过 Jellyfin Items 搜索接口查询电视剧和可播放音乐单曲。
+
+        :param keyword: 搜索关键词
+        :param types: 需要搜索的业务类型
+        :param limit: 最多返回的条目数量
+        :return: 带封面、年份或音乐副标题的媒体服务器条目
+        """
+        if not self._host or not self._apikey or not self.user or not keyword.strip():
+            return []
+        server_types = []
+        if MediaType.TV.value in types:
+            server_types.append("Series")
+        if MediaType.MUSIC.value in types:
+            server_types.append("Audio")
+        if not server_types:
+            return []
+        url = f"{self._host}Users/{self.user}/Items"
+        params = {
+            "api_key": self._apikey,
+            "IncludeItemTypes": ",".join(server_types),
+            "Fields": "ProductionYear,Album,Artists,AlbumArtist,ImageTags",
+            "Recursive": "true",
+            "searchTerm": keyword.strip(),
+            "StartIndex": 0,
+            "Limit": max(1, min(limit, 50)),
+        }
+        try:
+            response = self._request().get_res(url, params)
+            if not response or response.status_code != 200:
+                return []
+            results: list[_SchemaMediaServerPlayItem] = []
+            for item in (response.json().get("Items") or []):
+                item_id = _optional_text(item.get("Id"))
+                title = _optional_text(item.get("Name"))
+                item_type = item.get("Type")
+                if not item_id or not title or item_type not in server_types:
+                    continue
+                artists = item.get("Artists") or []
+                artist = next((str(value) for value in artists if value), None)
+                album = _optional_text(item.get("Album"))
+                image_url = f"{self._host}Items/{item_id}/Images/Primary?api_key={self._apikey}"
+                image_tag = (item.get("ImageTags") or {}).get("Primary")
+                if image_tag:
+                    image_url += f"&tag={image_tag}"
+                results.append(
+                    _SchemaMediaServerPlayItem(
+                        id=item_id,
+                        item_id=item_id,
+                        title=title,
+                        subtitle=(str(artist or "") + (f" · {album}" if album else "")) or None
+                        if item_type == "Audio"
+                        else str(item.get("ProductionYear")) if item.get("ProductionYear") else None,
+                        year=item.get("ProductionYear"),
+                        type=MediaType.TV.value if item_type == "Series" else MediaType.MUSIC.value,
+                        image=image_url,
+                        server_type="jellyfin",
+                    )
+                )
+                if len(results) >= limit:
+                    break
+            return results
+        except Exception as e:
+            logger.debug(f"搜索 Jellyfin 媒体库出错：{e}")
             return []
 
     def get_tv_episodes(
@@ -1086,8 +1175,8 @@ class Jellyfin:
         Folder 和 BoxSet 都展开为成员，容器本身不作为媒体返回。
 
         :param parent: 媒体库标识，不接受空值
-        :param start_index: 分页起始索引；不限制数量时不发送此参数
-        :param limit: 本层请求数量；None 或 -1 不限制，递归子目录始终不分页
+        :param start_index: 显式分页时本层原始条目的起始索引，全量枚举忽略此值
+        :param limit: 本层请求数量；None 或 -1 时内部分页读全，递归子目录也分页读全
         :param query: 可选查询内容投影，省略时保留原有请求和返回内容
         :yields: 转换后的统一媒体条目
         :raises ValueError: 媒体库标识为空
@@ -1105,23 +1194,15 @@ class Jellyfin:
             "ProviderIds,OriginalTitle,ProductionYear,Path,UserDataPlayCount,"
             "UserDataLastPlayedDate,ParentId",
         }
-        if limit is not None and limit != -1:
-            params.update({"StartIndex": start_index, "Limit": limit})
         try:
             params.update(emby_query_params(query))
-            res = self._request().get_res(url, params)
-            if not res or res.status_code != 200:
-                raise ConnectionError(
-                    f"读取 Jellyfin 媒体库 {parent} 失败，状态码：{res.status_code if res is not None else '无响应'}"
-                )
-            items = res.json().get("Items") or []
-            for item in items:
+            for item in iter_emby_items(self._request(), url, params, start_index=start_index, limit=limit):
                 if not item:
                     continue
-                if "Folder" in item.get("Type") or item.get("Type") == "BoxSet":
-                    for items in self.get_items(item.get("Id"), **MediaServerQueryOptions.as_kwargs(query)):
-                        yield items
-                elif item.get("Type") in ["Movie", "Series", "MusicAlbum"]:
+                item_type = item["Type"]
+                if "Folder" in item_type or item_type == "BoxSet":
+                    yield from self.get_items(item["Id"], **MediaServerQueryOptions.as_kwargs(query))
+                elif item_type in ["Movie", "Series", "MusicAlbum"]:
                     yield self.__format_item_info(item)
         except Exception as e:
             logger.error(f"同步读取 Jellyfin 媒体库 {parent} 出错：{str(e)}")

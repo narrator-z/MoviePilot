@@ -14,11 +14,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
-from lxml import html
 from torrentool.api import Torrent
 from torrentool.exceptions import TorrentoolException
 
 from app.application.configuration import get_chain_runtime_config_snapshot, get_configured_system_config
+from app.application.site.protocol import get_site_protocol_port, is_expiring_download_url
 from app.application.site.query import get_configured_site_query_service
 from app.application.site.throttle import defer_site_request, site_request_config, wait_for_site_request
 from app.domain import torrent as torrent_rules
@@ -36,7 +36,6 @@ from app.schemas.media import resolve_media_identity
 from app.schemas.types import MediaSource, MediaType, SystemConfigKey
 
 _SIZE_UNIT = 1024 * 1024
-
 
 def _is_transient_torrent_status(status: int) -> bool:
     """
@@ -231,34 +230,6 @@ def _cache_valid_torrent_content(
     return folder_name, file_list
 
 
-def _first_download_form(text: str, url: str) -> Optional[Tuple[str, dict[str, Any]]]:
-    """
-    解析下载确认表单，仅向当前下载端点提交有效控件，避免泄露站点凭据。
-    """
-    try:
-        forms = html.fromstring(text).forms
-    except (ValueError, html.etree.ParserError):
-        return None
-    for form in forms:
-        action = form.get("action", "").strip()
-        target = url if action in ("", "?") else urljoin(url, action)
-        origin, destination = urlsplit(url), urlsplit(target)
-        if (destination[:2] != origin[:2] or destination.path != origin.path
-                or form.get("method", "post").lower() != "post"):
-            continue
-        data = dict(form.form_values())
-        # form_values 不包含用户点击的提交控件，首次下载确认可能依赖该字段。
-        submits = form.xpath(
-            './/input[@name and not(@disabled) and translate(@type, "SUBMIT", "submit")="submit"]'
-            ' | .//button[@name and not(@disabled) and (not(@type) or @type="submit")]'
-        )
-        if submits:
-            data[submits[0].get("name")] = submits[0].get("value", "")
-        if data:
-            return target, data
-    return None
-
-
 def _text_filter_failure(torrent: TorrentInfo, params: Dict[str, Any], content: str) -> Optional[Tuple[str, str]]:
     """
     按原有顺序检查包含、排除、质量等正则，并返回业务原因和运行诊断。
@@ -415,7 +386,7 @@ class TorrentHelper:
                 )
             else:
                 response = self._request_torrent_get(
-                    http_port, retry and not torrent_rules.is_expiring_download_url(url), site,
+                    http_port, retry and not is_expiring_download_url(url), site,
                     url=url, cookie=cookie, ua=ua, referer=referer,
                     proxies=proxies, allow_redirects=False,
                 )
@@ -457,7 +428,7 @@ class TorrentHelper:
             return False
         if self.get_fileinfo_from_torrent_content(content)[1]:
             return False
-        return "下载种子文件".encode("utf-8") not in content
+        return not get_site_protocol_port().is_torrent_download_confirmation(content)
 
     def _cached_torrent_content(self, cache_backend: Any, cache_path: Path) -> Optional[tuple[
         Union[str, bytes], str, list[str],
@@ -511,7 +482,7 @@ class TorrentHelper:
         config = get_chain_runtime_config_snapshot()
         http_port = _require_torrent_port()
         site = site_request_config(url, site_id)
-        retry = cache_invalid and not torrent_rules.is_expiring_download_url(url)
+        retry = cache_invalid and not is_expiring_download_url(url)
         try:
             req, url, cookie = self._request_torrent_redirects(
                 http_port, url=url, cookie=cookie, ua=ua, referer=referer,
@@ -532,8 +503,9 @@ class TorrentHelper:
             )
             if file_list:
                 return cache_path, req.content, folder_name, file_list, ""
-            if "下载种子文件".encode("utf-8") in req.content:
-                confirmation = _first_download_form(req.text, url)
+            protocol = get_site_protocol_port()
+            if protocol.is_torrent_download_confirmation(req.content):
+                confirmation = protocol.parse_torrent_download_confirmation(req.text, url)
                 if confirmation is None:
                     logger.warning("触发首次种子下载，但未找到可安全提交的确认表单")
                     if cache_invalid:
@@ -759,12 +731,16 @@ class TorrentHelper:
         return result
 
     @staticmethod
-    def get_torrent_episodes(files: list[str], custom_words: Optional[List[str]] = None) -> list[int]:
+    def get_torrent_episodes(
+            files: list[str], custom_words: Optional[List[str]] = None,
+            episode_selection: Optional[torrent_rules.EpisodeSelection] = None,
+    ) -> list[int]:
         """
         从种子的文件清单中获取所有集数
 
         :param files: 种子文件清单
         :param custom_words: 当前下载来源的临时自定义识别词
+        :param episode_selection: 目标季和已经确认的季集对应关系，冲突文件不贡献集数
         :return: 识别到的全部集数
         """
         episodes: list[int] = []
@@ -776,10 +752,9 @@ class TorrentHelper:
             if not file_path.suffix or file_path.suffix.lower() not in config.video_extensions:
                 continue
             # 只使用文件名识别
-            meta = MetaInfo(file_path.name, custom_words=custom_words)
-            if not meta.begin_episode:
-                continue
-            episodes = list(set(episodes).union(set(meta.episode_list)))
+            episodes = list(set(episodes).union(torrent_rules.torrent_file_episodes(
+                file_path.name, custom_words=custom_words, episode_selection=episode_selection,
+            )))
         return episodes
 
     def is_invalid(self, url: Optional[str]) -> bool:
@@ -798,7 +773,13 @@ class TorrentHelper:
             self._invalid_torrents[url] = True
 
     @staticmethod
-    def match_torrent(mediainfo: MediaInfo, torrent_meta: MetaBase, torrent: TorrentInfo) -> bool:
+    def match_torrent(
+            mediainfo: MediaInfo,
+            torrent_meta: MetaBase,
+            torrent: TorrentInfo,
+            *,
+            season_episodes: Optional[Dict[int, List[int]]] = None,
+    ) -> bool:
         """
         检查种子是否匹配媒体信息
 
@@ -807,6 +788,8 @@ class TorrentHelper:
         :param mediainfo: 需要匹配的媒体信息
         :param torrent_meta: 种子识别信息
         :param torrent: 种子信息
+        :param season_episodes: 本次明确请求的季集号，可扩展默认季内集数上限；空集列表不扩展
+        :return: 资源按显式媒体身份或名称、年份及季集范围匹配时返回 True
         """
         # 显式标题标签与识别结果使用同一主身份比较。
         torrent_identity = resolve_media_identity(media=torrent_meta)
@@ -850,11 +833,12 @@ class TorrentHelper:
                                                                       str(int(mediainfo.year) + 1)]:
                     logger.debug(f'{torrent.site_name} - {torrent.title} 年份不匹配 {mediainfo.year}')
                     return False
-        # 无年份同名剧仅靠标题无法消歧，先用目标剧已知的季集拓扑排除不可能候选。
+        # 先用目标剧已知的季集拓扑和本轮明确范围排除不可能的同名候选。
         if mediainfo.type == MediaType.TV and not TorrentHelper._match_tv_topology(
                 mediainfo=mediainfo,
                 torrent_meta=torrent_meta,
                 torrent=torrent,
+                season_episodes=season_episodes,
         ):
             return False
         if meta_names.intersection(media_titles):
@@ -886,9 +870,19 @@ class TorrentHelper:
             mediainfo: MediaInfo,
             torrent_meta: MetaBase,
             torrent: TorrentInfo,
+            season_episodes: Optional[Dict[int, List[int]]] = None,
     ) -> bool:
         """
-        用目标剧已知的季集范围排除无年份同名候选。
+        用目标剧已知的季集范围排除不可能的同名候选。
+
+        显式请求的集号与订阅缺集计算使用同一编号体系，允许累计集号扩展默认上限；
+        普通搜索沿用媒体源范围，季号检查仍使用媒体源事实。
+
+        :param mediainfo: 已确定身份的目标媒体，保留其原始季集数据
+        :param torrent_meta: 从资源自身标题解析的季集号
+        :param torrent: 资源信息，用于记录拒绝原因
+        :param season_episodes: 本次明确请求的季集号；未指定或空集列表不扩展上限
+        :return: 资源季集范围未超出媒体源与显式请求的已知上限时返回 True
         """
         begin_season = getattr(torrent_meta, "begin_season", None)
         end_season = getattr(torrent_meta, "end_season", None)
@@ -928,7 +922,38 @@ class TorrentHelper:
         if len(torrent_seasons) != 1:
             return True
         season = next(iter(torrent_seasons))
-        target_episodes = (getattr(mediainfo, "seasons", None) or {}).get(season) or []
+        episode_limit = TorrentHelper._tv_episode_limit(
+            mediainfo, season, known_seasons, (season_episodes or {}).get(season),
+        )
+        torrent_episodes = getattr(torrent_meta, "episode_list", None) or []
+        if episode_limit is not None and torrent_episodes and max(torrent_episodes) > episode_limit:
+            logger.debug(
+                f'{torrent.site_name} - {torrent.title} 最大集数 {max(torrent_episodes)} '
+                f'超出目标媒体第 {season} 季集数上限 {episode_limit}'
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _tv_episode_limit(
+            mediainfo: MediaInfo,
+            season: int,
+            known_seasons: set[int],
+            requested_episodes: Optional[List[int]],
+    ) -> Optional[int]:
+        """
+        从媒体源与显式请求计算目标季的已知集号上限，不修改原始媒体信息。
+
+        未知上限时继续交给后续选集处理；已知上限只能被本轮明确请求的集号扩展，
+        不能因缺集列表较短而缩小正常合集的允许范围。
+
+        :param mediainfo: 目标媒体的默认或剧集组季集信息
+        :param season: 当前资源对应的单个季号
+        :param known_seasons: 已知季号，只有单季媒体可使用全剧总集数作为回退
+        :param requested_episodes: 本次明确请求的当前季集号；空列表不扩展上限
+        :return: 可接受的最大集号；媒体源未提供上限时返回 None
+        """
+        target_episodes: List[int] = (getattr(mediainfo, "seasons", None) or {}).get(season) or []
         if not target_episodes and len(known_seasons) == 1:
             try:
                 episode_count = int(getattr(mediainfo, "number_of_episodes", None) or 0)
@@ -936,14 +961,9 @@ class TorrentHelper:
                 episode_count = 0
             if episode_count:
                 target_episodes = list(range(1, episode_count + 1))
-        torrent_episodes = getattr(torrent_meta, "episode_list", None) or []
-        if target_episodes and torrent_episodes and max(torrent_episodes) > max(target_episodes):
-            logger.debug(
-                f'{torrent.site_name} - {torrent.title} 最大集数 {max(torrent_episodes)} '
-                f'超出目标媒体第 {season} 季总集数 {max(target_episodes)}'
-            )
-            return False
-        return True
+        if not target_episodes:
+            return None
+        return max(target_episodes + (requested_episodes or []))
 
     @staticmethod
     def requires_identity_disambiguation(

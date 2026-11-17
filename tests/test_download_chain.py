@@ -954,9 +954,9 @@ class _FakeBatchTorrentHelper:
             results.append(context)
         return results
 
-    def get_torrent_episodes(self, _files, custom_words=None):
+    def get_torrent_episodes(self, _files, custom_words=None, episode_selection=None):
         """
-        记录自定义识别词配置，并返回预设剧集编号的副本。
+        记录自定义识别词配置，接受冻结的季集依据并返回预设剧集编号的副本。
         """
         type(self).received_custom_words = custom_words
         return list(self.episodes)
@@ -966,7 +966,26 @@ def _build_tv_context(episode_list=None):
     """
     构造标题未显式标集数的单季电视剧候选。
     """
-    episodes = episode_list or []
+    meta = SimpleNamespace(
+        season_list=[1],
+        season_episode="S01E01",
+        episode_list=list(episode_list or []),
+        title="Test Show",
+        org_string="Test Show S01 2160p",
+        set_episodes=lambda begin, end: None,
+    )
+
+    def set_episode_list(episodes) -> None:
+        """
+        模拟 MetaBase.set_episode_list，供批量下载写回种子真实集号。
+
+        :param episodes: 解析得到的集号列表
+        """
+        normalized = sorted({int(episode) for episode in episodes if int(episode) > 0})
+        if normalized:
+            meta.episode_list = normalized
+
+    meta.set_episode_list = set_episode_list
     return SimpleNamespace(
         media_info=SimpleNamespace(
             type=MediaType.TV,
@@ -978,15 +997,8 @@ def _build_tv_context(episode_list=None):
             bangumi_id=None,
             anilist_id=None,
         ),
-        meta_info=SimpleNamespace(
-            season_list=[1],
-            season_episode="S01E01",
-            episode_list=episodes,
-            title="Test Show",
-            org_string="Test Show S01 2160p",
-            set_episodes=lambda begin, end: None,
-        ),
-        torrent_info=SimpleNamespace(title="Test Show S01 2160p", site_name="TestSite"),
+        meta_info=meta,
+        torrent_info=SimpleNamespace(title="Test Show S01 2160p", description=None, site_name="TestSite"),
         allowed_episodes=None,
         confirmed_full_coverage=False,
     )

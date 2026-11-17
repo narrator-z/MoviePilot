@@ -21,11 +21,14 @@ import json
 import os
 import selectors
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union, cast
+
+import psutil
 
 from app.runtime.log import logger
 from app.runtime.settings import get_runtime_setting
@@ -86,6 +89,15 @@ class FileSystemProxy:
         """
         return cast(dict[str, Any], self._call("stat", path=str(path)))
 
+    def lstat(self, path: Path) -> Dict[str, Any]:
+        """
+        不跟随最终符号链接读取目录项，供外部整理登记核验。
+
+        :param path: 待核验的原始文件地址
+        :return: 文件身份、纳秒时间、类型和符号链接标志
+        """
+        return cast(dict[str, Any], self._call("lstat", path=str(path)))
+
     def exists(self, path: Path) -> bool:
         """
         判断路径是否存在。
@@ -107,6 +119,26 @@ class FileSystemProxy:
         在可超时的文件系统边界解析符号链接，并允许目标末段尚不存在。
         """
         return Path(self._call("realpath", path=str(path)))
+
+    def is_fuse_path(self, path: Path) -> bool:
+        """
+        按实际路径所属的最深挂载点识别 FUSE 文件系统。
+
+        符号链接解析沿用代理超时边界。挂载表包含容器绑定挂载和虚拟文件系统，
+        不缓存结果，避免重挂载后沿用旧类型。查询失败由调用方保留文件并复核。
+
+        :param path: 待核对的本地文件路径
+        :return: 所属挂载类型为 fuse、fuseblk 或极空间 zfuse（含子类型）时返回 True
+        :raises OSError: 路径解析超时或挂载表读取失败
+        """
+        resolved = self.realpath(path)
+        partition = max(
+            (entry for entry in psutil.disk_partitions(all=True)
+             if resolved.is_relative_to(Path(entry.mountpoint))),
+            key=lambda entry: len(Path(entry.mountpoint).parts),
+            default=None,
+        )
+        return partition is not None and partition.fstype.split(".", 1)[0] in {"fuse", "fuseblk", "zfuse"}
 
     def listdir(self, path: Path) -> List[str]:
         """
@@ -298,6 +330,32 @@ class FileSystemProxy:
         return bool(get_runtime_setting("FS_PROXY_ENABLED", True))
 
     @staticmethod
+    def _direct_stat(op: str, path: str) -> Dict[str, Any]:
+        """
+        读取直连模式下的路径或目录项属性，保留既有 stat 跟随链接的语义。
+
+        :param op: stat 或 lstat
+        :param path: 目标路径
+        :return: 对应操作的固定属性集合
+        """
+        if op == "lstat":
+            info = os.lstat(path)
+            return {
+                "size": info.st_size, "mtime": info.st_mtime,
+                "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns,
+                "dev": info.st_dev, "ino": info.st_ino,
+                "is_dir": stat.S_ISDIR(info.st_mode),
+                "is_file": stat.S_ISREG(info.st_mode),
+                "is_symlink": stat.S_ISLNK(info.st_mode),
+            }
+        info = os.stat(path)
+        return {
+            "size": info.st_size, "mtime": info.st_mtime,
+            "dev": info.st_dev, "ino": info.st_ino,
+            "is_dir": os.path.isdir(path), "is_file": os.path.isfile(path),
+        }
+
+    @staticmethod
     def _direct(op: str, payload: Dict[str, Any]) -> Any:
         """
         不经代理直接执行操作，供代理关闭时使用。
@@ -306,17 +364,8 @@ class FileSystemProxy:
         :param payload: 操作参数
         :return: 操作结果
         """
-        if op == "stat":
-            path = payload["path"]
-            info = os.stat(path)
-            return {
-                "size": info.st_size,
-                "mtime": info.st_mtime,
-                "dev": info.st_dev,
-                "ino": info.st_ino,
-                "is_dir": os.path.isdir(path),
-                "is_file": os.path.isfile(path),
-            }
+        if op in ("stat", "lstat"):
+            return FileSystemProxy._direct_stat(op, payload["path"])
         if op == "realpath":
             return str(Path(payload["path"]).resolve())
         if op == "exists":

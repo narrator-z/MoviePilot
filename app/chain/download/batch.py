@@ -10,6 +10,7 @@ from app.application.download.admission import SubscriptionDownloadGovernance
 from app.application.torrent.download import TorrentHelper
 from app.chain.download.contract import _DownloadOwnerBase
 from app.domain import episode as episode_rules
+from app.domain import torrent as torrent_rules
 from app.domain.context import (
     Context,
 )
@@ -238,6 +239,7 @@ class _BatchDownloadRun:
             return None
         episodes = _new_torrent_helper().get_torrent_episodes(
             files, custom_words=self.custom_words,
+            episode_selection=torrent_rules.episode_selection_for_context(context),
         )
         if partial:
             logger.info(f"{torrent.site_name} - {meta.org_string} 解析种子文件集数：{episodes}")
@@ -300,9 +302,15 @@ class _BatchDownloadRun:
 
     def _inspect_whole_season(
             self, context: Context, media_key: str, season: int,
-    ) -> Optional[Tuple[bytes, bool]]:
+    ) -> Optional[Tuple[bytes, bool, Optional[Set[int]]]]:
         """
         整季不合格也保留识别集数，供后续完整集阶段继续判断该候选。
+
+        必须按种子内真实文件写入离散集号；若用起止集连续填洞，断档中间集会被
+        误记为已覆盖，后续阶段不再补下。
+
+        :return: 种子内容、是否完整覆盖目标范围及提交选集；种子含目标范围外的集时
+            只选目标集，否则选集为 None 并沿用整包提交
         """
         parsed = self._read_torrent(context)
         if parsed is None:
@@ -312,7 +320,7 @@ class _BatchDownloadRun:
             return None
         meta = context.meta_info
         assert meta is not None
-        meta.set_episodes(begin=min(episodes), end=max(episodes))
+        meta.set_episode_list(list(episodes))
         info = _selection.get_no_exist_media(self.no_exists, media_key, season)
         required = _selection.get_required_episodes(self.no_exists, media_key, season) \
             if _selection.requires_complete_coverage(info) else set()
@@ -331,7 +339,12 @@ class _BatchDownloadRun:
         if not required and total and len(episodes) < total:
             logger.info(f"{meta.org_string} 解析文件集数发现不是完整合集，先放弃这个种子")
             return None
-        return content, complete
+        # 完整覆盖范围来自订阅起止集；整包超出范围时只选目标集，不下载订阅外的剧集。
+        selected = required if complete and required != set(episodes) else None
+        if selected:
+            logger.info(f"{meta.org_string} 种子包含目标范围外的剧集，仅选择："
+                        f"{episode_rules.format_ranges(sorted(selected))}")
+        return content, complete, selected
 
     def _submit_whole_season(
             self, context: Context, media_key: str, seasons: List[int],
@@ -345,10 +358,10 @@ class _BatchDownloadRun:
             inspected = self._inspect_whole_season(context, media_key, seasons[0])
             if inspected is None:
                 return False
-            content, complete = inspected
+            content, complete, selected = inspected
             logger.info(f"开始下载 {context.torrent_info.title} ...")
             download_id = self.owner.download_single(
-                context=context, torrent_content=content, **self.options,
+                context=context, torrent_content=content, episodes=selected, **self.options,
             )
         else:
             logger.info(f"开始下载 {context.torrent_info.title} ...")
@@ -391,7 +404,7 @@ class _BatchDownloadRun:
             meta = context.meta_info
             assert meta is not None
             logger.info(f"开始下载 {meta.title} ...")
-            if not self.owner.download_single(context, **self.options):
+            if not self.owner.download_single(context, episodes=episodes, **self.options):
                 self._remember_failure(context)
                 continue
             if _selection.requires_complete_coverage(info):
@@ -408,7 +421,9 @@ class _BatchDownloadRun:
             needed: List[int], info: NotExistMediaInfo,
     ) -> Set[int]:
         """
-        区分完整覆盖与普通补集，返回符合本批集数限制的候选集数。
+        区分完整覆盖与普通补集，返回符合本批集数限制的待提交集数。
+
+        完整覆盖只返回目标范围内的集，标注集数超出订阅范围时不扩大下载。
         """
         media, meta = context.media_info, context.meta_info
         if media is None or meta is None or media.type != MediaType.TV:
@@ -429,9 +444,8 @@ class _BatchDownloadRun:
             required = _selection.get_required_episodes(self.no_exists, media_key, season)
             matches = bool(required) and required.issubset(episodes) \
                 and _selection.allows_full_pack(episodes, context)
-        else:
-            matches = episodes.issubset(effective)
-        return episodes if matches else set()
+            return required if matches else set()
+        return episodes if episodes.issubset(effective) else set()
 
     def _download_partial_packs(self) -> None:
         """
@@ -512,5 +526,6 @@ class _BatchDownloadRun:
         self.downloaded.append(context)
         meta = context.meta_info
         assert meta is not None
-        meta.set_episodes(begin=min(episodes), end=max(episodes))
+        # 保留种子内真实文件集号，避免断档被连续区间吞掉。
+        meta.set_episode_list(list(episodes))
         return selected

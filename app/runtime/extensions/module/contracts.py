@@ -221,6 +221,15 @@ _METHOD_CONTRACTS = {
         aggregation=ModuleResultAggregation.FIRST_NON_EMPTY,
         required_parameters=("server", "item_id"),
     ),
+    "mediaserver_stream_url": ModuleMethodContract(
+        family="media-server",
+        input_contract="MediaServerStreamRequest",
+        result_contract="str | None",
+        result_shape=ModuleResultShape.STRING,
+        aggregation=ModuleResultAggregation.FIRST_NON_EMPTY,
+        required_parameters=("server", "item_id", "item_type"),
+        public_to_plugins=False,
+    ),
     "mediaserver_tv_episodes": ModuleMethodContract(
         family="media-server",
         input_contract="MediaServerEpisodesRequest",
@@ -235,7 +244,7 @@ _METHOD_CONTRACTS = {
         result_contract="ExistMediaInfo | None",
         aggregation=ModuleResultAggregation.FIRST_NON_EMPTY,
         required_parameters=("mediainfo", "itemid", "server"),
-        optional_parameters=("query",),
+        optional_parameters=("query", "raise_on_query_failure"),
     ),
     "media_statistic": ModuleMethodContract(
         family="media-server",

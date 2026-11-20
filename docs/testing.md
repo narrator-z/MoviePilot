@@ -111,6 +111,11 @@ AppPush 的所有用户范围由 `tests/test_notification_routing_parity.py` 验
 - 用例**不得**连接或写入真实数据库、不得读写真实 `config/`。需要的库状态在用例内构造。
 - 用例**不得**依赖某个本地才有的动态模块副本；缺失的外部模块由 conftest 兜底或用例自行 mock。
 
+`tests/test_site_auth.py` 验证用户认证参数规范化、切换站点后过滤其他站点前缀、仅持久化成功
+配置，以及启动认证的环境变量优先级。`tests/test_site_chain_ports.py` 覆盖错误 HTTP 响应、
+Cloudflare、空浏览器页面和通用检测的范围提示；这些检测不会验证用户认证页的 UID 或 Passkey。
+认证扩展的传输诊断与各平台 ABI 由 MoviePilot-Build 的离线回放和编译资源验证负责。
+
 ## 外部依赖：一律 mock，零真实网络
 
 季集选集由 `tests/test_episode_file_selection.py`、`tests/test_download_batch_phases.py` 和
@@ -158,6 +163,28 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 
 > 注意：识别这类端到端流程往往不止一个外部出口。例如 TMDB 识别除了目录请求，链路层还会向 MP 服务器上报/查询「共享识别 API」——这类旁路出口必须一并打桩。用下文的 socket 探针确认确实零出站。
 
+### 媒体库查询失败与订阅缺集
+
+`tests/test_mediaserver_existence_failure.py` 连接真实 Emby/Jellyfin 客户端、模块调度器、
+缺集计算和订阅进度入口，仅替换 HTTP 与持久化出口。测试覆盖标题搜索、缓存回查、详情及
+分集接口的无响应、HTTP 错误和无效条目结构，以及空库、服务恢复和多服务器部分失败。
+失败时不写缺集进度、不完成订阅；媒体库恢复后按实际已有季集重新计算，保留订阅下载事实。
+`tests/test_trimemedia_coverage.py` 验证飞牛严格电视剧查询首次失败后等待 0.5 秒重试一次，
+重试仍失败时继续抛出查询异常；普通未找到不触发重试。上述离线测试不代表真实媒体服务器
+或报告者 Docker 实例验收。
+
+### 详情页按需查找 TMDB 链接
+
+`tests/test_media_mapping_lookup.py` 注入假匹配、可控时钟和独立 `TaskRegistry`，验证共享关系
+优先于本地记录（没找到后被订阅补齐、本地结果被 Server 修正）、10 分钟记录与 LRU 淘汰、
+同条目合并、第 5 个不同条目被拒绝、请求断开后查找继续并占用名额、任务首次调度前被关停取消时
+仍清理在途项、超时和异常不写记录，以及结论日志。Chain 方法用例覆盖豆瓣电影、豆瓣剧集、
+Bangumi、AniList 与插件来源，确认返回值与上报关系一致；季匹配回退到整剧名称且 TMDB 详情未列出
+所附季号时既不返回也不上报，订阅转换结果保持不变（`tests/test_media_mapping.py` 同步覆盖上报路径）；
+接口用例覆盖参数校验和 429/502/503 翻译。
+新增 `app/application/server/lookup.py` 进入启动导入闭包，三个启动入口的模块数快照各增加 1；
+仅更新该结构事实，原冷导入耗时记录与 3000ms 上限保留。上述用例不访问 TMDB、豆瓣或 Server。
+
 ### 飞书长会话流式卡片回归
 
 `tests/test_feishu.py` 在 CardKit API 边界模拟 `300309` / `200850`：重开同一卡片的
@@ -174,6 +201,11 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 恢复回归还需验证源文件被替换、新目标变成半文件、备份被替换以及历史清理的符号链接路径，
 不能仅凭路径存在就删除源文件或旧备份。
 远端状态不明保持人工复核，不能通过删除旧文件后盲目重试证明成功。
+
+`tests/test_transfer_remote_move_recovery.py` 使用真实临时文件和独立 SQLite 步骤账本回放
+CloudDrive 的移动后改名失败，验证重新取得租约后仅补改名、移动及改名后的进程中断恢复、
+旧最终路径回执兼容、并发替换与查询故障隔离，以及补改名意图不能脱离冻结计划和移动回执。
+这些离线测试不代表真实 CloudDrive gRPC 通道或报告者的百文件并发场景已验收。
 
 下载源移动后留下的悬空软链接应由本地存储先暂存私有链接再原子替换，覆盖绝对与相对链接、
 四种覆盖策略、同步与持久执行、暂存失败和提升前后中断恢复。

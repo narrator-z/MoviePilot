@@ -7,6 +7,7 @@ import socket
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import Mock
 
 import pytest
@@ -19,7 +20,57 @@ from app.adapters import mediastream
 from app.api.endpoints import mediaserver
 from app.chain.mediaserver import MediaServerChain
 from app.schemas.mediaserver import MediaServerItem, MediaServerPlayItem, MediaServerSeasonInfo
+from app.schemas.tmdb import TmdbEpisode
 from app.schemas.token import TokenPayload
+from app.schemas.types import MediaSource
+
+
+def test_episode_metadata_keeps_server_identity_and_season(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    验证集元数据仅沿用指定服务器系列的明确身份，特别篇不会被改成第一季。
+    """
+    chain = Mock()
+    chain.find_item.return_value = (
+        "Emby-客厅", MediaServerItem(item_id="series-id", media_source=MediaSource.TMDB, media_id="157336")
+    )
+    tmdb = Mock()
+    tmdb.tmdb_episodes.return_value = [
+        TmdbEpisode(episode_number=3, season_number=0, name="特别篇", still_path="/special.jpg", runtime=45)
+    ]
+    monkeypatch.setattr(mediaserver, "MediaServerChain", lambda: chain)
+    monkeypatch.setattr(mediaserver, "TmdbChain", lambda: tmdb)
+    app = FastAPI()
+    app.include_router(mediaserver.router, prefix="/api/v1/mediaserver")
+    app.dependency_overrides[mediaserver.verify_token] = lambda: TokenPayload(sub=1)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/mediaserver/episode-metadata",
+            params={"itemid": "series-id", "server": "Emby-客厅", "season": 0},
+        )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data[0]["name"] == "特别篇"
+    assert data[0]["still_path"] == "/special.jpg"
+    assert chain.find_item.call_args.kwargs["server"] == "Emby-客厅"
+    tmdb.tmdb_episodes.assert_called_once_with(tmdbid=157336, season=0)
+
+
+@pytest.mark.parametrize("source,media_id", [(None, None), (MediaSource.Douban, "123")])
+def test_episode_metadata_does_not_guess_a_different_identity(
+    monkeypatch: pytest.MonkeyPatch, source: Optional[MediaSource], media_id: Optional[str]
+) -> None:
+    """
+    没有明确 TMDB 身份时不按名称识别另一部作品，单集播放仍使用独立的原映射。
+    """
+    chain = Mock()
+    chain.find_item.return_value = (
+        "Emby", MediaServerItem(title="同名作品", media_source=source, media_id=media_id)
+    )
+    tmdb = Mock()
+    monkeypatch.setattr(mediaserver, "MediaServerChain", lambda: chain)
+    monkeypatch.setattr(mediaserver, "TmdbChain", tmdb)
+    assert mediaserver.episode_metadata("series-id", season=1).data == []
+    tmdb.assert_not_called()
 
 
 def test_local_stream_response_returns_requested_range(tmp_path: Path) -> None:
@@ -64,8 +115,10 @@ def test_stream_routes_connect_manifest_subtitles_and_range(monkeypatch: pytest.
     video = tmp_path / "Episode.mkv"
     video.write_bytes(b"0123456789")
     (tmp_path / "Episode.zh.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n测试\n", encoding="utf-8")
-    def find_stream_item(item_id: str) -> tuple[str, MediaServerItem, Path]:
-        """要求流和字幕路由保留完整的 Plex 条目标识。"""
+    def find_stream_item(item_id: str, server: Optional[str] = None) -> tuple[str, MediaServerItem, Path]:
+        """
+        要求流和字幕路由保留完整的 Plex 条目标识。
+        """
         assert item_id == "/library/metadata/123"
         return (
             "Emby",
@@ -80,6 +133,7 @@ def test_stream_routes_connect_manifest_subtitles_and_range(monkeypatch: pytest.
         )
 
     monkeypatch.setattr(mediaserver, "_find_stream_item", find_stream_item)
+    monkeypatch.setattr(mediaserver.MediaServerChain, "get_stream_url", lambda *_args: None)
     app = FastAPI()
     app.include_router(mediaserver.router, prefix="/api/v1/mediaserver")
     app.dependency_overrides[mediaserver.verify_token] = lambda: TokenPayload(sub=1)
@@ -97,7 +151,7 @@ def test_stream_routes_connect_manifest_subtitles_and_range(monkeypatch: pytest.
     assert manifest["item_id"] == "/library/metadata/123"
     assert str(video) not in manifest_response.text
     assert manifest["content_url"] == (
-        "http://testserver/api/v1/mediaserver/stream?itemid=%2Flibrary%2Fmetadata%2F123"
+        "http://testserver/api/v1/mediaserver/stream?itemid=%2Flibrary%2Fmetadata%2F123&server=Emby"
     )
     assert manifest["subtitles"][0]["subtitle_id"] == "Episode.zh.srt"
     assert media_response.status_code == 206
@@ -225,11 +279,14 @@ def test_audio_file_ticket_mounts_matching_lrc_and_range_stream(
 def test_music_stream_info_matches_a_library_track_by_recording_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """验证音乐详情的来源 ID 被映射为媒体服务器单曲 ID 后才返回流地址。"""
+    """
+    验证音乐详情的来源 ID 被映射为媒体服务器单曲 ID 后才返回流地址。
+    """
     audio = tmp_path / "晴天.flac"
     audio.write_bytes(b"audio-bytes")
     (tmp_path / "晴天.lrc").write_text("[00:00.00]晴天\n", encoding="utf-8")
     chain = mediaserver.MediaServerChain
+    monkeypatch.setattr(chain, "get_stream_url", lambda *_args: None)
     media_exists_calls: list[object] = []
     monkeypatch.setattr(
         chain,

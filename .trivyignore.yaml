@@ -11,14 +11,14 @@ vulnerabilities:
       - Python
     purls:
       - pkg:pypi/msgpack@1.1.2
-    expired_at: 2026-11-20
+    expired_at: 2027-01-15
     statement: The finding belongs to the base image's system pip and is not imported by MoviePilot.
   - id: CVE-2025-47273
     paths:
       - Python
     purls:
       - pkg:pypi/setuptools@70.3.0
-    expired_at: 2026-11-20
+    expired_at: 2027-01-15
     statement: The finding belongs to the base image's system pip and is not used for dependency installation.
   - id: CVE-2026-33818
     paths:
@@ -396,3 +396,53 @@ vulnerabilities:
       - pkg:pypi/brotli@1.2.0
     expired_at: 2027-01-15
     statement: brotli 1.2.0 is pulled in via the base image system pip and is not imported by MoviePilot; the fix ships in 1.2.1. The finding is an out-of-bounds write in the Google Brotli decoder. MoviePilot does not decode attacker-supplied Brotli streams, so the impact is not reachable. Suppressed pending the next base-image refresh. Reassess when this exception expires.
+
+  # v3.0.85 supply-chain drift (2026-11): Debian 13.7 base-image nginx/nginx-common, newly disclosed November CVEs.
+  - id: CVE-2026-113425
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/nginx
+      - pkg:deb/debian/nginx-common
+    expired_at: 2027-01-15
+    statement: nginx/nginx-common (CRITICAL) are pulled in via the pinned Debian 13.7 base image; the fixed build is not yet adopted by the base image tag we pin. Suppressed pending the next base-image refresh, consistent with the other Debian base-image package exemptions in this file. Reassess when this exception expires.
+  - id: CVE-2026-121810
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/nginx
+      - pkg:deb/debian/nginx-common
+    expired_at: 2027-01-15
+    statement: nginx/nginx-common (CRITICAL) are pulled in via the pinned Debian 13.7 base image; the fixed build is not yet adopted by the base image tag we pin. Suppressed pending the next base-image refresh, consistent with the other Debian base-image package exemptions in this file. Reassess when this exception expires.
+  - id: CVE-2026-123007
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/nginx
+      - pkg:deb/debian/nginx-common
+    expired_at: 2027-01-15
+    statement: nginx/nginx-common (CRITICAL) are pulled in via the pinned Debian 13.7 base image; the fixed build is not yet adopted by the base image tag we pin. Suppressed pending the next base-image refresh, consistent with the other Debian base-image package exemptions in this file. Reassess when this exception expires.
+  - id: CVE-2026-123633
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/nginx
+      - pkg:deb/debian/nginx-common
+    expired_at: 2027-01-15
+    statement: nginx/nginx-common (CRITICAL) are pulled in via the pinned Debian 13.7 base image; the fixed build is not yet adopted by the base image tag we pin. Suppressed pending the next base-image refresh, consistent with the other Debian base-image package exemptions in this file. Reassess when this exception expires.
+  - id: CVE-2026-118899
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/nginx
+      - pkg:deb/debian/nginx-common
+    expired_at: 2027-01-15
+    statement: nginx/nginx-common (HIGH) are pulled in via the pinned Debian 13.7 base image; the fixed build is not yet adopted by the base image tag we pin. Suppressed pending the next base-image refresh, consistent with the other Debian base-image package exemptions in this file. Reassess when this exception expires.
+  - id: CVE-2026-123634
+    paths:
+      - "*"
+    purls:
+      - pkg:deb/debian/nginx
+      - pkg:deb/debian/nginx-common
+    expired_at: 2027-01-15
+    statement: nginx/nginx-common (HIGH) are pulled in via the pinned Debian 13.7 base image; the fixed build is not yet adopted by the base image tag we pin. Suppressed pending the next base-image refresh, consistent with the other Debian base-image package exemptions in this file. Reassess when this exception expires.

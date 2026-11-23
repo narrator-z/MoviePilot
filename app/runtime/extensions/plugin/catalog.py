@@ -344,6 +344,7 @@ class PluginCatalogFacade:
             force=force,
             preserve_sources=True,
             require_available=repo_url is None,
+            single_source=repo_url is not None,
         )
         return result
 
